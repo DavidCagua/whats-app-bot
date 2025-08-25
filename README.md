@@ -1,6 +1,19 @@
 # Build AI WhatsApp Bots with Pure Python
 
-This guide will walk you through the process of creating a WhatsApp bot using the Meta (formerly Facebook) Cloud API with pure Python, and Flask particular. We'll also integrate webhook events to receive messages in real-time and use OpenAI to generate AI responses. For more information on the structure of the Flask application, you can refer to [this documentation](https://github.com/daveebbelaar/python-whatsapp-bot/tree/main/app).
+This guide will walk you through the process of creating a WhatsApp bot using the Meta (formerly Facebook) Cloud API with pure Python, and Flask particular. We'll also integrate webhook events to receive messages in real-time and use OpenAI to generate AI responses. The bot now includes **Google Calendar integration** using LangChain tool calling capabilities, allowing users to manage their calendar events directly through WhatsApp messages.
+
+For more information on the structure of the Flask application, you can refer to [this documentation](https://github.com/daveebbelaar/python-whatsapp-bot/tree/main/app).
+
+## 🆕 New: Google Calendar Integration
+
+The WhatsApp bot now supports Google Calendar management through natural language commands:
+
+- **List Events**: "Show me my upcoming events"
+- **Create Events**: "Create a meeting tomorrow at 2 PM"
+- **Update Events**: "Change my meeting to 3 PM"
+- **Delete Events**: "Cancel my meeting tomorrow"
+
+See [CALENDAR_INTEGRATION.md](CALENDAR_INTEGRATION.md) for detailed setup instructions.
 
 ## Prerequisites
 

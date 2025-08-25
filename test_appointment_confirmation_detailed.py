@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""
+Test script to verify detailed appointment confirmation.
+"""
+
+import os
+import sys
+import logging
+from dotenv import load_dotenv
+
+# Add the app directory to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), 'app'))
+
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
+def test_detailed_confirmation():
+    """Test the detailed appointment confirmation flow."""
+    try:
+        from services.langchain_service import LangChainService
+
+        print("🧪 Testing Detailed Appointment Confirmation...")
+        print("=" * 50)
+        print()
+
+        # Create the service
+        langchain_service = LangChainService()
+
+        # Simulate the exact conversation from the user
+        test_conversation = [
+            "en la manana",
+            "a las 11 parce"
+        ]
+
+        print("📱 Simulando conversación de confirmación detallada...")
+        print()
+
+        for i, message in enumerate(test_conversation, 1):
+            print(f"👤 Cliente: {message}")
+            response = langchain_service.generate_response(message, "test_detailed_001", "David")
+            print(f"🤖 Bot: {response}")
+            print()
+
+        # Check if the final response contains proper confirmation elements
+        final_response = langchain_service.generate_response("perfecto", "test_detailed_001", "David")
+
+        print("🔍 Verificando elementos de confirmación detallada...")
+        print(f"Respuesta final: {final_response}")
+        print()
+
+        # Check for confirmation elements
+        has_checkmark = '✅' in final_response
+        has_date = any(word in final_response.lower() for word in ['agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre', 'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio'])
+        has_time = any(word in final_response.lower() for word in ['am', 'pm', 'a.m.', 'p.m.'])
+        has_service = any(word in final_response.lower() for word in ['corte', 'barba', 'combo', 'servicio'])
+        has_name = 'david' in final_response.lower()
+        has_confirmation = 'agendada' in final_response.lower() or 'confirmada' in final_response.lower()
+        has_enthusiasm = any(word in final_response.lower() for word in ['renovado', 'gracias', 'elegirnos'])
+
+        print("📋 Elementos de confirmación encontrados:")
+        print(f"   ✅ Checkmark: {has_checkmark}")
+        print(f"   📅 Fecha: {has_date}")
+        print(f"   🕐 Hora: {has_time}")
+        print(f"   💇 Servicio: {has_service}")
+        print(f"   👤 Nombre: {has_name}")
+        print(f"   📝 Confirmación: {has_confirmation}")
+        print(f"   🎉 Entusiasmo: {has_enthusiasm}")
+
+        required_elements = [has_checkmark, has_date, has_time, has_confirmation]
+        optional_elements = [has_service, has_name, has_enthusiasm]
+
+        if all(required_elements):
+            print("✅ Confirmación detallada correcta!")
+            return True
+        else:
+            print("❌ Faltan elementos requeridos en la confirmación")
+            return False
+
+    except Exception as e:
+        print(f"❌ Test failed: {e}")
+        return False
+
+if __name__ == '__main__':
+    print("🚀 Starting Detailed Confirmation Test")
+    print("=" * 50)
+    print()
+
+    success = test_detailed_confirmation()
+
+    if success:
+        print("🎉 Detailed confirmation test completed successfully!")
+    else:
+        print("❌ Test failed.")

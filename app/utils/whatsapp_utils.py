@@ -3,7 +3,7 @@ from flask import current_app, jsonify
 import json
 import requests
 
-# from app.services.openai_service import generate_response
+from app.services.langchain_service import langchain_service
 import re
 
 
@@ -14,50 +14,94 @@ def log_http_response(response):
 
 
 def get_text_message_input(recipient, text):
+    # Ensure recipient is a valid phone number format
+    # Remove any non-digit characters except + at the beginning
+    cleaned_recipient = re.sub(r'[^\d+]', '', recipient)
+
+    # If it doesn't start with +, add it
+    if not cleaned_recipient.startswith('+'):
+        cleaned_recipient = '+' + cleaned_recipient
+
+    logging.info(f"Original recipient: {recipient}")
+    logging.info(f"Cleaned recipient: {cleaned_recipient}")
+
     return json.dumps(
         {
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
-            "to": recipient,
+            "to": cleaned_recipient,
             "type": "text",
             "text": {"preview_url": False, "body": text},
         }
     )
 
 
-def generate_response(response):
-    # Return text in uppercase
-    return response.upper()
+
 
 
 def send_message(data):
+    # Get configuration from environment variables if not in Flask context
+    try:
+        access_token = current_app.config['ACCESS_TOKEN']
+        version = current_app.config['VERSION']
+        phone_number_id = current_app.config['PHONE_NUMBER_ID']
+    except RuntimeError:
+        # Not in Flask context, use environment variables directly
+        import os
+        access_token = os.getenv('ACCESS_TOKEN')
+        version = os.getenv('VERSION')
+        phone_number_id = os.getenv('PHONE_NUMBER_ID')
+
+        if not all([access_token, version, phone_number_id]):
+            logging.error("Missing required environment variables for WhatsApp API")
+            return None
+
     headers = {
         "Content-type": "application/json",
-        "Authorization": f"Bearer {current_app.config['ACCESS_TOKEN']}",
+        "Authorization": f"Bearer {access_token}",
     }
 
-    url = f"https://graph.facebook.com/{current_app.config['VERSION']}/{current_app.config['PHONE_NUMBER_ID']}/messages"
+    url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
 
     try:
+        logging.info(f"Sending message to WhatsApp API: {url}")
+        logging.info(f"Headers: {headers}")
+        logging.info(f"Data: {data}")
+
         response = requests.post(
             url, data=data, headers=headers, timeout=10
         )  # 10 seconds timeout as an example
+
+        logging.info(f"Response status: {response.status_code}")
+        logging.info(f"Response headers: {response.headers}")
+        logging.info(f"Response body: {response.text}")
+
         response.raise_for_status()  # Raises an HTTPError if the HTTP request returned an unsuccessful status code
-    except requests.Timeout:
-        logging.error("Timeout occurred while sending message")
-        return jsonify({"status": "error", "message": "Request timed out"}), 408
-    except (
-        requests.RequestException
-    ) as e:  # This will catch any general request exception
-        logging.error(f"Request failed due to: {e}")
-        return jsonify({"status": "error", "message": "Failed to send message"}), 500
-    else:
+
         # Process the response as normal
         log_http_response(response)
         return response
 
+    except requests.Timeout:
+        logging.error("Timeout occurred while sending message")
+        return None
+    except requests.HTTPError as e:
+        logging.error(f"HTTP Error occurred: {e}")
+        logging.error(f"Response status: {e.response.status_code if e.response else 'No response'}")
+        logging.error(f"Response body: {e.response.text if e.response else 'No response body'}")
+        return None
+    except requests.RequestException as e:  # This will catch any general request exception
+        logging.error(f"Request failed due to: {e}")
+        return None
+
 
 def process_text_for_whatsapp(text):
+    logging.info(f"Processing text for WhatsApp: '{text}'")
+
+    if not text:
+        logging.warning("Empty text received, using fallback message")
+        return "Gracias por tu mensaje. Te responderé pronto."
+
     # Remove brackets
     pattern = r"\【.*?\】"
     # Substitute the pattern with an empty string
@@ -72,25 +116,61 @@ def process_text_for_whatsapp(text):
     # Substitute occurrences of the pattern with the replacement
     whatsapp_style_text = re.sub(pattern, replacement, text)
 
+    # WhatsApp has a 4096 character limit for text messages
+    if len(whatsapp_style_text) > 4096:
+        whatsapp_style_text = whatsapp_style_text[:4093] + "..."
+
+    # Remove any null characters or other problematic characters
+    whatsapp_style_text = whatsapp_style_text.replace('\x00', '').replace('\u0000', '')
+
+    # Ensure the text is not empty
+    if not whatsapp_style_text.strip():
+        logging.warning("Text became empty after processing, using fallback message")
+        whatsapp_style_text = "Gracias por tu mensaje. Te responderé pronto."
+
+    logging.info(f"Final processed text: '{whatsapp_style_text}'")
     return whatsapp_style_text
 
 
 def process_whatsapp_message(body):
-    wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
-    name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
+    try:
+        wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
+        name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
 
-    message = body["entry"][0]["changes"][0]["value"]["messages"][0]
-    message_body = message["text"]["body"]
+        message = body["entry"][0]["changes"][0]["value"]["messages"][0]
+        message_body = message["text"]["body"]
 
-    # TODO: implement custom function here
-    response = generate_response(message_body)
+        logging.info(f"Processing message from {name} ({wa_id}): {message_body}")
 
-    # OpenAI Integration
-    # response = generate_response(message_body, wa_id, name)
-    # response = process_text_for_whatsapp(response)
+        # LangChain Integration with Calendar Tools
+        try:
+            response = langchain_service.generate_response(message_body, wa_id, name)
+            logging.info(f"Raw LangChain response: '{response}'")
+            logging.info(f"Response length: {len(response) if response else 0}")
+            logging.info(f"Response is empty: {not response or not response.strip()}")
 
-    data = get_text_message_input(current_app.config["RECIPIENT_WAID"], response)
-    send_message(data)
+            if not response:
+                logging.error("LangChain service returned None or empty response")
+                response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
+
+        except Exception as e:
+            logging.error(f"Error in LangChain service: {e}")
+            response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
+
+        processed_response = process_text_for_whatsapp(response)
+        logging.info(f"Processed response: '{processed_response}'")
+
+        data = get_text_message_input(wa_id, processed_response)
+        result = send_message(data)
+
+        if result is None:
+            logging.error("Failed to send message to WhatsApp API")
+        else:
+            logging.info("Message sent successfully to WhatsApp API")
+
+    except Exception as e:
+        logging.error(f"Error processing WhatsApp message: {e}")
+        logging.error(f"Message body: {body}")
 
 
 def is_valid_whatsapp_message(body):

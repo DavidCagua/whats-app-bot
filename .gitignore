@@ -89,3 +89,7 @@ target/
 
 # Exlcude the database file
 .db
+
+# Google OAuth credentials
+token.json
+client_secret_*.json
