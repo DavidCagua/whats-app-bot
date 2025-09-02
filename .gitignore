@@ -93,3 +93,5 @@ target/
 # Google OAuth credentials
 token.json
 client_secret_*.json
+
+.venv/
