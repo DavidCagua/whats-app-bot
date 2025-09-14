@@ -1,6 +1,5 @@
 import os
 import logging
-import shelve
 import json
 from typing import List, Dict
 from datetime import datetime, date
@@ -10,6 +9,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from .calendar_tools import calendar_tools
 from .barberia_info import barberia_info
+from ..database.conversation_service import conversation_service
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -34,10 +34,9 @@ class LangChainService:
     def get_conversation_history(self, wa_id: str) -> List[Dict]:
         """Get conversation history for the given WhatsApp ID."""
         try:
-            with shelve.open("conversation_history") as history_shelf:
-                history = history_shelf.get(wa_id, [])
-                logging.debug(f"📚 Retrieved {len(history)} messages from conversation history for user {wa_id}")
-                return history
+            history = conversation_service.get_conversation_history(wa_id, limit=10)
+            logging.debug(f"📚 Retrieved {len(history)} messages from PostgreSQL conversation history for user {wa_id}")
+            return history
         except Exception as e:
             logging.error(f"❌ Error getting conversation history: {e}")
             return []
@@ -45,25 +44,19 @@ class LangChainService:
     def store_conversation_history(self, wa_id: str, history: List[Dict]):
         """Store conversation history for the given WhatsApp ID."""
         try:
-            with shelve.open("conversation_history", writeback=True) as history_shelf:
-                history_shelf[wa_id] = history
+            conversation_service.store_conversation_history(wa_id, history)
+            logging.debug(f"📚 Stored conversation history in PostgreSQL for user {wa_id}")
         except Exception as e:
             logging.error(f"Error storing conversation history: {e}")
 
     def add_to_conversation_history(self, wa_id: str, role: str, content: str):
         """Add a message to the conversation history."""
-        history = self.get_conversation_history(wa_id)
-        history.append({
-            "role": role,
-            "content": content,
-            "timestamp": str(datetime.now())
-        })
-        # Keep only last 10 messages to avoid context overflow
-        if len(history) > 10:
-            logging.debug(f"[HISTORY] Truncating conversation history for user {wa_id} to last 10 messages")
-            history = history[-10:]
-        self.store_conversation_history(wa_id, history)
-        logging.debug(f"[HISTORY] Added {role} message to conversation history for user {wa_id}")
+        try:
+            # Store message directly to PostgreSQL (automatic limiting handled by get_conversation_history)
+            conversation_service.store_conversation_message(wa_id, content, role)
+            logging.debug(f"[HISTORY] Added {role} message to PostgreSQL for user {wa_id}")
+        except Exception as e:
+            logging.error(f"❌ Error adding message to conversation history: {e}")
 
     def has_recent_appointment_creation(self, wa_id: str, minutes: int = 5) -> bool:
         """Check if a calendar event was recently created for this user."""
@@ -297,8 +290,8 @@ Luego:
 ### 🗓️ Gestión de Citas
 
 Cuando un cliente quiera agendar una cita:
-1. **Recoge la información**: nombre, fecha, hora, tipo de servicio
-2. **OBLIGATORIO**: Usa la herramienta `schedule_appointment` para crear el evento en el calendario
+1. **Recoge toda la información**: nombre completo, edad (opcional), fecha, hora, tipo de servicio
+2. **OBLIGATORIO**: Usa `schedule_appointment(whatsapp_id="{wa_id}", summary="Corte y barba", start_time="2025-09-15T10:00:00", end_time="2025-09-15T11:00:00", customer_name="Juan Pérez", customer_age="25")` - esto guarda la información del cliente Y crea la cita
 3. **Confirma los detalles** con el cliente usando la información del evento creado
 4. **Termina con una despedida cordial**
 

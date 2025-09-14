@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import logging
 from langchain.tools import tool
 from .calendar_service import calendar_service
+from ..database.customer_service import customer_service
 
 
 
@@ -95,6 +96,7 @@ def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int,
 
 
 
+
 @tool
 def get_available_slots(date: str = "", time_range: str = "morning") -> str:
     """
@@ -175,24 +177,45 @@ def get_available_slots(date: str = "", time_range: str = "morning") -> str:
 
 @tool
 def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_time: str,
+                        customer_name: str = "", customer_age: str = "",
                         description: str = "", location: str = "Calle 18 #25-30, Centro, Pasto") -> str:
     """
-    Schedule a new appointment for a user.
+    Schedule a new appointment for a user and save their customer information.
 
     Args:
         whatsapp_id: WhatsApp ID of the user
         summary: Title/summary of the appointment (e.g., "Corte y barba")
         start_time: Start time in ISO format (e.g., "2025-01-15T10:00:00")
         end_time: End time in ISO format (e.g., "2025-01-15T11:00:00")
+        customer_name: Customer's full name (optional, will be saved to database)
+        customer_age: Customer's age (optional, will be saved to database)
         description: Description of the appointment
         location: Location (defaults to barbería address)
 
     Returns:
         String message about the scheduled appointment
     """
-    logging.warning(f"[CALENDAR] Tool called: schedule_appointment for user {whatsapp_id}, summary='{summary}', start_time='{start_time}'")
+    logging.warning(f"[CALENDAR] Tool called: schedule_appointment for user {whatsapp_id}, summary='{summary}', start_time='{start_time}', customer_name='{customer_name}', customer_age='{customer_age}'")
 
     try:
+        # Save customer information if provided
+        if customer_name and customer_name.strip():
+            customer_age_int = None
+            if customer_age and customer_age.strip() and customer_age.strip().isdigit():
+                customer_age_int = int(customer_age.strip())
+                logging.warning(f"[CUSTOMER] Parsed age: {customer_age_int}")
+
+            customer_info = customer_service.create_or_update_customer(
+                whatsapp_id=whatsapp_id,
+                name=customer_name.strip(),
+                age=customer_age_int
+            )
+
+            if customer_info:
+                logging.warning(f"[CUSTOMER] Successfully saved customer info: {customer_name}")
+            else:
+                logging.warning(f"[CUSTOMER] Failed to save customer info for {whatsapp_id}")
+
         # Normalize datetime format
         def normalize_datetime(dt_str):
             clean = dt_str.replace('Z', '')
