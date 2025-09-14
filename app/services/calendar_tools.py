@@ -3,45 +3,8 @@ from datetime import datetime, timedelta
 import logging
 from langchain.tools import tool
 from .calendar_service import calendar_service
-import pytz
 
 
-def convert_to_colombia_timezone(dt_str: str) -> str:
-    """
-    Convert a datetime string to Colombia timezone (UTC-5).
-    Treats the input time as local Colombia time and ensures it's properly formatted.
-
-    Args:
-        dt_str: Datetime string in ISO format (e.g., "2025-08-08T10:00:00")
-
-    Returns:
-        Datetime string in Colombia timezone with proper offset
-    """
-    try:
-        # Clean the input string (remove Z if present)
-        dt_str_clean = dt_str.replace('Z', '')
-
-        # Parse the datetime
-        dt = datetime.fromisoformat(dt_str_clean)
-
-        # Add Colombia timezone info
-        colombia_tz = pytz.timezone('America/Bogota')
-
-        # Handle timezone-aware vs naive datetime
-        if dt.tzinfo is None:
-            # Naive datetime - localize it
-            colombia_dt = colombia_tz.localize(dt)
-        else:
-            # Already timezone-aware - convert to Colombia timezone
-            colombia_dt = dt.astimezone(colombia_tz)
-
-        # Format as ISO string with timezone offset
-        result = colombia_dt.strftime('%Y-%m-%dT%H:%M:%S%z')
-        logging.info(f"[TIMEZONE] Converted {dt_str} -> {result} (treated as local Colombia time)")
-        return result
-    except Exception as e:
-        logging.error(f"[ERROR] Error converting timezone: {e}")
-        return dt_str
 
 
 def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int, str]:
@@ -63,24 +26,9 @@ def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int,
             logging.info(f"[OVERLAP] No existing events found")
             return False, 0, "No existing events"
 
-        # Parse the requested time range
-        colombia_tz = pytz.timezone('America/Bogota')
-
-        # Parse start time
-        start_dt_clean = start_time.replace('Z', '')
-        start_dt = datetime.fromisoformat(start_dt_clean)
-        if start_dt.tzinfo is None:
-            start_dt = colombia_tz.localize(start_dt)
-        else:
-            start_dt = start_dt.astimezone(colombia_tz)
-
-        # Parse end time
-        end_dt_clean = end_time.replace('Z', '')
-        end_dt = datetime.fromisoformat(end_dt_clean)
-        if end_dt.tzinfo is None:
-            end_dt = colombia_tz.localize(end_dt)
-        else:
-            end_dt = end_dt.astimezone(colombia_tz)
+        # Parse the requested time range (expecting normalized format)
+        start_dt = datetime.fromisoformat(start_time.replace('Z', ''))
+        end_dt = datetime.fromisoformat(end_time.replace('Z', ''))
 
         overlapping_events = []
 
@@ -92,17 +40,33 @@ def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int,
                     event_end_str = event['end']
 
                     # Handle different time formats
-                    if 'T' in event_start_str:
-                        event_start_dt = colombia_tz.localize(datetime.fromisoformat(event_start_str.replace('Z', '').split('T')[0] + 'T' + event_start_str.split('T')[1].split('-')[0]))
-                    else:
+                    if 'T' not in event_start_str or 'T' not in event_end_str:
                         # All-day event, skip
                         continue
 
-                    if 'T' in event_end_str:
-                        event_end_dt = colombia_tz.localize(datetime.fromisoformat(event_end_str.replace('Z', '').split('T')[0] + 'T' + event_end_str.split('T')[1].split('-')[0]))
-                    else:
-                        # All-day event, skip
-                        continue
+                    # Parse datetime strings, handling timezone info
+                    def clean_datetime_string(dt_str):
+                        """Clean datetime string for parsing"""
+                        clean = dt_str.replace('Z', '')
+                        # Remove timezone offset for simple comparison
+                        if '+' in clean:
+                            clean = clean.split('+')[0]
+                        elif '-' in clean and 'T' in clean:
+                            # Handle negative timezone offsets like -05:00
+                            t_index = clean.index('T')
+                            date_part = clean[:t_index]
+                            time_part = clean[t_index:]
+                            if time_part.count('-') > 0:
+                                # Remove timezone offset from time part
+                                time_part = time_part.split('-')[0]
+                                clean = date_part + time_part
+                        return clean
+
+                    event_start_clean = clean_datetime_string(event_start_str)
+                    event_end_clean = clean_datetime_string(event_end_str)
+
+                    event_start_dt = datetime.fromisoformat(event_start_clean)
+                    event_end_dt = datetime.fromisoformat(event_end_clean)
 
                     # Check for overlap
                     if (start_dt < event_end_dt and end_dt > event_start_dt):
@@ -129,195 +93,6 @@ def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int,
         return False, 0, f"Error checking availability: {str(e)}"
 
 
-@tool
-def list_calendar_events(max_results: int = 10) -> str:
-    """
-    List upcoming calendar events.
-
-    Args:
-        max_results: Maximum number of events to return (default: 10)
-
-    Returns:
-        String representation of upcoming calendar events
-    """
-    logging.info(f"[CALENDAR] Tool called: list_calendar_events with max_results={max_results}")
-    try:
-        events = calendar_service.list_events(max_results=max_results)
-        if not events:
-            return "No upcoming events found"
-
-        # Format events as a readable string
-        if len(events) == 1 and isinstance(events[0], dict) and "message" in events[0]:
-            return events[0]["message"]
-
-        event_list = []
-        for event in events:
-            if isinstance(event, dict) and 'summary' in event:
-                start_time = event.get('start', 'Unknown time')
-                event_list.append(f"• {event['summary']} ({start_time})")
-
-        result = f"Upcoming events:\n" + "\n".join(event_list) if event_list else "No upcoming events found"
-        logging.info(f"[CALENDAR] list_calendar_events completed successfully: {len(event_list)} events found")
-        return result
-    except Exception as e:
-        logging.error(f"[ERROR] Error listing calendar events: {e}")
-        return f"Failed to list events: {str(e)}"
-
-
-@tool
-def create_calendar_event(summary: str, start_time: str, end_time: str,
-                         description: str = "", location: str = "") -> str:
-    """
-    Create a new calendar event.
-
-    Args:
-        summary: Title/summary of the event
-        start_time: Start time in ISO format (e.g., "2024-01-15T10:00:00Z")
-        end_time: End time in ISO format (e.g., "2024-01-15T11:00:00Z")
-        description: Optional description of the event
-        location: Optional location of the event
-
-    Returns:
-        String message about the created event or error
-    """
-    logging.info(f"[CALENDAR] Tool called: create_calendar_event with summary='{summary}', start_time='{start_time}', end_time='{end_time}'")
-    try:
-        # Convert times to Colombia timezone (treating input as local Colombia time)
-        colombia_start_time = convert_to_colombia_timezone(start_time)
-        colombia_end_time = convert_to_colombia_timezone(end_time)
-
-        logging.info(f"[CALENDAR] Converted times - Start: {start_time} -> {colombia_start_time}, End: {end_time} -> {colombia_end_time}")
-
-        # Check for overlapping events (max 2 events at same time)
-        has_overlap, event_count, overlap_message = check_overlapping_events(start_time, end_time)
-
-        if has_overlap:
-            logging.warning(f"[CALENDAR] Cannot create event - too many overlapping events: {overlap_message}")
-            return f"❌ No se puede agendar la cita. {overlap_message}"
-
-        # Validate datetime format
-        try:
-            datetime.fromisoformat(colombia_start_time.replace('Z', '+00:00'))
-            datetime.fromisoformat(colombia_end_time.replace('Z', '+00:00'))
-        except ValueError:
-            return "Invalid datetime format. Use ISO format (e.g., '2024-01-15T10:00:00Z')"
-
-        event = calendar_service.create_event(
-            summary=summary,
-            start_time=colombia_start_time,
-            end_time=colombia_end_time,
-            description=description,
-            location=location
-        )
-
-        if event and 'id' in event:
-            event_id = event['id']
-            event_url = event.get('htmlLink', 'No URL available')
-            logging.info(f"[CALENDAR] create_calendar_event completed successfully: {event_id}")
-            return f"✅ Event '{summary}' created successfully! Event ID: {event_id}\nEvent URL: {event_url}"
-        else:
-            logging.error(f"[ERROR] Failed to create event - no event ID returned")
-            return "Failed to create event - no event ID returned"
-
-    except Exception as e:
-        logging.error(f"[ERROR] Error creating calendar event: {e}")
-        return f"Failed to create event: {str(e)}"
-
-
-@tool
-def update_calendar_event(event_id: str, summary: str = None, start_time: str = None,
-                         end_time: str = None, description: str = None, location: str = None) -> str:
-    """
-    Update an existing calendar event.
-
-    Args:
-        event_id: ID of the event to update
-        summary: New title/summary of the event (optional)
-        start_time: New start time in ISO format (optional)
-        end_time: New end time in ISO format (optional)
-        description: New description of the event (optional)
-        location: New location of the event (optional)
-
-    Returns:
-        String message about the updated event or error
-    """
-    try:
-        # Validate datetime format if provided
-        if start_time:
-            try:
-                datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-            except ValueError:
-                return "Invalid start_time format. Use ISO format (e.g., '2024-01-15T10:00:00Z')"
-
-        if end_time:
-            try:
-                datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-            except ValueError:
-                return "Invalid end_time format. Use ISO format (e.g., '2024-01-15T11:00:00Z')"
-
-        event = calendar_service.update_event(
-            event_id=event_id,
-            summary=summary,
-            start_time=start_time,
-            end_time=end_time,
-            description=description,
-            location=location
-        )
-
-        if event:
-            return f"Event '{event['summary']}' updated successfully!"
-        else:
-            return "Failed to update event"
-
-    except Exception as e:
-        logging.error(f"Error updating calendar event: {e}")
-        return f"Failed to update event: {str(e)}"
-
-
-@tool
-def delete_calendar_event(event_id: str) -> str:
-    """
-    Delete a calendar event.
-
-    Args:
-        event_id: ID of the event to delete
-
-    Returns:
-        String message about the deletion success or error
-    """
-    try:
-        success = calendar_service.delete_event(event_id)
-        if success:
-            return f"Event {event_id} deleted successfully"
-        else:
-            return "Failed to delete event"
-
-    except Exception as e:
-        logging.error(f"Error deleting calendar event: {e}")
-        return f"Failed to delete event: {str(e)}"
-
-
-@tool
-def get_calendar_event(event_id: str) -> str:
-    """
-    Get details of a specific calendar event.
-
-    Args:
-        event_id: ID of the event to retrieve
-
-    Returns:
-        String representation of the event details or error message
-    """
-    try:
-        event = calendar_service.get_event(event_id)
-        if event:
-            return f"Event: {event['summary']}\nStart: {event['start']}\nEnd: {event['end']}\nDescription: {event.get('description', 'No description')}\nLocation: {event.get('location', 'No location')}"
-        else:
-            return "Event not found"
-
-    except Exception as e:
-        logging.error(f"Error getting calendar event: {e}")
-        return f"Failed to get event: {str(e)}"
 
 
 @tool
@@ -398,12 +173,244 @@ def get_available_slots(date: str = "", time_range: str = "morning") -> str:
         return f"Error getting available slots: {str(e)}"
 
 
+@tool
+def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_time: str,
+                        description: str = "", location: str = "Calle 18 #25-30, Centro, Pasto") -> str:
+    """
+    Schedule a new appointment for a user.
+
+    Args:
+        whatsapp_id: WhatsApp ID of the user
+        summary: Title/summary of the appointment (e.g., "Corte y barba")
+        start_time: Start time in ISO format (e.g., "2025-01-15T10:00:00")
+        end_time: End time in ISO format (e.g., "2025-01-15T11:00:00")
+        description: Description of the appointment
+        location: Location (defaults to barbería address)
+
+    Returns:
+        String message about the scheduled appointment
+    """
+    logging.warning(f"[CALENDAR] Tool called: schedule_appointment for user {whatsapp_id}, summary='{summary}', start_time='{start_time}'")
+
+    try:
+        # Normalize datetime format
+        def normalize_datetime(dt_str):
+            clean = dt_str.replace('Z', '')
+            if '+' in clean:
+                clean = clean.split('+')[0]
+            elif '-' in clean and 'T' in clean:
+                t_index = clean.index('T')
+                date_part = clean[:t_index]
+                time_part = clean[t_index:]
+                if time_part.count('-') > 0:
+                    time_part = time_part.split('-')[0]
+                    clean = date_part + time_part
+            return clean
+
+        normalized_start = normalize_datetime(start_time)
+        normalized_end = normalize_datetime(end_time)
+
+        # Validate datetime format
+        try:
+            datetime.fromisoformat(normalized_start)
+            datetime.fromisoformat(normalized_end)
+        except ValueError as e:
+            logging.error(f"[ERROR] Datetime validation failed: {e}")
+            return f"❌ Formato de fecha/hora inválido. Error: {str(e)}"
+
+        # Check for overlapping events (max 2 events at same time)
+        has_overlap, event_count, overlap_message = check_overlapping_events(normalized_start, normalized_end)
+
+        if has_overlap:
+            logging.warning(f"[CALENDAR] Cannot create appointment - too many overlapping events: {overlap_message}")
+            return f"❌ No se puede agendar la cita. {overlap_message}"
+
+        # Include WhatsApp ID in description
+        full_description = f"{description}\n[WhatsApp ID: {whatsapp_id}]" if description else f"[WhatsApp ID: {whatsapp_id}]"
+
+        # Create the appointment
+        event = calendar_service.create_event(
+            summary=summary,
+            start_time=normalized_start,
+            end_time=normalized_end,
+            description=full_description,
+            location=location
+        )
+
+        if event and 'id' in event:
+            event_id = event['id']
+            logging.warning(f"[CALENDAR] schedule_appointment completed successfully: {event_id}")
+            return f"✅ Tu cita '{summary}' ha sido agendada exitosamente para el {normalized_start.split('T')[0]} a las {datetime.fromisoformat(normalized_start).strftime('%I:%M %p')}, parce! 📅"
+        else:
+            logging.error(f"[ERROR] Failed to create appointment")
+            return "❌ No se pudo crear la cita. Por favor, intenta de nuevo."
+
+    except Exception as e:
+        logging.error(f"[ERROR] Error scheduling appointment: {e}")
+        return f"❌ Error agendando la cita: {str(e)}"
+
+
+@tool
+def reschedule_appointment(whatsapp_id: str, new_start_time: str, new_end_time: str,
+                          appointment_selector: str = "latest") -> str:
+    """
+    Reschedule an existing appointment for a user.
+
+    Args:
+        whatsapp_id: WhatsApp ID of the user
+        new_start_time: New start time in ISO format (e.g., "2025-01-15T14:00:00")
+        new_end_time: New end time in ISO format (e.g., "2025-01-15T15:00:00")
+        appointment_selector: Which appointment to reschedule ("latest", "today", "tomorrow", or specific service like "corte")
+
+    Returns:
+        String message about the rescheduled appointment
+    """
+    logging.warning(f"[CALENDAR] Tool called: reschedule_appointment for user {whatsapp_id}, new_start_time='{new_start_time}', selector='{appointment_selector}'")
+
+    try:
+        # First, find the user's appointments
+        events = calendar_service.list_events(max_results=50)
+        user_appointments = []
+
+        for event in events:
+            if isinstance(event, dict) and 'start' in event and 'summary' in event:
+                event_description = event.get('description', '')
+                if whatsapp_id in event_description:
+                    user_appointments.append(event)
+
+        if not user_appointments:
+            return f"❌ No se encontraron citas para reagendar."
+
+        # Select which appointment to reschedule
+        target_appointment = None
+
+        if appointment_selector == "latest" or appointment_selector == "":
+            target_appointment = user_appointments[0]  # Most recent
+        else:
+            # Search by service or other criteria
+            for apt in user_appointments:
+                if appointment_selector.lower() in apt['summary'].lower():
+                    target_appointment = apt
+                    break
+
+        if not target_appointment:
+            return f"❌ No se encontró una cita que coincida con '{appointment_selector}'."
+
+        # Normalize new times
+        def normalize_datetime(dt_str):
+            clean = dt_str.replace('Z', '')
+            if '+' in clean:
+                clean = clean.split('+')[0]
+            elif '-' in clean and 'T' in clean:
+                t_index = clean.index('T')
+                date_part = clean[:t_index]
+                time_part = clean[t_index:]
+                if time_part.count('-') > 0:
+                    time_part = time_part.split('-')[0]
+                    clean = date_part + time_part
+            return clean
+
+        normalized_start = normalize_datetime(new_start_time)
+        normalized_end = normalize_datetime(new_end_time)
+
+        # Validate datetime format
+        try:
+            datetime.fromisoformat(normalized_start)
+            datetime.fromisoformat(normalized_end)
+        except ValueError as e:
+            logging.error(f"[ERROR] Datetime validation failed: {e}")
+            return f"❌ Formato de fecha/hora inválido. Error: {str(e)}"
+
+        # Update the appointment
+        event_id = target_appointment['id']
+        event_summary = target_appointment.get('summary', 'Cita')
+
+        logging.warning(f"[CALENDAR] Updating appointment {event_id} from {target_appointment.get('start')} to {normalized_start}")
+
+        updated_event = calendar_service.update_event(
+            event_id=event_id,
+            start_time=normalized_start,
+            end_time=normalized_end
+        )
+
+        if updated_event:
+            logging.warning(f"[CALENDAR] reschedule_appointment completed successfully: {event_id}")
+            return f"✅ Tu cita '{event_summary}' ha sido reagendada exitosamente para el {normalized_start.split('T')[0]} a las {datetime.fromisoformat(normalized_start).strftime('%I:%M %p')}, parce! 📅"
+        else:
+            return "❌ No se pudo reagendar la cita. Por favor, intenta de nuevo."
+
+    except Exception as e:
+        logging.error(f"[ERROR] Error rescheduling appointment: {e}")
+        return f"❌ Error reagendando la cita: {str(e)}"
+
+
+@tool
+def cancel_appointment(whatsapp_id: str, appointment_selector: str = "latest") -> str:
+    """
+    Cancel an existing appointment for a user.
+
+    Args:
+        whatsapp_id: WhatsApp ID of the user
+        appointment_selector: Which appointment to cancel ("latest", "today", "tomorrow", or specific service like "corte")
+
+    Returns:
+        String message about the cancelled appointment
+    """
+    logging.warning(f"[CALENDAR] Tool called: cancel_appointment for user {whatsapp_id}, selector='{appointment_selector}'")
+
+    try:
+        # First, find the user's appointments
+        events = calendar_service.list_events(max_results=50)
+        user_appointments = []
+
+        for event in events:
+            if isinstance(event, dict) and 'start' in event and 'summary' in event:
+                event_description = event.get('description', '')
+                if whatsapp_id in event_description:
+                    user_appointments.append(event)
+
+        if not user_appointments:
+            return f"❌ No se encontraron citas para cancelar."
+
+        # Select which appointment to cancel
+        target_appointment = None
+
+        if appointment_selector == "latest" or appointment_selector == "":
+            target_appointment = user_appointments[0]  # Most recent
+        else:
+            # Search by service or other criteria
+            for apt in user_appointments:
+                if appointment_selector.lower() in apt['summary'].lower():
+                    target_appointment = apt
+                    break
+
+        if not target_appointment:
+            return f"❌ No se encontró una cita que coincida con '{appointment_selector}'."
+
+        # Cancel the appointment
+        event_id = target_appointment['id']
+        event_summary = target_appointment.get('summary', 'Cita')
+        event_start = target_appointment.get('start', 'fecha no disponible')
+
+        logging.warning(f"[CALENDAR] Cancelling appointment {event_id}: {event_summary}")
+
+        success = calendar_service.delete_event(event_id)
+
+        if success:
+            logging.warning(f"[CALENDAR] cancel_appointment completed successfully: {event_id}")
+            return f"✅ Tu cita '{event_summary}' programada para {event_start} ha sido cancelada exitosamente, parce. Si necesitas reagendar, aquí estoy para ayudarte! 📅"
+        else:
+            return "❌ No se pudo cancelar la cita. Por favor, intenta de nuevo."
+
+    except Exception as e:
+        logging.error(f"[ERROR] Error cancelling appointment: {e}")
+        return f"❌ Error cancelando la cita: {str(e)}"
+
+
 # List of all calendar tools
 calendar_tools = [
-    list_calendar_events,
-    create_calendar_event,
-    update_calendar_event,
-    delete_calendar_event,
-    get_calendar_event,
     get_available_slots,
+    schedule_appointment,
+    reschedule_appointment,
+    cancel_appointment,
 ]

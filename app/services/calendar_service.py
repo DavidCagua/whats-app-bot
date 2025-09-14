@@ -91,11 +91,11 @@ class GoogleCalendarService:
                 'description': description,
                 'start': {
                     'dateTime': start_time,
-                    'timeZone': 'UTC',
+                    'timeZone': 'America/Bogota',
                 },
                 'end': {
                     'dateTime': end_time,
-                    'timeZone': 'UTC',
+                    'timeZone': 'America/Bogota',
                 },
             }
 
@@ -128,18 +128,26 @@ class GoogleCalendarService:
                 event['summary'] = summary
             if start_time:
                 event['start']['dateTime'] = start_time
+                event['start']['timeZone'] = 'America/Bogota'  # Ensure timezone is set
+                logging.warning(f'[UPDATE] Updating start time to: {start_time} with timezone America/Bogota')
             if end_time:
                 event['end']['dateTime'] = end_time
+                event['end']['timeZone'] = 'America/Bogota'  # Ensure timezone is set
+                logging.warning(f'[UPDATE] Updating end time to: {end_time} with timezone America/Bogota')
             if description is not None:
                 event['description'] = description
             if location is not None:
                 event['location'] = location
 
+            logging.warning(f'[UPDATE] Sending update request to Google Calendar for event {event_id}')
+            logging.warning(f'[UPDATE] Request payload - Start: {event["start"]}, End: {event["end"]}')
+
             updated_event = self.service.events().update(
                 calendarId='primary', eventId=event_id, body=event
             ).execute()
 
-            logging.info(f'Event updated: {updated_event.get("htmlLink")}')
+            logging.warning(f'[UPDATE] Google Calendar update response - Start: {updated_event["start"].get("dateTime")}, End: {updated_event["end"].get("dateTime")}')
+            logging.warning(f'[UPDATE] Event updated successfully: {updated_event.get("htmlLink")}')
 
             return {
                 'id': updated_event['id'],

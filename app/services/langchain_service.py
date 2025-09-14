@@ -298,7 +298,7 @@ Luego:
 
 Cuando un cliente quiera agendar una cita:
 1. **Recoge la información**: nombre, fecha, hora, tipo de servicio
-2. **OBLIGATORIO**: Usa la herramienta `create_calendar_event` para crear el evento en el calendario
+2. **OBLIGATORIO**: Usa la herramienta `schedule_appointment` para crear el evento en el calendario
 3. **Confirma los detalles** con el cliente usando la información del evento creado
 4. **Termina con una despedida cordial**
 
@@ -358,22 +358,35 @@ Ejemplo: "✅ Tu cita está agendada para el **8 de agosto de 2025 a las 10:00 A
 
 Tienes acceso a herramientas para:
 - **`get_available_slots`**: Ver horarios DISPONIBLES para agendar citas (USA ESTA cuando pregunten por disponibilidad)
-- **`create_calendar_event`**: Agendar citas de clientes (OBLIGATORIO cuando se confirma una cita)
-- **`update_calendar_event`**: Modificar citas existentes
-- **`delete_calendar_event`**: Cancelar citas
-- **`get_calendar_event`**: Ver detalles específicos de eventos
-- **`list_calendar_events`**: Ver eventos programados (solo para administración)
+- **`schedule_appointment`**: Agendar NUEVAS citas de clientes (reemplaza create_calendar_event)
+- **`reschedule_appointment`**: Cambiar la hora de citas existentes (automáticamente encuentra y actualiza la cita)
+- **`cancel_appointment`**: Cancelar citas existentes (automáticamente encuentra y cancela la cita)
 
-**REGLAS IMPORTANTES PARA HERRAMIENTAS**:
-1. **SIEMPRE** usa `create_calendar_event` cuando tengas toda la información de una cita
-2. **SIEMPRE** usa `get_available_slots` cuando el cliente pregunte por disponibilidad, horarios disponibles, o "a qué hora tienes disponible"
-3. **SIEMPRE** usa `create_calendar_event` cuando el cliente especifique una hora después de ver los horarios disponibles
-3. **NUNCA** digas que agendaste una cita sin usar la herramienta primero
-4. **FECHAS**: Cuando crees eventos, usa el año actual ({current_year}) y calcula correctamente las fechas relativas (mañana = {current_day + 1}/{current_month}/{current_year})
-5. **DUPLICADOS**: NUNCA crees múltiples citas para la misma persona en la misma conversación. Si ya creaste una cita, solo confirma la existente.
-6. **HORAS**: Usa la hora exacta que el cliente te dice. El sistema se encargará de la zona horaria automáticamente.
-7. **CAPACIDAD**: Máximo 2 eventos simultáneos. Si ya hay 2 eventos en el mismo horario, NO crees otro evento y ofrece horarios alternativos.
-8. **CONFIRMACIÓN**: SIEMPRE confirma la cita con fecha y hora exacta. Ejemplo: "✅ Tu cita está agendada para el **8 de agosto de 2025 a las 11:00 AM** para [servicio], [nombre]. ¡Nos vemos y prepárate para salir renovado! 💇🔥 Gracias por elegirnos."
+**REGLAS SIMPLES PARA HERRAMIENTAS**:
+
+**📅 CREAR NUEVA CITA**:
+- **USA**: `schedule_appointment(whatsapp_id="{wa_id}", summary="Corte y barba", start_time="2025-09-15T10:00:00", end_time="2025-09-15T11:00:00")`
+- **CUÁNDO**: Primera cita, "quiero agendar una cita", después de mostrar horarios disponibles
+
+**🔄 CAMBIAR CITA EXISTENTE**:
+- **USA**: `reschedule_appointment(whatsapp_id="{wa_id}", new_start_time="2025-09-15T14:00:00", new_end_time="2025-09-15T15:00:00")`
+- **CUÁNDO**: "Cambiar mi cita", "mover mi cita", "reagendar mi cita"
+- **AUTOMÁTICO**: Encuentra la cita y la actualiza sin necesidad de IDs
+
+**❌ CANCELAR CITA**:
+- **USA**: `cancel_appointment(whatsapp_id="{wa_id}")`
+- **CUÁNDO**: "Cancelar mi cita", "no puedo ir a mi cita"
+- **AUTOMÁTICO**: Encuentra la cita y la cancela sin necesidad de IDs
+
+**📋 VER HORARIOS DISPONIBLES**:
+- **USA**: `get_available_slots(date="2025-09-15", time_range="morning")`
+- **CUÁNDO**: "Qué horarios tienes", "cuándo puedes"
+
+**⚙️ CONFIGURACIONES GENERALES**:
+9. **FECHAS**: Cuando crees eventos, usa el año actual ({current_year}) y calcula correctamente las fechas relativas (mañana = {current_day + 1}/{current_month}/{current_year})
+10. **HORAS**: Usa la hora exacta que el cliente te dice. El sistema se encargará de la zona horaria automáticamente.
+11. **CAPACIDAD**: Máximo 2 eventos simultáneos. Si ya hay 2 eventos en el mismo horario, NO crees otro evento y ofrece horarios alternativos.
+12. **CONFIRMACIÓN**: SIEMPRE confirma la cita con fecha y hora exacta. Ejemplo: "✅ Tu cita está agendada para el **8 de agosto de 2025 a las 11:00 AM** para [servicio], [nombre]. ¡Nos vemos y prepárate para salir renovado! 💇🔥 Gracias por elegirnos."
 
 ---
 
@@ -443,16 +456,7 @@ Ejemplo:
             if hasattr(response, 'tool_calls') and response.tool_calls:
                 logging.info(f"[TOOL] Tool calls detected for user {wa_id}: {len(response.tool_calls)} tools")
 
-                # Check for duplicate appointment creation
-                has_create_calendar_call = any(tool_call['name'] == 'create_calendar_event' for tool_call in response.tool_calls)
-                if has_create_calendar_call and self.has_recent_appointment_creation(wa_id):
-                    logging.warning(f"[DUPLICATE] Preventing duplicate calendar event creation for user {wa_id}")
-                    # Modify the response to not create duplicate events
-                    response = self.llm_with_tools.invoke(messages + [AIMessage(content="IMPORTANTE: Ya se creó una cita recientemente. No crees otra cita. Solo confirma la cita existente.")])
-                    if hasattr(response, 'tool_calls') and response.tool_calls:
-                        logging.info(f"[DUPLICATE] Duplicate tool calls prevented, new response generated")
-                    else:
-                        logging.info(f"[DUPLICATE] No tool calls in duplicate prevention response")
+                # The new simplified tools handle duplicates automatically, so no need for complex duplicate checking
 
                 # Handle tool calls
                 tool_results = []
@@ -460,8 +464,8 @@ Ejemplo:
                     tool_name = tool_call['name']
                     tool_args = tool_call['args']
 
-                    logging.info(f"[TOOL] Executing tool {i+1}/{len(response.tool_calls)}: {tool_name}")
-                    logging.info(f"[TOOL] Tool arguments: {tool_args}")
+                    logging.warning(f"[TOOL] Executing tool {i+1}/{len(response.tool_calls)}: {tool_name}")
+                    logging.warning(f"[TOOL] Tool arguments: {tool_args}")
 
                     # Find and execute the tool
                     tool_found = False
@@ -469,10 +473,10 @@ Ejemplo:
                         if tool.name == tool_name:
                             tool_found = True
                             try:
-                                logging.info(f"[TOOL] Invoking tool: {tool_name}")
+                                logging.warning(f"[TOOL] Invoking tool: {tool_name}")
                                 result = tool.invoke(tool_args)
                                 logging.info(f"[SUCCESS] Tool {tool_name} executed successfully")
-                                logging.info(f"[TOOL] Tool result: {result[:200]}...")
+                                logging.warning(f"[TOOL] Tool result: {result[:200]}...")
                                 tool_results.append(f"Tool {tool_name} result: {result}")
                             except Exception as e:
                                 logging.error(f"[ERROR] Error executing tool {tool_name}: {str(e)}")
@@ -489,12 +493,12 @@ Ejemplo:
                 if tool_results:
                     results_text = "\n".join(tool_results)
                     logging.info(f"[RESPONSE] Generating final response with tool results for user {wa_id}")
-                    logging.info(f"[RESPONSE] Tool results text: {results_text}")
+                    logging.warning(f"[RESPONSE] Tool results text: {results_text}")
                     final_messages = messages + [AIMessage(content=f"Tool Results: {results_text}")]
                     final_response = self.llm_with_tools.invoke(final_messages)
                     final_response_text = final_response.content
                     logging.info(f"[RESPONSE] Final response content: '{final_response_text}'")
-                    logging.info(f"[RESPONSE] Final response length: {len(final_response_text) if final_response_text else 0}")
+                    logging.warning(f"[RESPONSE] Final response length: {len(final_response_text) if final_response_text else 0}")
 
                     # If the final response is empty, create a proper confirmation
                     if not final_response_text or not final_response_text.strip():
@@ -547,10 +551,21 @@ Ejemplo:
                                 final_response_text = "📅 Aquí tienes los eventos programados. ¿Te gustaría agendar una cita para mañana en la mañana? Tengo disponibilidad en varios horarios."
                             else:
                                 final_response_text = "📅 Revisando disponibilidad. ¿Te gustaría agendar una cita para mañana en la mañana?"
-                        elif "update_calendar_event" in results_text:
-                            final_response_text = "✅ Tu cita ha sido actualizada exitosamente."
-                        elif "delete_calendar_event" in results_text:
-                            final_response_text = "✅ Tu cita ha sido cancelada exitosamente."
+                        elif "schedule_appointment" in results_text:
+                            if "agendada exitosamente" in results_text:
+                                final_response_text = results_text.replace("Tool schedule_appointment result: ", "")
+                            else:
+                                final_response_text = "❌ Hubo un problema agendando la cita. Déjame intentar de nuevo."
+                        elif "reschedule_appointment" in results_text:
+                            if "reagendada exitosamente" in results_text:
+                                final_response_text = results_text.replace("Tool reschedule_appointment result: ", "")
+                            else:
+                                final_response_text = "❌ Hubo un problema reagendando la cita. Déjame intentar de nuevo."
+                        elif "cancel_appointment" in results_text:
+                            if "cancelada exitosamente" in results_text:
+                                final_response_text = results_text.replace("Tool cancel_appointment result: ", "")
+                            else:
+                                final_response_text = "❌ Hubo un problema cancelando la cita. Déjame intentar de nuevo."
                         elif "get_calendar_event" in results_text:
                             final_response_text = "📋 Aquí tienes los detalles de tu cita."
                         else:

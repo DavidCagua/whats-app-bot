@@ -39,6 +39,72 @@ This is the main application directory containing all the core files for our Fla
 
 If you're new to Flask or working on larger Flask projects, understanding this structure can give a solid foundation to build upon and maintain scalable Flask applications.
 
-## Running the App
-When you want to run the app, just execute the run.py script. It will create the app instance and run the Flask development server.
-Lastly, it's good to note that when you deploy the app to a production environment, you might not use run.py directly (especially if you use something like Gunicorn or uWSGI). Instead, you'd just need the application instance, which is created using create_app(). The details of this vary depending on your deployment strategy, but it's a point to keep in mind.
+## Setup and Running the App
+
+### Prerequisites
+- Python 3.7 or higher
+- WhatsApp Business API access token
+- OpenAI API key
+
+### Setup Commands:
+
+```bash
+# 1. Create virtual environment
+python3 -m venv .venv
+
+# 2. Activate virtual environment
+source .venv/bin/activate
+
+# 3. Install requirements
+pip install -r requirements.txt
+
+# 4. Create .env file (copy from example.env and fill in your values)
+cp example.env .env
+
+# 5. Run the application
+python run.py
+```
+
+### Alternative activation (if the above doesn't work):
+```bash
+# For Windows/Git Bash
+.venv/Scripts/activate
+
+# For fish shell
+source .venv/bin/activate.fish
+```
+
+### Environment Variables
+Make sure to configure your `.env` file with the following variables:
+- `ACCESS_TOKEN`: Your WhatsApp Business API access token
+- `PHONE_NUMBER_ID`: Your WhatsApp phone number ID
+- `VERIFY_TOKEN`: Webhook verification token
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `VERSION`: WhatsApp API version (e.g., "v23.0")
+- `FLASK_DEBUG`: Set to "True" for development, "False" for production
+
+### Running the App
+The app will run on `http://localhost:8000` and your webhook endpoint will be at `http://localhost:8000/webhook`.
+
+**Development Mode (FLASK_DEBUG="True")**:
+- Auto-reload enabled - server restarts when code changes
+- Debug mode enabled - better error messages
+- Interactive debugger available
+
+**Production Mode (FLASK_DEBUG="False")**:
+- No auto-reload
+- Debug mode disabled for security
+- Optimized for performance
+
+### To stop the app:
+```bash
+# Press Ctrl+C in the terminal where the app is running
+```
+
+### To deactivate virtual environment:
+```bash
+deactivate
+```
+
+### Production Deployment
+When you deploy the app to a production environment, you might not use run.py directly (especially if you use something like Gunicorn or uWSGI). Instead, you'd just need the application instance, which is created using create_app(). The details of this vary depending on your deployment strategy, but it's a point to keep in mind.
