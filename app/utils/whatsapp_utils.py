@@ -39,22 +39,43 @@ def get_text_message_input(recipient, text):
 
 
 
-def send_message(data):
-    # Get configuration from environment variables if not in Flask context
+def send_message(data, business_context=None):
+    """
+    Send message via WhatsApp API.
+    Note: All businesses use the same Meta App (access_token from .env).
+    Only phone_number_id differs per business.
+
+    Args:
+        data: JSON message payload
+        business_context: Optional dict with phone_number_id for routing
+    """
+    # Get shared credentials from environment (same for all businesses)
     try:
         access_token = current_app.config['ACCESS_TOKEN']
         version = current_app.config['VERSION']
-        phone_number_id = current_app.config['PHONE_NUMBER_ID']
     except RuntimeError:
         # Not in Flask context, use environment variables directly
         import os
         access_token = os.getenv('ACCESS_TOKEN')
-        version = os.getenv('VERSION')
-        phone_number_id = os.getenv('PHONE_NUMBER_ID')
+        version = os.getenv('VERSION', 'v18.0')
 
-        if not all([access_token, version, phone_number_id]):
-            logging.error("Missing required environment variables for WhatsApp API")
-            return None
+    # Use business-specific phone_number_id if available, otherwise use default
+    if business_context and business_context.get('phone_number_id'):
+        phone_number_id = business_context['phone_number_id']
+        business_name = business_context.get('business', {}).get('name', 'Unknown')
+        logging.info(f"[BUSINESS] Sending for business: {business_name} (phone_number_id: {phone_number_id})")
+    else:
+        # Fallback to default phone_number_id from environment
+        try:
+            phone_number_id = current_app.config['PHONE_NUMBER_ID']
+        except RuntimeError:
+            import os
+            phone_number_id = os.getenv('PHONE_NUMBER_ID')
+        logging.info(f"[BUSINESS] Using default phone_number_id from environment: {phone_number_id}")
+
+    if not all([access_token, version, phone_number_id]):
+        logging.error("Missing required credentials for WhatsApp API")
+        return None
 
     headers = {
         "Content-type": "application/json",
@@ -132,7 +153,14 @@ def process_text_for_whatsapp(text):
     return whatsapp_style_text
 
 
-def process_whatsapp_message(body):
+def process_whatsapp_message(body, business_context=None):
+    """
+    Process incoming WhatsApp message with optional business context.
+
+    Args:
+        body: Webhook payload from WhatsApp
+        business_context: Optional dict with business info (business_id, access_token, etc.)
+    """
     try:
         wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
         name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
@@ -140,11 +168,17 @@ def process_whatsapp_message(body):
         message = body["entry"][0]["changes"][0]["value"]["messages"][0]
         message_body = message["text"]["body"]
 
-        logging.info(f"Processing message from {name} ({wa_id}): {message_body}")
+        # Log business context if available
+        if business_context:
+            logging.info(f"[BUSINESS] Processing for: {business_context['business']['name']} (ID: {business_context['business_id']})")
+        else:
+            logging.info("[BUSINESS] No business context, using default")
+
+        logging.warning(f"Processing message from {name} ({wa_id}): {message_body}")
 
         # LangChain Integration with Calendar Tools
         try:
-            response = langchain_service.generate_response(message_body, wa_id, name)
+            response = langchain_service.generate_response(message_body, wa_id, name, business_context=business_context)
             logging.info(f"Raw LangChain response: '{response}'")
             logging.info(f"Response length: {len(response) if response else 0}")
             logging.info(f"Response is empty: {not response or not response.strip()}")
@@ -161,7 +195,7 @@ def process_whatsapp_message(body):
         logging.info(f"Processed response: '{processed_response}'")
 
         data = get_text_message_input(wa_id, processed_response)
-        result = send_message(data)
+        result = send_message(data, business_context=business_context)
 
         if result is None:
             logging.error("Failed to send message to WhatsApp API")

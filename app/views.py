@@ -8,6 +8,7 @@ from .utils.whatsapp_utils import (
     process_whatsapp_message,
     is_valid_whatsapp_message,
 )
+from .database.business_service import business_service
 
 webhook_blueprint = Blueprint("webhook", __name__)
 
@@ -41,7 +42,35 @@ def handle_message():
 
     try:
         if is_valid_whatsapp_message(body):
-            process_whatsapp_message(body)
+            # Extract phone_number_id from webhook for multi-tenant routing
+            phone_number_id = None
+            try:
+                metadata = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("metadata", {})
+                phone_number_id = metadata.get("phone_number_id")
+
+                if phone_number_id:
+                    logging.warning(f"[ROUTING] Extracted phone_number_id: {phone_number_id}")
+
+                    # Get business context for this phone number
+                    business_context = business_service.get_business_context(phone_number_id)
+
+                    if business_context:
+                        logging.warning(f"[ROUTING] Routing to business: {business_context['business']['name']} (ID: {business_context['business_id']})")
+                        # Pass business context to message processor
+                        process_whatsapp_message(body, business_context=business_context)
+                    else:
+                        logging.warning(f"[ROUTING] No business found for phone_number_id: {phone_number_id}. Using default business.")
+                        # Fallback to default business
+                        process_whatsapp_message(body, business_context=None)
+                else:
+                    logging.warning("[ROUTING] No phone_number_id in webhook. Using default business.")
+                    process_whatsapp_message(body, business_context=None)
+
+            except Exception as e:
+                logging.error(f"[ROUTING] Error extracting business context: {e}")
+                # Fallback to default business on error
+                process_whatsapp_message(body, business_context=None)
+
             return jsonify({"status": "ok"}), 200
         else:
             # if the request is not a WhatsApp API event, return an error

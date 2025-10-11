@@ -94,8 +94,20 @@ Now we have to find the following information on the **App Dashboard**:
 > Please note, this is the hardest part of this tutorial.
 
 #### Start your app
-- Make you have a python installation or environment and install the requirements: `pip install -r requirements.txt`
-- Run your Flask app locally by executing [run.py](https://github.com/daveebbelaar/python-whatsapp-bot/blob/main/run.py)
+- Create and activate a virtual environment (macOS/Linux):
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  ```
+- Install the requirements:
+  ```bash
+  pip install -r requirements.txt
+  ```
+- Run your Flask app locally by executing [run.py](https://github.com/daveebbelaar/python-whatsapp-bot/blob/main/run.py):
+  ```bash
+  python3 run.py
+  ```
+- The app will run on [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
 #### Launch ngrok
 

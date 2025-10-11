@@ -5,6 +5,27 @@ from langchain.tools import tool
 from .calendar_service import calendar_service
 from ..database.customer_service import customer_service
 
+# Global configuration for calendar tools
+# This is set by the LangChainService before tool invocation
+_business_context = None
+
+def set_business_context(business_context: Optional[Dict]):
+    """Set the current business context for calendar tools."""
+    global _business_context
+    _business_context = business_context
+
+def get_max_concurrent() -> int:
+    """Get max_concurrent appointments from business settings, with fallback to 2."""
+    global _business_context
+    if _business_context and 'business' in _business_context:
+        settings = _business_context['business'].get('settings', {})
+        appointment_settings = settings.get('appointment_settings', {})
+        max_concurrent = appointment_settings.get('max_concurrent', 2)
+        logging.info(f"[CONFIG] Using max_concurrent={max_concurrent} from business settings")
+        return max_concurrent
+    logging.info(f"[CONFIG] No business context, using default max_concurrent=2")
+    return 2
+
 
 
 
@@ -78,15 +99,16 @@ def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int,
                     continue
 
         event_count = len(overlapping_events)
-        has_overlap = event_count >= 2  # Allow max 2 events at same time
+        max_concurrent = get_max_concurrent()  # Get from business settings
+        has_overlap = event_count >= max_concurrent
 
         if has_overlap:
             event_names = [event.get('summary', 'Unknown') for event in overlapping_events]
-            message = f"Ya hay {event_count} eventos programados en ese horario: {', '.join(event_names)}. Máximo permitido: 2 eventos simultáneos."
+            message = f"Ya hay {event_count} eventos programados en ese horario: {', '.join(event_names)}. Máximo permitido: {max_concurrent} eventos simultáneos."
         else:
             message = f"Disponibilidad confirmada. Eventos actuales en ese horario: {event_count}"
 
-        logging.info(f"[OVERLAP] Check result: {event_count} overlapping events, has_overlap={has_overlap}")
+        logging.info(f"[OVERLAP] Check result: {event_count} overlapping events, max_concurrent={max_concurrent}, has_overlap={has_overlap}")
         return has_overlap, event_count, message
 
     except Exception as e:
@@ -131,7 +153,8 @@ def get_available_slots(date: str = "", time_range: str = "morning") -> str:
         # Get existing events for the date
         events = calendar_service.list_events(max_results=50)
 
-        # Check which slots are available (not more than 2 events at same time)
+        # Check which slots are available (not more than max_concurrent events at same time)
+        max_concurrent = get_max_concurrent()  # Get from business settings
         available_slots = []
 
         for slot in slots:
@@ -156,8 +179,8 @@ def get_available_slots(date: str = "", time_range: str = "morning") -> str:
                         logging.warning(f"[AVAILABLE] Error parsing event time: {e}")
                         continue
 
-            # Slot is available if less than 2 events overlap
-            if overlapping_count < 2:
+            # Slot is available if less than max_concurrent events overlap
+            if overlapping_count < max_concurrent:
                 available_slots.append(slot)
 
         if available_slots:

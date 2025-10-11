@@ -1,6 +1,9 @@
 """
 Database service for managing customer information.
 Handles customer data collected during appointment scheduling.
+
+Note: Customer data is business-agnostic (a person is a person).
+Business relationships are tracked through conversations, not customers.
 """
 
 import logging
@@ -49,9 +52,10 @@ class CustomerService:
     def create_customer(self, whatsapp_id: str, name: str, age: Optional[int] = None) -> Optional[Dict]:
         """
         Create a new customer record.
+        Note: One customer record per WhatsApp ID (business-agnostic).
 
         Args:
-            whatsapp_id: WhatsApp ID
+            whatsapp_id: WhatsApp ID (unique)
             name: Customer name
             age: Customer age (optional)
 
