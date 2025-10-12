@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model businesses {
+  id               String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name             String             @db.VarChar(255)
+  business_type    String?            @default("barberia") @db.VarChar(50)
+  settings         Json?              @default("{}")
+  is_active        Boolean?           @default(true)
+  created_at       DateTime?          @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime?          @default(now()) @db.Timestamptz(6)
+  user_businesses  user_businesses[]
+  whatsapp_numbers whatsapp_numbers[]
+
+  @@index([is_active], map: "idx_businesses_is_active")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model conversations {
+  id                 Int      @id @default(autoincrement())
+  whatsapp_id        String   @db.VarChar(50)
+  message            String
+  role               String   @db.VarChar(20)
+  timestamp          DateTime @db.Timestamp(6)
+  created_at         DateTime @db.Timestamp(6)
+  business_id        String   @db.Uuid
+  whatsapp_number_id String?  @db.Uuid
+
+  @@index([business_id], map: "idx_conversations_business_id")
+  @@index([whatsapp_number_id], map: "idx_conversations_whatsapp_number_id")
+  @@index([timestamp], map: "ix_conversations_timestamp")
+  @@index([whatsapp_id], map: "ix_conversations_whatsapp_id")
+}
+
+model customers {
+  id          Int      @id @default(autoincrement())
+  whatsapp_id String   @unique(map: "ix_customers_whatsapp_id") @db.VarChar(50)
+  name        String   @db.VarChar(100)
+  age         Int?
+  created_at  DateTime @db.Timestamp(6)
+  updated_at  DateTime @db.Timestamp(6)
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model user_businesses {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id     String     @db.Uuid
+  business_id String     @db.Uuid
+  role        String?    @default("staff") @db.VarChar(50)
+  created_at  DateTime?  @default(now()) @db.Timestamptz(6)
+  businesses  businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users       users      @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, business_id])
+  @@index([business_id], map: "idx_user_businesses_business_id")
+  @@index([user_id], map: "idx_user_businesses_user_id")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model users {
+  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email           String            @unique @db.VarChar(255)
+  password_hash   String
+  full_name       String?           @db.VarChar(255)
+  is_active       Boolean?          @default(true)
+  created_at      DateTime?         @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime?         @default(now()) @db.Timestamptz(6)
+  role            String?           @default("staff") @db.VarChar(50)
+  user_businesses user_businesses[]
+
+  @@index([email], map: "idx_users_email")
+  @@index([role], map: "idx_users_role")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model whatsapp_numbers {
+  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id     String     @db.Uuid
+  phone_number_id String     @unique @db.VarChar(255)
+  phone_number    String     @db.VarChar(50)
+  is_active       Boolean?   @default(true)
+  created_at      DateTime?  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime?  @default(now()) @db.Timestamptz(6)
+  businesses      businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([business_id], map: "idx_whatsapp_numbers_business_id")
+  @@index([is_active], map: "idx_whatsapp_numbers_is_active")
+  @@index([phone_number_id], map: "idx_whatsapp_numbers_phone_number_id")
+}

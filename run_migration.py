@@ -30,11 +30,23 @@ def run_migration(migration_number: str, rollback: bool = False):
 
     # Determine migration file
     suffix = "_rollback" if rollback else ""
-    migration_file = f"migrations/{migration_number}_multi_tenant_schema{suffix}.sql"
 
-    if not os.path.exists(migration_file):
-        print(f"❌ Error: Migration file not found: {migration_file}")
+    # Try to find migration file with flexible naming
+    import glob
+    pattern = f"migrations/{migration_number}_*{suffix}.sql"
+    matching_files = glob.glob(pattern)
+
+    if not matching_files:
+        print(f"❌ Error: No migration file found matching pattern: {pattern}")
         return False
+
+    if len(matching_files) > 1:
+        print(f"❌ Error: Multiple migration files found for {migration_number}:")
+        for f in matching_files:
+            print(f"   - {f}")
+        return False
+
+    migration_file = matching_files[0]
 
     # Read migration SQL
     with open(migration_file, 'r') as f:
