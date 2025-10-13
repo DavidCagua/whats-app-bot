@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth"
+import { auth, signOut } from "@/lib/auth"
 import { redirect } from "next/navigation"
 import {
   SidebarProvider,
@@ -68,7 +68,10 @@ export default async function DashboardLayout({
                 <p className="text-sm font-medium">{session.user?.name}</p>
                 <p className="text-xs text-muted-foreground">{session.user?.email}</p>
               </div>
-              <form action="/api/auth/signout" method="post">
+              <form action={async () => {
+                "use server"
+                await signOut({ redirectTo: "/login" })
+              }}>
                 <Button variant="ghost" size="icon" type="submit">
                   <LogOut className="h-4 w-4" />
                 </Button>
