@@ -10,9 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Separator } from "@/components/ui/separator"
-import { Badge } from "@/components/ui/badge"
-import { Plus, X, Save, Clock, MapPin, Phone, Globe, Users, CreditCard, Gift, UserCheck, Calendar, MessageSquare } from "lucide-react"
+import { Plus, X, Save, Clock, MapPin, Users, CreditCard, Gift, Calendar, MessageSquare } from "lucide-react"
 import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
 
@@ -61,7 +59,7 @@ interface BusinessSettingsFormProps {
     id: string
     name: string
     business_type: string | null
-    settings: any
+    settings: unknown
   }
   initialSettings: BusinessSettings
 }
@@ -83,7 +81,7 @@ export function BusinessSettingsForm({ business, initialSettings }: BusinessSett
       } else {
         toast.error(result.error || "Failed to update settings")
       }
-    } catch (error) {
+    } catch {
       toast.error("An error occurred while updating settings")
     } finally {
       setIsLoading(false)
