@@ -225,21 +225,8 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Create engine with connection pooling configuration
-# Optimized for Supabase Direct Connection (not pooler)
-engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    pool_size=5,                    # Maximum number of permanent connections
-    max_overflow=10,                # Maximum overflow connections beyond pool_size
-    pool_timeout=30,                # Seconds to wait before giving up on getting a connection
-    pool_recycle=3600,              # Recycle connections after 1 hour (prevents stale connections)
-    pool_pre_ping=True,             # Verify connections before using (prevents "server closed connection" errors)
-    connect_args={
-        "connect_timeout": 10,       # Connection timeout in seconds
-        "application_name": "whatsapp_bot_flask",  # Helps identify connections in Supabase dashboard
-    }
-)
+# Create engine and session factory
+engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def create_tables():
