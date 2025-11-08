@@ -5,20 +5,10 @@ from langchain.tools import tool
 from .calendar_service import calendar_service
 from ..database.customer_service import customer_service
 
-# Global configuration for calendar tools
-# This is set by the LangChainService before tool invocation
-_business_context = None
-
-def set_business_context(business_context: Optional[Dict]):
-    """Set the current business context for calendar tools."""
-    global _business_context
-    _business_context = business_context
-
-def get_max_concurrent() -> int:
+def get_max_concurrent(business_context: Optional[Dict] = None) -> int:
     """Get max_concurrent appointments from business settings, with fallback to 2."""
-    global _business_context
-    if _business_context and 'business' in _business_context:
-        settings = _business_context['business'].get('settings', {})
+    if business_context and 'business' in business_context:
+        settings = business_context['business'].get('settings', {})
         appointment_settings = settings.get('appointment_settings', {})
         max_concurrent = appointment_settings.get('max_concurrent', 2)
         logging.info(f"[CONFIG] Using max_concurrent={max_concurrent} from business settings")
@@ -29,13 +19,14 @@ def get_max_concurrent() -> int:
 
 
 
-def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int, str]:
+def check_overlapping_events(start_time: str, end_time: str, business_context: Optional[Dict] = None) -> tuple[bool, int, str]:
     """
     Check if there are overlapping events at the requested time.
 
     Args:
         start_time: Start time in ISO format
         end_time: End time in ISO format
+        business_context: Business context with settings
 
     Returns:
         Tuple of (has_overlap, event_count, message)
@@ -99,7 +90,7 @@ def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int,
                     continue
 
         event_count = len(overlapping_events)
-        max_concurrent = get_max_concurrent()  # Get from business settings
+        max_concurrent = get_max_concurrent(business_context)  # Get from business settings
         has_overlap = event_count >= max_concurrent
 
         if has_overlap:
@@ -120,7 +111,7 @@ def check_overlapping_events(start_time: str, end_time: str) -> tuple[bool, int,
 
 
 @tool
-def get_available_slots(date: str = "", time_range: str = "morning") -> str:
+def get_available_slots(date: str = "", time_range: str = "morning", injected_business_context: dict = None) -> str:
     """
     Get available time slots for appointments.
 
@@ -131,30 +122,91 @@ def get_available_slots(date: str = "", time_range: str = "morning") -> str:
     Returns:
         String with available time slots
     """
-    logging.info(f"[CALENDAR] Tool called: get_available_slots with date='{date}', time_range='{time_range}'")
+    logging.warning(f"[CALENDAR] Tool called: get_available_slots with date='{date}', time_range='{time_range}'")
+    logging.warning(f"[DEBUG] _business_context type: {type(_business_context)}, is None: {_business_context is None}")
     try:
         from datetime import datetime, timedelta
+
+        # Get business context from injected parameter
+        business_context = injected_business_context
 
         # If no date provided, use tomorrow
         if not date or date == "":
             tomorrow = datetime.now() + timedelta(days=1)
             date = tomorrow.strftime('%Y-%m-%d')
 
-        # Define time slots based on time_range
+        # Get business hours from database
+        business_hours = {}
+        if business_context and 'business' in business_context:
+            settings = business_context['business'].get('settings', {})
+            business_hours = settings.get('business_hours', {})
+            logging.warning(f"[CONFIG] Using business_hours from database: {list(business_hours.keys())}")
+        else:
+            logging.warning(f"[CONFIG] No business_hours available, business_context={business_context is not None}")
+
+        # Determine day of week for the requested date
+        date_obj = datetime.strptime(date, '%Y-%m-%d')
+
+        # Map weekday number to English day name (database uses English keys)
+        weekday_map = {
+            0: 'monday',
+            1: 'tuesday',
+            2: 'wednesday',
+            3: 'thursday',
+            4: 'friday',
+            5: 'saturday',
+            6: 'sunday'
+        }
+        day_name = weekday_map[date_obj.weekday()]
+
+        day_hours = business_hours.get(day_name, {})
+        logging.warning(f"[CONFIG] Date {date} is {day_name}, day_hours: {day_hours}")
+        if day_hours.get('open') == 'closed':
+            return f"❌ Lo siento, estamos cerrados los {day_name}s. ¿Te gustaría agendar para otro día?"
+
+        # Get open/close times from database or use defaults
+        open_time = day_hours.get('open', '08:00')  # Default 8:00 AM
+        close_time = day_hours.get('close', '19:00')  # Default 7:00 PM
+
+        # Parse hours (format: "HH:MM" in 24-hour)
+        try:
+            open_hour = int(open_time.split(':')[0])
+            close_hour = int(close_time.split(':')[0])
+        except:
+            logging.warning(f"[CONFIG] Invalid time format in business_hours, using defaults")
+            open_hour = 8
+            close_hour = 19
+
+        # Generate hourly slots based on business hours
+        all_slots = []
+        for hour in range(open_hour, close_hour):
+            if hour == 0:
+                all_slots.append("12:00 AM")
+            elif hour < 12:
+                all_slots.append(f"{hour}:00 AM")
+            elif hour == 12:
+                all_slots.append("12:00 PM")
+            else:
+                all_slots.append(f"{hour - 12}:00 PM")
+
+        # Filter slots based on time_range
         if time_range == "morning":
-            slots = ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM"]
+            slots = [s for s in all_slots if any(h in s for h in ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM"])]
         elif time_range == "afternoon":
-            slots = ["12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"]
+            slots = [s for s in all_slots if any(h in s for h in ["12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"])]
         elif time_range == "evening":
-            slots = ["5:00 PM", "6:00 PM", "7:00 PM"]
+            slots = [s for s in all_slots if "PM" in s and not any(h in s for h in ["12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"])]
         else:  # "all"
-            slots = ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM", "12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM", "5:00 PM", "6:00 PM", "7:00 PM"]
+            slots = all_slots
+
+        if not slots:
+            return f"❌ No hay horarios disponibles en la {time_range} para {date}. ¿Te gustaría probar otro horario?"
 
         # Get existing events for the date
         events = calendar_service.list_events(max_results=50)
 
         # Check which slots are available (not more than max_concurrent events at same time)
-        max_concurrent = get_max_concurrent()  # Get from business settings
+        max_concurrent = get_max_concurrent(business_context)  # Get from business settings
         available_slots = []
 
         for slot in slots:
@@ -184,12 +236,13 @@ def get_available_slots(date: str = "", time_range: str = "morning") -> str:
                 available_slots.append(slot)
 
         if available_slots:
+            logging.warning(f"[CALENDAR] available_slots: {available_slots}")
             slots_text = ", ".join(available_slots)
             result = f"📅 Horarios disponibles para {date} ({time_range}):\n\n🕐 {slots_text}\n\n¿Cuál te gustaría?"
-            logging.info(f"[CALENDAR] get_available_slots completed: {len(available_slots)} slots available")
+            logging.warning(f"[CALENDAR] get_available_slots completed: {len(available_slots)} slots available")
         else:
             result = f"❌ Lo siento, no hay horarios disponibles para {date} en la {time_range}. ¿Te gustaría probar otro día o horario?"
-            logging.info(f"[CALENDAR] get_available_slots completed: no slots available")
+            logging.warning(f"[CALENDAR] get_available_slots completed: no slots available")
 
         return result
 
@@ -201,7 +254,8 @@ def get_available_slots(date: str = "", time_range: str = "morning") -> str:
 @tool
 def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_time: str,
                         customer_name: str = "", customer_age: str = "",
-                        description: str = "", location: str = "Calle 18 #25-30, Centro, Pasto") -> str:
+                        description: str = "", location: str = "",
+                        injected_business_context: dict = None) -> str:
     """
     Schedule a new appointment for a user and save their customer information.
 
@@ -213,7 +267,7 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
         customer_name: Customer's full name (optional, will be saved to database)
         customer_age: Customer's age (optional, will be saved to database)
         description: Description of the appointment
-        location: Location (defaults to barbería address)
+        location: Location (will use business address from database if not provided)
 
     Returns:
         String message about the scheduled appointment
@@ -221,6 +275,56 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
     logging.warning(f"[CALENDAR] Tool called: schedule_appointment for user {whatsapp_id}, summary='{summary}', start_time='{start_time}', customer_name='{customer_name}', customer_age='{customer_age}'")
 
     try:
+        from datetime import datetime
+
+        # Get business context from injected parameter
+        business_context = injected_business_context
+
+        # Validate appointment time is within business hours
+        try:
+            start_dt = datetime.fromisoformat(start_time.replace('Z', ''))
+            day_name = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'][start_dt.weekday()]
+
+            if business_context and 'business' in business_context:
+                settings = business_context['business'].get('settings', {})
+                business_hours = settings.get('business_hours', {})
+                day_hours = business_hours.get(day_name, {})
+
+                # Check if closed
+                if day_hours.get('open') == 'closed':
+                    return f"❌ Lo siento, estamos cerrados los {day_name}s. Por favor elige otro día."
+
+                # Check if within business hours
+                if day_hours:
+                    open_time = day_hours.get('open', '00:00')
+                    close_time = day_hours.get('close', '23:59')
+
+                    requested_hour = start_dt.hour
+                    requested_minute = start_dt.minute
+
+                    open_hour = int(open_time.split(':')[0])
+                    open_minute = int(open_time.split(':')[1]) if ':' in open_time else 0
+                    close_hour = int(close_time.split(':')[0])
+                    close_minute = int(close_time.split(':')[1]) if ':' in close_time else 0
+
+                    requested_time_minutes = requested_hour * 60 + requested_minute
+                    open_time_minutes = open_hour * 60 + open_minute
+                    close_time_minutes = close_hour * 60 + close_minute
+
+                    if requested_time_minutes < open_time_minutes or requested_time_minutes >= close_time_minutes:
+                        return f"❌ Lo siento, el horario solicitado ({start_dt.strftime('%I:%M %p')}) está fuera de nuestro horario de atención. Los {day_name}s atendemos de {open_time} a {close_time}. Por favor elige un horario dentro de este rango."
+        except Exception as e:
+            logging.warning(f"[VALIDATION] Error validating business hours: {e}")
+
+        # Get location from business settings if not provided
+        if not location:
+            if business_context and 'business' in business_context:
+                settings = business_context['business'].get('settings', {})
+                location = settings.get('address', 'Location TBD')
+                logging.info(f"[CONFIG] Using location from database: {location}")
+            else:
+                location = "Location TBD"
+
         # Save customer information if provided
         if customer_name and customer_name.strip():
             customer_age_int = None
@@ -265,7 +369,7 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
             return f"❌ Formato de fecha/hora inválido. Error: {str(e)}"
 
         # Check for overlapping events (max 2 events at same time)
-        has_overlap, event_count, overlap_message = check_overlapping_events(normalized_start, normalized_end)
+        has_overlap, event_count, overlap_message = check_overlapping_events(normalized_start, normalized_end, business_context)
 
         if has_overlap:
             logging.warning(f"[CALENDAR] Cannot create appointment - too many overlapping events: {overlap_message}")
@@ -298,7 +402,7 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
 
 @tool
 def reschedule_appointment(whatsapp_id: str, new_start_time: str, new_end_time: str,
-                          appointment_selector: str = "latest") -> str:
+                          appointment_selector: str = "latest", injected_business_context: dict = None) -> str:
     """
     Reschedule an existing appointment for a user.
 
@@ -391,7 +495,7 @@ def reschedule_appointment(whatsapp_id: str, new_start_time: str, new_end_time: 
 
 
 @tool
-def cancel_appointment(whatsapp_id: str, appointment_selector: str = "latest") -> str:
+def cancel_appointment(whatsapp_id: str, appointment_selector: str = "latest", injected_business_context: dict = None) -> str:
     """
     Cancel an existing appointment for a user.
 

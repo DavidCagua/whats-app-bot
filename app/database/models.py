@@ -225,8 +225,16 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Create engine and session factory
-engine = create_engine(DATABASE_URL, echo=False)
+# Create engine with connection pooling for Supabase/PostgreSQL
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_size=5,  # Max 5 persistent connections
+    max_overflow=10,  # Allow 10 additional connections if pool is full
+    pool_timeout=30,  # Wait 30s for connection before failing
+    pool_recycle=3600,  # Recycle connections after 1 hour
+    pool_pre_ping=True  # Verify connections before using them
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def create_tables():
@@ -234,5 +242,41 @@ def create_tables():
     Base.metadata.create_all(bind=engine)
 
 def get_db_session():
-    """Get a database session."""
+    """
+    Get a database session.
+    IMPORTANT: Always use with context manager or manually close:
+
+    with get_db_session() as session:
+        # your code here
+
+    OR:
+
+    session = get_db_session()
+    try:
+        # your code
+    finally:
+        session.close()
+    """
     return SessionLocal()
+
+def get_db():
+    """
+    Context manager for database sessions.
+    Ensures proper cleanup even if exceptions occur.
+
+    Usage:
+        from contextlib import contextmanager
+
+        with get_db() as session:
+            customer = session.query(Customer).first()
+            # session automatically closed
+    """
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

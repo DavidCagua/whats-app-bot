@@ -1,52 +1,13 @@
 """
 Prompt Builder Service
 Generates dynamic AI system prompts from business configuration.
-Combines minimal core template (tool definitions) with admin-editable business prompt.
+Admin prompts are plain text with no variable injection.
+All context (business, customer, runtime) is auto-generated and appended.
 """
 
 import logging
 from typing import Optional, Dict
 from .business_config_service import business_config_service
-
-# Minimal core template - just tool definitions and variable injection
-# Admin controls everything else via database
-CORE_TEMPLATE = """
----
-
-### Available Calendar Tools
-
-You have access to these calendar management tools:
-
-- **schedule_appointment**(whatsapp_id, summary, start_time, end_time, customer_name, customer_age)
-  Creates a new appointment in the calendar
-
-- **get_available_slots**(date, time_range)
-  Checks available time slots for appointments
-
-- **reschedule_appointment**(whatsapp_id, new_start_time, new_end_time)
-  Moves an existing appointment to a new time
-
-- **cancel_appointment**(whatsapp_id)
-  Cancels an existing appointment
-
----
-
-### Current Context
-
-- **Customer**: {name}
-- **WhatsApp ID**: {wa_id}
-- **Current Date**: {current_date} (DD/MM/YYYY)
-- **Current Year**: {current_year}
-- **Timezone**: {timezone}
-
----
-
-### Business Information
-
-{business_info}
-
----
-"""
 
 
 class PromptBuilder:
@@ -83,7 +44,7 @@ class PromptBuilder:
                 apt_settings = business_context.get('business', {}).get('settings', {}).get('appointment_settings', {}) if business_context else {}
             max_concurrent = apt_settings.get('max_concurrent', 2)
 
-            # Get admin-editable prompt from database
+            # Get admin-editable prompt from database (NO variable injection)
             admin_prompt = ""
             if business_context:
                 settings = business_context.get('business', {}).get('settings', {})
@@ -94,38 +55,26 @@ class PromptBuilder:
                 admin_prompt = self._get_default_prompt()
                 logging.warning("[PROMPT] No custom ai_prompt found, using default")
 
-            # Replace variables in admin prompt
-            filled_admin_prompt = admin_prompt.format(
-                business_name=business_info.get('business_name', 'Business'),
-                city=business_info.get('city', ''),
-                state=business_info.get('state', ''),
-                country=business_info.get('country', 'Colombia'),
-                timezone=business_info.get('timezone', 'UTC'),
+            # Build context section (customer, business, runtime info)
+            context_section = self._build_context_section(
+                business_info=business_info,
                 max_concurrent=max_concurrent,
-                current_date=current_date,
-                current_year=current_year,
-                name=name,
-                wa_id=wa_id
-            )
-
-            # Get formatted business information for prompt
-            business_info_text = business_config_service.get_services_text(business_context)
-            business_info_text += "\n\n" + business_config_service.get_hours_text(business_context)
-            business_info_text += "\n\n" + business_config_service.get_location_info(business_context)
-            business_info_text += "\n\n" + business_config_service.get_payment_methods_text(business_context)
-
-            promotions = business_config_service.get_promotions_text(business_context)
-            if promotions:
-                business_info_text += "\n\n" + promotions
-
-            # Assemble final prompt: Admin prompt + Core template
-            final_prompt = filled_admin_prompt + CORE_TEMPLATE.format(
                 name=name,
                 wa_id=wa_id,
                 current_date=current_date,
-                current_year=current_year,
-                timezone=business_info.get('timezone', 'UTC'),
-                business_info=business_info_text
+                current_year=current_year
+            )
+
+            # Build business info section (services, hours, location, etc.)
+            business_info_section = self._build_business_info_section(business_context)
+
+            # Assemble final prompt: Admin prompt + Context + Business info
+            final_prompt = (
+                admin_prompt +
+                "\n\n---\n\n" +
+                context_section +
+                "\n\n---\n\n" +
+                business_info_section
             )
 
             logging.info(f"[PROMPT] Generated dynamic prompt (length: {len(final_prompt)} chars)")
@@ -136,9 +85,96 @@ class PromptBuilder:
             # Return a safe fallback
             return self._get_fallback_prompt(name, wa_id, current_date, current_year)
 
+    def _build_context_section(
+        self,
+        business_info: Dict,
+        max_concurrent: int,
+        name: str,
+        wa_id: str,
+        current_date: str,
+        current_year: int
+    ) -> str:
+        """
+        Build context section with business, customer, and runtime information.
+        This replaces the old CORE_TEMPLATE's context variables.
+        """
+        context = "### CONTEXTO ACTUAL\n\n"
+
+        # Business context
+        context += "**Negocio:**\n"
+        context += f"- Nombre: {business_info.get('business_name', 'Business')}\n"
+        context += f"- Ubicación: {business_info.get('city', '')}, {business_info.get('state', '')}, {business_info.get('country', 'Colombia')}\n"
+
+        phone = business_info.get('phone', '')
+        if phone:
+            context += f"- Teléfono: {phone}\n"
+
+        context += f"- Zona horaria: {business_info.get('timezone', 'UTC')}\n"
+        context += f"- Máximo de citas simultáneas: {max_concurrent}\n"
+
+        context += "\n**Cliente actual:**\n"
+        context += f"- Nombre: {name}\n"
+        context += f"- WhatsApp ID: {wa_id}\n"
+
+        # Add day of week information
+        from datetime import datetime
+        try:
+            day, month, year = current_date.split('/')
+            date_obj = datetime(int(year), int(month), int(day))
+            day_names_es = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+            day_of_week = day_names_es[date_obj.weekday()]
+        except:
+            day_of_week = "desconocido"
+
+        context += "\n**Fecha y hora:**\n"
+        context += f"- Fecha actual: {current_date} (DD/MM/YYYY)\n"
+        context += f"- Día de la semana: {day_of_week}\n"
+        context += f"- Año: {current_year}\n"
+
+        return context
+
+    def _build_business_info_section(self, business_context: Optional[Dict]) -> str:
+        """
+        Build business information section (services, hours, staff, etc.).
+        Auto-generated from database settings.
+        """
+        sections = []
+
+        # Services and prices
+        services = business_config_service.get_services_text(business_context)
+        if services:
+            sections.append(services)
+
+        # Business hours
+        hours = business_config_service.get_hours_text(business_context)
+        if hours:
+            sections.append(hours)
+
+        # Staff
+        staff = business_config_service.get_staff_text(business_context)
+        if staff:
+            sections.append(staff)
+
+        # Location
+        location = business_config_service.get_location_info(business_context)
+        if location:
+            sections.append(location)
+
+        # Payment methods
+        payment = business_config_service.get_payment_methods_text(business_context)
+        if payment:
+            sections.append(payment)
+
+        # Promotions
+        promotions = business_config_service.get_promotions_text(business_context)
+        if promotions:
+            sections.append(promotions)
+
+        return "\n\n".join(sections)
+
     def _get_default_prompt(self) -> str:
-        """Default prompt when none is configured."""
-        return """Eres un asistente virtual amigable para {business_name}.
+        """Default prompt when none is configured (no variables)."""
+        return """Eres un asistente virtual amigable para el negocio.
 
 Tu función es ayudar a los clientes con:
 - Información sobre servicios y precios
@@ -147,25 +183,23 @@ Tu función es ayudar a los clientes con:
 
 Usa un tono profesional y amigable.
 
-REGLAS DE CITAS:
-- Máximo {max_concurrent} citas al mismo tiempo
-- Siempre confirma con fecha y hora exacta
-- Formato: "✅ Tu cita está agendada para el [fecha] a las [hora] para [servicio], [nombre]"
-
-Cliente actual: {name} (ID: {wa_id})
-Fecha de hoy: {current_date}
-Año: {current_year}
+REGLAS IMPORTANTES:
+- Verifica disponibilidad antes de confirmar citas
+- Siempre confirma con fecha, hora exacta, servicio y nombre del cliente
+- Recolecta información del cliente de forma natural: nombre, edad, servicio deseado
+- Formato de confirmación: "✅ Tu cita está agendada para el [fecha] a las [hora] para [servicio], [nombre]"
 """
 
     def _get_fallback_prompt(self, name: str, wa_id: str, current_date: str, current_year: int) -> str:
         """Emergency fallback prompt if everything fails."""
-        return f"""You are a helpful AI assistant.
+        return f"""You are a helpful AI assistant for appointment scheduling.
 
-Current customer: {name} (ID: {wa_id})
+Current customer: {name} (WhatsApp ID: {wa_id})
 Current date: {current_date}
 Current year: {current_year}
 
 You can help with scheduling appointments using the calendar tools available.
+Always be polite and professional.
 """
 
 
