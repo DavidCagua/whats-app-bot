@@ -4,6 +4,7 @@ import json
 import requests
 
 from app.services.langchain_service import langchain_service
+from app.database.customer_service import customer_service
 import re
 
 
@@ -163,7 +164,22 @@ def process_whatsapp_message(body, business_context=None):
     """
     try:
         wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
-        name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
+
+        # Get customer name from database (NO fallback to WhatsApp display name)
+        try:
+            customer_data = customer_service.get_customer(wa_id)
+            if customer_data and customer_data.get('name'):
+                # Use database name
+                name = customer_data['name']
+                logging.info(f"[CUSTOMER] Using database name for {wa_id}: {name}")
+            else:
+                # Customer not in database or has no name - use generic greeting
+                name = "Cliente"
+                logging.info(f"[CUSTOMER] No database name for {wa_id}, using generic: {name}")
+        except Exception as e:
+            # Database query failed - use generic greeting
+            logging.error(f"[CUSTOMER] Database lookup failed for {wa_id}: {e}, using generic name")
+            name = "Cliente"
 
         message = body["entry"][0]["changes"][0]["value"]["messages"][0]
         message_body = message["text"]["body"]

@@ -123,7 +123,7 @@ def get_available_slots(date: str = "", time_range: str = "morning", injected_bu
         String with available time slots
     """
     logging.warning(f"[CALENDAR] Tool called: get_available_slots with date='{date}', time_range='{time_range}'")
-    logging.warning(f"[DEBUG] _business_context type: {type(_business_context)}, is None: {_business_context is None}")
+    logging.warning(f"[DEBUG] injected_business_context type: {type(injected_business_context)}, is None: {injected_business_context is None}")
     try:
         from datetime import datetime, timedelta
 
