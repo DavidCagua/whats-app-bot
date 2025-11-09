@@ -15,34 +15,69 @@ class GoogleCalendarService:
     def __init__(self):
         self.creds = None
         self.service = None
-        self._authenticate()
+        self.enabled = True
+        try:
+            self._authenticate()
+        except Exception as e:
+            logging.warning(f"[CALENDAR] Google Calendar authentication failed: {e}")
+            logging.warning("[CALENDAR] Calendar features will be disabled")
+            self.enabled = False
 
     def _authenticate(self):
-        """Authenticate with Google Calendar API."""
-        # The file token.json stores the user's access and refresh tokens, and is
-        # created automatically when the authorization flow completes for the first
-        # time.
-        if os.path.exists('token.json'):
+        """Authenticate with Google Calendar API using files or environment variables."""
+
+        # Try environment variables first (for Railway/production)
+        client_id = os.getenv('GOOGLE_CLIENT_ID')
+        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
+        refresh_token = os.getenv('GOOGLE_REFRESH_TOKEN')
+
+        if client_id and client_secret and refresh_token:
+            # Create credentials from environment variables
+            logging.info("[CALENDAR] Using Google credentials from environment variables")
+            self.creds = Credentials(
+                token=None,
+                refresh_token=refresh_token,
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=client_id,
+                client_secret=client_secret,
+                scopes=SCOPES
+            )
+            # Refresh to get a valid access token
+            try:
+                self.creds.refresh(Request())
+                logging.info("[CALENDAR] Successfully refreshed credentials from environment")
+            except Exception as e:
+                logging.error(f"[CALENDAR] Failed to refresh credentials: {e}")
+                raise
+
+        # Fallback to file-based authentication (for local development)
+        elif os.path.exists('token.json'):
+            logging.info("[CALENDAR] Using Google credentials from token.json file")
             self.creds = Credentials.from_authorized_user_file('token.json', SCOPES)
 
-        # If there are no (valid) credentials available, let the user log in.
-        if not self.creds or not self.creds.valid:
-            if self.creds and self.creds.expired and self.creds.refresh_token:
-                self.creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    'client_secret_873374688567-icspa759as15biuvdta695qv2mv7ldbp.apps.googleusercontent.com.json', SCOPES)
-                self.creds = flow.run_local_server(port=0)
-
-            # Save the credentials for the next run
-            with open('token.json', 'w') as token:
-                token.write(self.creds.to_json())
+            # If there are no (valid) credentials available, let the user log in.
+            if not self.creds or not self.creds.valid:
+                if self.creds and self.creds.expired and self.creds.refresh_token:
+                    self.creds.refresh(Request())
+                else:
+                    client_secret_file = 'client_secret_873374688567-icspa759as15biuvdta695qv2mv7ldbp.apps.googleusercontent.com.json'
+                    if os.path.exists(client_secret_file):
+                        flow = InstalledAppFlow.from_client_secrets_file(client_secret_file, SCOPES)
+                        self.creds = flow.run_local_server(port=0)
+                        # Save the credentials for the next run
+                        with open('token.json', 'w') as token:
+                            token.write(self.creds.to_json())
+                    else:
+                        raise FileNotFoundError("Google Calendar client secret file not found")
+        else:
+            # No credentials available
+            raise ValueError("No Google Calendar credentials found (neither env vars nor token.json)")
 
         try:
             self.service = build('calendar', 'v3', credentials=self.creds)
-            logging.info("Successfully authenticated with Google Calendar API")
+            logging.info("[CALENDAR] Successfully authenticated with Google Calendar API")
         except HttpError as error:
-            logging.error(f'An error occurred: {error}')
+            logging.error(f'[CALENDAR] An error occurred: {error}')
             raise
 
     def list_events(self, max_results: int = 10) -> List[Dict]:
