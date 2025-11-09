@@ -116,3 +116,9 @@ def webhook_post():
     return handle_message()
 
 
+@webhook_blueprint.route("/health", methods=["GET"])
+def health():
+    """Health check endpoint for Railway deployment."""
+    return jsonify({"status": "ok", "service": "whatsapp-bot"}), 200
+
+
