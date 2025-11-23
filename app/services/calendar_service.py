@@ -12,16 +12,75 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 class GoogleCalendarService:
-    def __init__(self):
+    def __init__(self, calendar_id: str = 'primary'):
         self.creds = None
         self.service = None
         self.enabled = True
+        self.calendar_id = calendar_id
         try:
             self._authenticate()
         except Exception as e:
             logging.warning(f"[CALENDAR] Google Calendar authentication failed: {e}")
             logging.warning("[CALENDAR] Calendar features will be disabled")
             self.enabled = False
+
+    @classmethod
+    def from_business_credentials(
+        cls,
+        client_id: str,
+        client_secret: str,
+        refresh_token: str,
+        calendar_id: str = 'primary'
+    ) -> 'GoogleCalendarService':
+        """Create a calendar service instance from business-specific credentials."""
+        instance = cls.__new__(cls)
+        instance.creds = None
+        instance.service = None
+        instance.enabled = True
+        instance.calendar_id = calendar_id
+
+        try:
+            logging.info(f"[CALENDAR] Creating service from business credentials (calendar: {calendar_id})")
+            instance.creds = Credentials(
+                token=None,
+                refresh_token=refresh_token,
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=client_id,
+                client_secret=client_secret,
+                scopes=SCOPES
+            )
+            # Refresh to get a valid access token
+            instance.creds.refresh(Request())
+            instance.service = build('calendar', 'v3', credentials=instance.creds)
+            logging.info("[CALENDAR] Successfully authenticated with business credentials")
+        except Exception as e:
+            logging.error(f"[CALENDAR] Failed to authenticate with business credentials: {e}")
+            instance.enabled = False
+            raise
+
+        return instance
+
+    @classmethod
+    def from_business_context(cls, business_context: Dict) -> 'GoogleCalendarService':
+        """Create a calendar service instance from business context (used by tools)."""
+        if not business_context:
+            logging.warning("[CALENDAR] No business context provided, falling back to env vars")
+            return cls()
+
+        business = business_context.get('business', {})
+        settings = business.get('settings', {})
+        google_calendar = settings.get('google_calendar', {})
+
+        if not google_calendar.get('is_configured'):
+            logging.warning("[CALENDAR] Business calendar not configured, falling back to env vars")
+            return cls()
+
+        return cls.from_business_credentials(
+            client_id=google_calendar['client_id'],
+            client_secret=google_calendar['client_secret'],
+            refresh_token=google_calendar['refresh_token'],
+            calendar_id=google_calendar.get('calendar_id', 'primary')
+        )
 
     def _authenticate(self):
         """Authenticate with Google Calendar API using files or environment variables."""
@@ -86,7 +145,7 @@ class GoogleCalendarService:
             # Call the Calendar API
             now = datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
             events_result = self.service.events().list(
-                calendarId='primary',
+                calendarId=self.calendar_id,
                 timeMin=now,
                 maxResults=max_results,
                 singleEvents=True,
@@ -134,7 +193,7 @@ class GoogleCalendarService:
                 },
             }
 
-            event = self.service.events().insert(calendarId='primary', body=event).execute()
+            event = self.service.events().insert(calendarId=self.calendar_id, body=event).execute()
             logging.info(f'Event created: {event.get("htmlLink")}')
 
             return {
@@ -156,7 +215,7 @@ class GoogleCalendarService:
         """Update an existing calendar event."""
         try:
             # First, get the existing event
-            event = self.service.events().get(calendarId='primary', eventId=event_id).execute()
+            event = self.service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
 
             # Update the fields that were provided
             if summary:
@@ -178,7 +237,7 @@ class GoogleCalendarService:
             logging.warning(f'[UPDATE] Request payload - Start: {event["start"]}, End: {event["end"]}')
 
             updated_event = self.service.events().update(
-                calendarId='primary', eventId=event_id, body=event
+                calendarId=self.calendar_id, eventId=event_id, body=event
             ).execute()
 
             logging.warning(f'[UPDATE] Google Calendar update response - Start: {updated_event["start"].get("dateTime")}, End: {updated_event["end"].get("dateTime")}')
@@ -201,7 +260,7 @@ class GoogleCalendarService:
     def delete_event(self, event_id: str) -> bool:
         """Delete a calendar event."""
         try:
-            self.service.events().delete(calendarId='primary', eventId=event_id).execute()
+            self.service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
             logging.info(f'Event deleted: {event_id}')
             return True
         except HttpError as error:
@@ -211,7 +270,7 @@ class GoogleCalendarService:
     def get_event(self, event_id: str) -> Optional[Dict]:
         """Get a specific calendar event."""
         try:
-            event = self.service.events().get(calendarId='primary', eventId=event_id).execute()
+            event = self.service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
 
             return {
                 'id': event['id'],

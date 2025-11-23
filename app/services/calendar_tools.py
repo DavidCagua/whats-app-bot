@@ -2,8 +2,17 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import logging
 from langchain.tools import tool
-from .calendar_service import calendar_service
+from .calendar_service import GoogleCalendarService, calendar_service
 from ..database.customer_service import customer_service
+
+
+def get_calendar_service(business_context: Optional[Dict] = None) -> GoogleCalendarService:
+    """Get calendar service instance, preferring business-specific credentials if available."""
+    try:
+        return GoogleCalendarService.from_business_context(business_context)
+    except Exception as e:
+        logging.warning(f"[CALENDAR] Failed to create business-specific service: {e}, using fallback")
+        return calendar_service
 
 def get_max_concurrent(business_context: Optional[Dict] = None) -> int:
     """Get max_concurrent appointments from business settings, with fallback to 2."""
@@ -32,8 +41,11 @@ def check_overlapping_events(start_time: str, end_time: str, business_context: O
         Tuple of (has_overlap, event_count, message)
     """
     try:
+        # Get calendar service for this business
+        cal_service = get_calendar_service(business_context)
+
         # Get all events for the day
-        events = calendar_service.list_events(max_results=50)
+        events = cal_service.list_events(max_results=50)
 
         if not events or (len(events) == 1 and isinstance(events[0], dict) and "message" in events[0]):
             logging.info(f"[OVERLAP] No existing events found")
@@ -202,8 +214,11 @@ def get_available_slots(date: str = "", time_range: str = "morning", injected_bu
         if not slots:
             return f"❌ No hay horarios disponibles en la {time_range} para {date}. ¿Te gustaría probar otro horario?"
 
+        # Get calendar service for this business
+        cal_service = get_calendar_service(business_context)
+
         # Get existing events for the date
-        events = calendar_service.list_events(max_results=50)
+        events = cal_service.list_events(max_results=50)
 
         # Check which slots are available (not more than max_concurrent events at same time)
         max_concurrent = get_max_concurrent(business_context)  # Get from business settings
@@ -378,8 +393,11 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
         # Include WhatsApp ID in description
         full_description = f"{description}\n[WhatsApp ID: {whatsapp_id}]" if description else f"[WhatsApp ID: {whatsapp_id}]"
 
+        # Get calendar service for this business
+        cal_service = get_calendar_service(business_context)
+
         # Create the appointment
-        event = calendar_service.create_event(
+        event = cal_service.create_event(
             summary=summary,
             start_time=normalized_start,
             end_time=normalized_end,
@@ -418,8 +436,14 @@ def reschedule_appointment(whatsapp_id: str, new_start_time: str, new_end_time: 
     logging.warning(f"[CALENDAR] Tool called: reschedule_appointment for user {whatsapp_id}, new_start_time='{new_start_time}', selector='{appointment_selector}'")
 
     try:
+        # Get business context from injected parameter
+        business_context = injected_business_context
+
+        # Get calendar service for this business
+        cal_service = get_calendar_service(business_context)
+
         # First, find the user's appointments
-        events = calendar_service.list_events(max_results=50)
+        events = cal_service.list_events(max_results=50)
         user_appointments = []
 
         for event in events:
@@ -477,7 +501,7 @@ def reschedule_appointment(whatsapp_id: str, new_start_time: str, new_end_time: 
 
         logging.warning(f"[CALENDAR] Updating appointment {event_id} from {target_appointment.get('start')} to {normalized_start}")
 
-        updated_event = calendar_service.update_event(
+        updated_event = cal_service.update_event(
             event_id=event_id,
             start_time=normalized_start,
             end_time=normalized_end
@@ -509,8 +533,14 @@ def cancel_appointment(whatsapp_id: str, appointment_selector: str = "latest", i
     logging.warning(f"[CALENDAR] Tool called: cancel_appointment for user {whatsapp_id}, selector='{appointment_selector}'")
 
     try:
+        # Get business context from injected parameter
+        business_context = injected_business_context
+
+        # Get calendar service for this business
+        cal_service = get_calendar_service(business_context)
+
         # First, find the user's appointments
-        events = calendar_service.list_events(max_results=50)
+        events = cal_service.list_events(max_results=50)
         user_appointments = []
 
         for event in events:
@@ -544,7 +574,7 @@ def cancel_appointment(whatsapp_id: str, appointment_selector: str = "latest", i
 
         logging.warning(f"[CALENDAR] Cancelling appointment {event_id}: {event_summary}")
 
-        success = calendar_service.delete_event(event_id)
+        success = cal_service.delete_event(event_id)
 
         if success:
             logging.warning(f"[CALENDAR] cancel_appointment completed successfully: {event_id}")

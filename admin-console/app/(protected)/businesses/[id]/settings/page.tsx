@@ -4,16 +4,22 @@ import { canAccessBusiness, canEditBusiness, isSuperAdmin } from "@/lib/permissi
 import { notFound, redirect } from "next/navigation"
 import { BusinessSettingsForm } from "./components/business-settings-form"
 import { DeleteBusinessButton } from "./components/delete-business-button"
+import { GoogleCalendarSettings } from "./components/google-calendar-settings"
 import { getBusinessSettings } from "@/lib/actions/business-settings"
 
 interface BusinessSettingsPageProps {
-  params: {
+  params: Promise<{
     id: string
-  }
+  }>
+  searchParams: Promise<{
+    calendar_connected?: string
+    calendar_error?: string
+  }>
 }
 
-export default async function BusinessSettingsPage({ params }: BusinessSettingsPageProps) {
+export default async function BusinessSettingsPage({ params, searchParams }: BusinessSettingsPageProps) {
   const { id } = await params
+  const { calendar_connected, calendar_error } = await searchParams
   const session = await auth()
 
   // Check if user can access this business
@@ -41,6 +47,10 @@ export default async function BusinessSettingsPage({ params }: BusinessSettingsP
   const canEdit = canEditBusiness(session, id)
   const canDelete = isSuperAdmin(session)
 
+  // Check for calendar connection status from OAuth callback
+  const calendarConnected = calendar_connected === "true"
+  const calendarError = calendar_error
+
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between">
@@ -56,6 +66,13 @@ export default async function BusinessSettingsPage({ params }: BusinessSettingsP
           <DeleteBusinessButton businessId={id} businessName={business.name} />
         )}
       </div>
+
+      <GoogleCalendarSettings
+        businessId={id}
+        readOnly={!canEdit}
+        showSuccessMessage={calendarConnected}
+        errorMessage={calendarError}
+      />
 
       <BusinessSettingsForm
         business={business}

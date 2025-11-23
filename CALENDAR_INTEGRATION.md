@@ -84,15 +84,42 @@ Users can interact with the bot using natural language:
 
 ## Architecture
 
+### Multi-Tenant Calendar Integration
+
+The system supports per-business Google Calendar credentials, allowing each business to connect their own Google Calendar.
+
+#### How It Works
+
+1. **Business Admin connects calendar**: In Admin Console > Business Settings, click "Connect Google Calendar"
+2. **OAuth flow**: Admin authenticates with their Google account
+3. **Credentials stored**: OAuth tokens are encrypted and stored in the business's settings
+4. **WhatsApp bot uses business calendar**: When users interact with the bot, it uses the connected business's calendar
+
+#### Admin Console Environment Variables
+
+Add these to your `admin-console/.env.local`:
+
+```env
+# Google OAuth for Calendar Integration (Admin Console)
+GOOGLE_OAUTH_CLIENT_ID=your-oauth-client-id
+GOOGLE_OAUTH_CLIENT_SECRET=your-oauth-client-secret
+```
+
+**Note**: These are the OAuth 2.0 credentials for the admin console to authenticate business admins. Each business's refresh token is then stored encrypted in the database.
+
 ### Components
 
 1. **GoogleCalendarService** (`app/services/calendar_service.py`):
    - Handles authentication with Google Calendar API
    - Provides methods for CRUD operations on events
+   - Factory methods for per-business credentials:
+     - `from_business_credentials()`: Create service from explicit credentials
+     - `from_business_context()`: Create service from business context dict
 
 2. **Calendar Tools** (`app/services/calendar_tools.py`):
    - LangChain tools for calendar operations
    - Wraps the calendar service for LLM integration
+   - Uses `get_calendar_service()` helper to get per-business service
 
 3. **LangChain Service** (`app/services/langchain_service.py`):
    - Integrates OpenAI with calendar tools
@@ -101,6 +128,16 @@ Users can interact with the bot using natural language:
 4. **WhatsApp Utils** (`app/utils/whatsapp_utils.py`):
    - Updated to use the new LangChain service
    - Processes messages and sends responses
+
+5. **Calendar Actions** (`admin-console/lib/actions/calendar.ts`):
+   - Server actions for OAuth flow
+   - `getCalendarStatus()`: Check if calendar is connected
+   - `disconnectGoogleCalendar()`: Remove calendar connection
+   - `saveGoogleCalendarCredentials()`: Store OAuth tokens
+
+6. **API Routes** (`admin-console/app/api/calendar/`):
+   - `/connect`: Initiates OAuth flow
+   - `/callback`: Handles OAuth callback and saves credentials
 
 ### Tool Calling Flow
 
@@ -122,10 +159,21 @@ The integration includes comprehensive error handling:
 
 ## Security Considerations
 
+### Single-Tenant Mode (Environment Variables)
 - OAuth tokens are stored locally in `token.json`
 - API keys are stored in environment variables
 - Calendar access is limited to the authenticated user's primary calendar
+
+### Multi-Tenant Mode (Per-Business)
+- OAuth refresh tokens are encrypted using AES-256-GCM before storage
+- Encryption key derived from `ENCRYPTION_SECRET` or `NEXTAUTH_SECRET`
+- Each business's credentials are isolated in their settings JSON
+- OAuth Client ID/Secret stored on server, not in database
+- Business admins can only connect/disconnect their own calendars
+
+### General
 - All operations are logged for debugging purposes
+- API routes verify authentication and business permissions
 
 ## Troubleshooting
 
