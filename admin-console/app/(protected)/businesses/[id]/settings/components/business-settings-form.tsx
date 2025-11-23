@@ -62,9 +62,10 @@ interface BusinessSettingsFormProps {
     settings: unknown
   }
   initialSettings: BusinessSettings
+  readOnly?: boolean
 }
 
-export function BusinessSettingsForm({ business, initialSettings }: BusinessSettingsFormProps) {
+export function BusinessSettingsForm({ business, initialSettings, readOnly = false }: BusinessSettingsFormProps) {
   const [isLoading, setIsLoading] = useState(false)
 
   const form = useForm<BusinessSettingsFormData>({
@@ -145,6 +146,7 @@ export function BusinessSettingsForm({ business, initialSettings }: BusinessSett
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+      <fieldset disabled={readOnly} className="space-y-6">
       {/* Basic Information */}
       <Card>
         <CardHeader>
@@ -621,14 +623,17 @@ export function BusinessSettingsForm({ business, initialSettings }: BusinessSett
           </div>
         </CardContent>
       </Card>
+      </fieldset>
 
       {/* Submit Button */}
-      <div className="flex justify-end">
-        <Button type="submit" disabled={isLoading}>
-          <Save className="mr-2 h-4 w-4" />
-          {isLoading ? "Saving..." : "Save Settings"}
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="flex justify-end">
+          <Button type="submit" disabled={isLoading}>
+            <Save className="mr-2 h-4 w-4" />
+            {isLoading ? "Saving..." : "Save Settings"}
+          </Button>
+        </div>
+      )}
     </form>
   )
 }

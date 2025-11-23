@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Settings } from "lucide-react"
+import { Settings, Users } from "lucide-react"
 import Link from "next/link"
 import { format } from "date-fns"
 
@@ -92,12 +92,20 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                     : "N/A"}
                 </TableCell>
                 <TableCell className="text-right">
-                  <Button asChild variant="outline" size="sm">
-                    <Link href={`/businesses/${business.id}/settings`}>
-                      <Settings className="mr-2 h-4 w-4" />
-                      Settings
-                    </Link>
-                  </Button>
+                  <div className="flex justify-end gap-2">
+                    <Button asChild variant="outline" size="sm">
+                      <Link href={`/businesses/${business.id}/team`}>
+                        <Users className="mr-2 h-4 w-4" />
+                        Team
+                      </Link>
+                    </Button>
+                    <Button asChild variant="outline" size="sm">
+                      <Link href={`/businesses/${business.id}/settings`}>
+                        <Settings className="mr-2 h-4 w-4" />
+                        Settings
+                      </Link>
+                    </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))

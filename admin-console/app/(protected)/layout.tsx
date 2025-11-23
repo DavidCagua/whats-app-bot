@@ -11,7 +11,7 @@ import {
   SidebarFooter,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
-import { Building2, Home, LogOut } from "lucide-react"
+import { Building2, Home, LogOut, Users } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 
@@ -59,6 +59,17 @@ export default async function DashboardLayout({
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
+
+              {session.user?.role === "super_admin" && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton asChild>
+                    <Link href="/users">
+                      <Users className="h-4 w-4" />
+                      <span>Users</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
             </SidebarMenu>
           </SidebarContent>
 
@@ -67,6 +78,9 @@ export default async function DashboardLayout({
               <div className="flex flex-col">
                 <p className="text-sm font-medium">{session.user?.name}</p>
                 <p className="text-xs text-muted-foreground">{session.user?.email}</p>
+                {session.user?.role === "super_admin" && (
+                  <span className="text-xs text-primary font-medium">Super Admin</span>
+                )}
               </div>
               <form action={async () => {
                 "use server"

@@ -3,6 +3,12 @@ import Credentials from "next-auth/providers/credentials"
 import { compare } from "bcryptjs"
 import { prisma } from "./prisma"
 
+export type UserBusiness = {
+  businessId: string
+  businessName: string
+  role: string
+}
+
 export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: [
     Credentials({
@@ -15,10 +21,17 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           throw new Error("Missing email or password")
         }
 
-        // Find user in database
+        // Find user in database with their business associations
         const user = await prisma.users.findUnique({
           where: {
             email: credentials.email as string,
+          },
+          include: {
+            user_businesses: {
+              include: {
+                businesses: true,
+              },
+            },
           },
         })
 
@@ -31,11 +44,14 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           throw new Error("Account is disabled")
         }
 
-        // Check if user is super admin
-        if (user.role !== "super_admin") {
-          throw new Error("Access denied. Super admin privileges required.")
+        // User must be super_admin OR have at least one business association
+        const isSuperAdmin = user.role === "super_admin"
+        const hasBusinessAccess = user.user_businesses.length > 0
+
+        if (!isSuperAdmin && !hasBusinessAccess) {
+          throw new Error("Access denied. No business access configured.")
         }
-        console.log("user", user)
+
         // Verify password
         const isPasswordValid = await compare(
           credentials.password as string,
@@ -46,12 +62,20 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           throw new Error("Invalid email or password")
         }
 
-        // Return user object
+        // Build business associations array
+        const businesses: UserBusiness[] = user.user_businesses.map((ub) => ({
+          businessId: ub.business_id,
+          businessName: ub.businesses.name,
+          role: ub.role || "staff",
+        }))
+
+        // Return user object with businesses
         return {
           id: user.id,
           email: user.email || "",
           name: user.full_name || "",
           role: user.role || "",
+          businesses: JSON.stringify(businesses),
         }
       },
     }),
@@ -64,6 +88,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       if (user) {
         token.id = user.id
         token.role = user.role
+        token.businesses = user.businesses
       }
       return token
     },
@@ -71,6 +96,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       if (token && session.user) {
         session.user.id = token.id as string
         session.user.role = token.role as string
+        session.user.businesses = token.businesses
+          ? JSON.parse(token.businesses as string)
+          : []
       }
       return session
     },

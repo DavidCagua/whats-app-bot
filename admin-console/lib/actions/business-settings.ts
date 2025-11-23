@@ -1,6 +1,8 @@
 "use server"
 
 import { prisma } from "@/lib/prisma"
+import { auth } from "@/lib/auth"
+import { canAccessBusiness, canEditBusiness } from "@/lib/permissions"
 import { revalidatePath } from "next/cache"
 
 // Type for the settings JSON stored in the database
@@ -95,6 +97,16 @@ export type BusinessSettings = {
 
 export async function getBusinessSettings(businessId: string): Promise<BusinessSettings | null> {
   try {
+    // Check authentication and authorization
+    const session = await auth()
+    if (!session?.user) {
+      throw new Error("Unauthorized")
+    }
+
+    if (!canAccessBusiness(session, businessId)) {
+      throw new Error("Access denied to this business")
+    }
+
     const business = await prisma.businesses.findUnique({
       where: { id: businessId },
     })
@@ -146,6 +158,16 @@ export async function updateBusinessSettings(
   settings: Partial<BusinessSettings>
 ) {
   try {
+    // Check authentication and authorization
+    const session = await auth()
+    if (!session?.user) {
+      return { success: false, error: "Unauthorized" }
+    }
+
+    if (!canEditBusiness(session, businessId)) {
+      return { success: false, error: "You don't have permission to edit this business" }
+    }
+
     const currentBusiness = await prisma.businesses.findUnique({
       where: { id: businessId },
     })

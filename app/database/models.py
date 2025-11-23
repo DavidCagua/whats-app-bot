@@ -102,6 +102,7 @@ class User(Base):
     email = Column(String(255), nullable=False, unique=True, index=True)
     password_hash = Column(Text, nullable=False)
     full_name = Column(String(255), nullable=True)
+    role = Column(String(50), nullable=True, index=True)  # 'super_admin' for OmnIA team, NULL for business users
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -110,7 +111,7 @@ class User(Base):
     user_businesses = relationship("UserBusiness", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<User(id={self.id}, email='{self.email}', name='{self.full_name}')>"
+        return f"<User(id={self.id}, email='{self.email}', name='{self.full_name}', role='{self.role}')>"
 
     def to_dict(self):
         """Convert to dictionary for API responses."""
@@ -118,6 +119,7 @@ class User(Base):
             'id': str(self.id),
             'email': self.email,
             'full_name': self.full_name,
+            'role': self.role,
             'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -131,7 +133,7 @@ class UserBusiness(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
-    role = Column(String(50), default='staff')  # 'owner', 'admin', 'staff'
+    role = Column(String(50), default='staff')  # 'admin' for business owners/admins, 'staff' for employees
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
