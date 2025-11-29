@@ -5,6 +5,7 @@ import { notFound, redirect } from "next/navigation"
 import { BusinessSettingsForm } from "./components/business-settings-form"
 import { DeleteBusinessButton } from "./components/delete-business-button"
 import { GoogleCalendarSettings } from "./components/google-calendar-settings"
+import { WhatsAppSettings } from "./components/whatsapp-settings"
 import { getBusinessSettings } from "@/lib/actions/business-settings"
 
 interface BusinessSettingsPageProps {
@@ -66,6 +67,8 @@ export default async function BusinessSettingsPage({ params, searchParams }: Bus
           <DeleteBusinessButton businessId={id} businessName={business.name} />
         )}
       </div>
+
+      {isSuperAdmin(session) && <WhatsAppSettings businessId={id} />}
 
       <GoogleCalendarSettings
         businessId={id}
