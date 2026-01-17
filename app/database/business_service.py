@@ -207,7 +207,7 @@ class BusinessService:
             return None
 
     def create_whatsapp_number(self, business_id: str, phone_number_id: str,
-                              phone_number: str) -> Optional[Dict]:
+                              phone_number: str, display_name: str = None) -> Optional[Dict]:
         """
         Create a new WhatsApp number for a business.
         Note: Credentials (access_token, app_id, etc.) are shared and stored in .env.
@@ -216,6 +216,7 @@ class BusinessService:
             business_id: Business UUID
             phone_number_id: Meta's phone number ID (unique per business)
             phone_number: Display phone number (e.g., +15556738752)
+            display_name: Optional friendly name (e.g., "Main Line", "Support Line")
 
         Returns:
             Created WhatsApp number information, or None if failed
@@ -227,6 +228,7 @@ class BusinessService:
                 business_id=uuid.UUID(business_id),
                 phone_number_id=phone_number_id,
                 phone_number=phone_number,
+                display_name=display_name,
                 is_active=True
             )
 
@@ -266,8 +268,9 @@ class BusinessService:
             return []
 
     def update_whatsapp_number(self, whatsapp_number_id: str,
-                              phone_number: str = None, is_active: bool = None) -> Optional[Dict]:
-        """Update WhatsApp number (e.g., change display number, activate/deactivate)."""
+                              phone_number: str = None, display_name: str = None,
+                              is_active: bool = None) -> Optional[Dict]:
+        """Update WhatsApp number (e.g., change display number, display name, activate/deactivate)."""
         try:
             session: Session = get_db_session()
 
@@ -281,6 +284,8 @@ class BusinessService:
 
             if phone_number is not None:
                 whatsapp_number.phone_number = phone_number
+            if display_name is not None:
+                whatsapp_number.display_name = display_name
             if is_active is not None:
                 whatsapp_number.is_active = is_active
 

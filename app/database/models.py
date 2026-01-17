@@ -70,6 +70,7 @@ class WhatsappNumber(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     phone_number_id = Column(String(255), nullable=False, unique=True, index=True)  # Meta's phone number ID for routing
     phone_number = Column(String(50), nullable=False)  # Display number (e.g., +15556738752)
+    display_name = Column(String(255), nullable=True)  # Optional friendly name (e.g., "Main Line", "Support Line")
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -88,6 +89,7 @@ class WhatsappNumber(Base):
             'business_id': str(self.business_id),
             'phone_number_id': self.phone_number_id,
             'phone_number': self.phone_number,
+            'display_name': self.display_name,
             'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
