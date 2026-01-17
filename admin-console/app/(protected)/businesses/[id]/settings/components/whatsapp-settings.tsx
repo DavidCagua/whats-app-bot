@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -46,11 +46,7 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
   })
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  useEffect(() => {
-    loadNumbers()
-  }, [businessId])
-
-  async function loadNumbers() {
+  const loadNumbers = useCallback(async () => {
     setIsLoading(true)
     const result = await getWhatsAppNumbers(businessId)
     if (result.success) {
@@ -59,7 +55,11 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
       toast.error(result.error)
     }
     setIsLoading(false)
-  }
+  }, [businessId])
+
+  useEffect(() => {
+    loadNumbers()
+  }, [loadNumbers])
 
   async function handleAddNumber(e: React.FormEvent) {
     e.preventDefault()
@@ -162,7 +162,7 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
               <li>Business owner provides their WhatsApp Business phone number</li>
               <li>Add their number to your Meta Business Manager account</li>
               <li>In Meta Business Manager, navigate to the phone number settings</li>
-              <li>Copy the "Phone Number ID" (15-20 digit number, NOT the phone number itself)</li>
+              <li>Copy the &quot;Phone Number ID&quot; (15-20 digit number, NOT the phone number itself)</li>
               <li>Paste both the Phone Number ID and display number below</li>
             </ol>
             <a
