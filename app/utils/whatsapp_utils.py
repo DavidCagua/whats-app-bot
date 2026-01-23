@@ -163,7 +163,9 @@ def process_whatsapp_message(body, business_context=None):
         business_context: Optional dict with business info (business_id, access_token, etc.)
     """
     try:
+        logging.warning("[DEBUG] ========== PROCESSING MESSAGE ==========")
         wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
+        logging.warning(f"[DEBUG] Extracted wa_id: {wa_id}")
 
         # Get customer name from database (NO fallback to WhatsApp display name)
         try:
@@ -179,6 +181,8 @@ def process_whatsapp_message(body, business_context=None):
         except Exception as e:
             # Database query failed - use generic greeting
             logging.error(f"[CUSTOMER] Database lookup failed for {wa_id}: {e}, using generic name")
+            import traceback
+            logging.error(f"[CUSTOMER] Traceback: {traceback.format_exc()}")
             name = "Cliente"
 
         message = body["entry"][0]["changes"][0]["value"]["messages"][0]
@@ -186,41 +190,81 @@ def process_whatsapp_message(body, business_context=None):
 
         # Log business context if available
         if business_context:
-            logging.info(f"[BUSINESS] Processing for: {business_context['business']['name']} (ID: {business_context['business_id']})")
+            logging.warning(f"[BUSINESS] Processing for: {business_context['business']['name']} (ID: {business_context['business_id']})")
         else:
-            logging.info("[BUSINESS] No business context, using default")
+            logging.warning("[BUSINESS] ⚠️ No business context, using default")
 
-        logging.warning(f"Processing message from {name} ({wa_id}): {message_body}")
+        logging.warning(f"[MESSAGE] Processing message from {name} ({wa_id}): {message_body}")
 
+        # Extract message ID for tracing
+        message_id = extract_message_id(body)
+        
         # LangChain Integration with Calendar Tools
         try:
-            response = langchain_service.generate_response(message_body, wa_id, name, business_context=business_context)
-            logging.info(f"Raw LangChain response: '{response}'")
-            logging.info(f"Response length: {len(response) if response else 0}")
-            logging.info(f"Response is empty: {not response or not response.strip()}")
+            logging.warning("[DEBUG] Calling LangChain service...")
+            response = langchain_service.generate_response(
+                message_body, wa_id, name, 
+                business_context=business_context,
+                message_id=message_id
+            )
+            logging.warning(f"[DEBUG] Raw LangChain response: '{response}'")
+            logging.warning(f"[DEBUG] Response length: {len(response) if response else 0}")
+            logging.warning(f"[DEBUG] Response is empty: {not response or not response.strip()}")
 
             if not response:
-                logging.error("LangChain service returned None or empty response")
+                logging.error("❌ LangChain service returned None or empty response")
                 response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
 
         except Exception as e:
-            logging.error(f"Error in LangChain service: {e}")
+            logging.error(f"❌ Error in LangChain service: {e}")
+            import traceback
+            logging.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
             response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
 
+        logging.warning(f"[DEBUG] Processing response for WhatsApp...")
         processed_response = process_text_for_whatsapp(response)
-        logging.info(f"Processed response: '{processed_response}'")
+        logging.warning(f"[DEBUG] Processed response: '{processed_response}'")
 
+        logging.warning(f"[DEBUG] Preparing message data...")
         data = get_text_message_input(wa_id, processed_response)
+        logging.warning(f"[DEBUG] Message data: {data}")
+
+        logging.warning(f"[DEBUG] Sending message to WhatsApp API...")
         result = send_message(data, business_context=business_context)
 
         if result is None:
-            logging.error("Failed to send message to WhatsApp API")
+            logging.error("❌ Failed to send message to WhatsApp API")
         else:
-            logging.info("Message sent successfully to WhatsApp API")
+            logging.warning("✅ Message sent successfully to WhatsApp API")
+            logging.warning(f"[DEBUG] Response status: {result.status_code}")
+            logging.warning(f"[DEBUG] Response body: {result.text}")
 
     except Exception as e:
-        logging.error(f"Error processing WhatsApp message: {e}")
-        logging.error(f"Message body: {body}")
+        logging.error(f"❌ Error processing WhatsApp message: {e}")
+        import traceback
+        logging.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
+        logging.error(f"[DEBUG] Message body: {json.dumps(body, indent=2)}")
+
+
+def extract_message_id(body):
+    """
+    Extract message ID from WhatsApp webhook payload.
+
+    Args:
+        body: Webhook payload from WhatsApp
+
+    Returns:
+        Message ID string or None if not found
+    """
+    try:
+        value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
+        messages = value.get("messages", [])
+        if messages and len(messages) > 0:
+            message_id = messages[0].get("id")
+            return message_id
+    except (KeyError, IndexError, TypeError) as e:
+        logging.warning(f"[DEDUPE] Could not extract message ID: {e}")
+    return None
 
 
 def is_valid_whatsapp_message(body):

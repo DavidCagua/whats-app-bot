@@ -1,6 +1,8 @@
 import os
 import logging
 import json
+import uuid
+import time
 from typing import List, Dict, Optional
 from datetime import datetime, date
 from langchain_openai import ChatOpenAI
@@ -9,6 +11,7 @@ from .calendar_tools import calendar_tools
 from .business_config_service import business_config_service
 from .prompt_builder import prompt_builder
 from ..database.conversation_service import conversation_service
+from .tracing import tracer
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -77,13 +80,15 @@ class LangChainService:
             logging.error(f"[ERROR] Error checking recent appointment creation: {e}")
             return False
 
-    def _execute_tool_calls(self, tool_calls: List, business_context: Optional[Dict] = None) -> List[ToolMessage]:
+    def _execute_tool_calls(self, tool_calls: List, business_context: Optional[Dict] = None, 
+                           run_id: Optional[str] = None) -> List[ToolMessage]:
         """
         Execute tool calls and return proper ToolMessage objects.
 
         Args:
             tool_calls: List of tool calls from the LLM
             business_context: Business context to pass to tools
+            run_id: Optional run ID for tracing
 
         Returns:
             List of ToolMessage objects with tool results
@@ -97,8 +102,18 @@ class LangChainService:
 
             logging.warning(f"[TOOL] Executing tool: {tool_name} with args: {tool_args}")
 
+            # Log tool call start
+            if run_id:
+                tracer.log_event(run_id, "tool_call", {
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "args": tool_args
+                })
+
             # Find and execute the tool
             tool_found = False
+            tool_start = time.time()
+            
             for tool in calendar_tools:
                 if tool.name == tool_name:
                     tool_found = True
@@ -108,7 +123,17 @@ class LangChainService:
                         tool_args_with_context = {**tool_args, "injected_business_context": business_context}
                         logging.warning(f"[DEBUG] Invoking {tool_name} with args: {list(tool_args_with_context.keys())}, business_context type: {type(business_context)}")
                         result = tool.invoke(tool_args_with_context)
+                        tool_latency = (time.time() - tool_start) * 1000
                         logging.warning(f"[TOOL] Tool {tool_name} executed successfully")
+
+                        # Log tool result
+                        if run_id:
+                            tracer.log_event(run_id, "tool_result", {
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_call_id,
+                                "success": True,
+                                "latency_ms": tool_latency
+                            })
 
                         # Create proper ToolMessage
                         tool_messages.append(ToolMessage(
@@ -117,9 +142,26 @@ class LangChainService:
                             name=tool_name
                         ))
                     except Exception as e:
-                        logging.error(f"[TOOL] Error executing tool {tool_name}: {str(e)}")
+                        tool_latency = (time.time() - tool_start) * 1000
+                        error_msg = str(e)
+                        logging.error(f"[TOOL] Error executing tool {tool_name}: {error_msg}")
+                        
+                        # Log tool error
+                        if run_id:
+                            tracer.log_event(run_id, "tool_result", {
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_call_id,
+                                "success": False,
+                                "error": error_msg,
+                                "latency_ms": tool_latency
+                            })
+                            tracer.log_event(run_id, "error", {
+                                "error": f"Tool {tool_name} failed: {error_msg}",
+                                "tool_call_id": tool_call_id
+                            })
+                        
                         tool_messages.append(ToolMessage(
-                            content=f"Error: {str(e)}",
+                            content=f"Error: {error_msg}",
                             tool_call_id=tool_call_id,
                             name=tool_name,
                             additional_kwargs={"error": True}
@@ -128,6 +170,11 @@ class LangChainService:
 
             if not tool_found:
                 logging.warning(f"[TOOL] Tool '{tool_name}' not found")
+                if run_id:
+                    tracer.log_event(run_id, "error", {
+                        "error": f"Tool {tool_name} not found",
+                        "tool_call_id": tool_call_id
+                    })
                 tool_messages.append(ToolMessage(
                     content=f"Tool {tool_name} not found",
                     tool_call_id=tool_call_id,
@@ -137,7 +184,8 @@ class LangChainService:
 
         return tool_messages
 
-    def generate_response(self, message_body: str, wa_id: str, name: str, business_context=None) -> str:
+    def generate_response(self, message_body: str, wa_id: str, name: str, business_context=None, 
+                         message_id: Optional[str] = None) -> str:
         """
         Generate a response using LangChain with tool calling capabilities.
 
@@ -146,14 +194,27 @@ class LangChainService:
             wa_id: WhatsApp ID of the user
             name: Name of the user
             business_context: Optional business context for multi-tenancy
+            message_id: Optional message ID from webhook for tracing
 
         Returns:
             Generated response as a string
         """
+        # Generate unique run ID for tracing
+        run_id = str(uuid.uuid4())
+        start_time = time.time()
+        
+        # Extract business_id from context if available
+        business_id = business_context.get('business_id') if business_context else None
+        
         try:
-            # Extract business_id from context if available
-            business_id = business_context.get('business_id') if business_context else None
-
+            # Start tracing
+            tracer.start_run(
+                run_id=run_id,
+                user_id=wa_id,
+                message_id=message_id,
+                business_id=str(business_id) if business_id else None
+            )
+            
             if business_id:
                 logging.info(f"[BUSINESS] Generating response for business: {business_context['business']['name']}")
 
@@ -208,7 +269,17 @@ Please help the customer with appointment scheduling and questions."""
                 logging.info(f"[AGENT] Iteration {iteration}/{max_iterations}")
 
                 # Generate response with tool calling
+                llm_start = time.time()
                 response = self.llm_with_tools.invoke(messages)
+                llm_latency = (time.time() - llm_start) * 1000
+
+                # Log LLM call
+                has_tool_calls = hasattr(response, 'tool_calls') and bool(response.tool_calls)
+                tracer.log_event(run_id, "llm_call", {
+                    "iteration": iteration,
+                    "has_tool_calls": has_tool_calls,
+                    "latency_ms": llm_latency
+                })
 
                 # Add AI response to messages
                 messages.append(response)
@@ -218,7 +289,7 @@ Please help the customer with appointment scheduling and questions."""
                     logging.warning(f"[TOOL] Tool calls detected: {len(response.tool_calls)} tools")
 
                     # Execute tools and get ToolMessage objects
-                    tool_messages = self._execute_tool_calls(response.tool_calls, business_context)
+                    tool_messages = self._execute_tool_calls(response.tool_calls, business_context, run_id)
 
                     # Add tool results to messages
                     messages.extend(tool_messages)
@@ -236,19 +307,31 @@ Please help the customer with appointment scheduling and questions."""
                 logging.warning(f"[AGENT] Max iterations reached, using last response")
                 final_response_text = response.content if hasattr(response, 'content') else "Lo siento, necesito más tiempo para procesar tu solicitud."
             logging.warning(f"[AGENT] Final response: {final_response_text}")
+            
             # Store the conversation (scoped to business)
             logging.info(f"[STORAGE] Storing conversation for user {wa_id}")
             self.add_to_conversation_history(wa_id, "user", message_body, business_id=business_id)
             self.add_to_conversation_history(wa_id, "assistant", final_response_text, business_id=business_id)
             logging.info(f"[SUCCESS] Conversation stored successfully")
 
+            # End tracing with success
+            latency_ms = (time.time() - start_time) * 1000
+            tracer.end_run(run_id, success=True, latency_ms=latency_ms)
+
             return final_response_text
 
         except Exception as e:
+            error_msg = str(e)
             logging.error(f"Error generating response: {e}")
             import traceback
             traceback.print_exc()
-            return f"I'm sorry, I encountered an error while processing your request. Please try again later. Error: {str(e)}"
+            
+            # Log error and end tracing
+            latency_ms = (time.time() - start_time) * 1000
+            tracer.log_event(run_id, "error", {"error": error_msg})
+            tracer.end_run(run_id, success=False, error=error_msg, latency_ms=latency_ms)
+            
+            return f"I'm sorry, I encountered an error while processing your request. Please try again later. Error: {error_msg}"
 
     def process_calendar_request(self, message: str) -> str:
         """
