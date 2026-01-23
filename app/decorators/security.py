@@ -3,6 +3,7 @@ from flask import current_app, jsonify, request
 import logging
 import hashlib
 import hmac
+import os
 
 
 def validate_signature(payload, signature):
@@ -23,10 +24,17 @@ def validate_signature(payload, signature):
 def signature_required(f):
     """
     Decorator to ensure that the incoming requests to our webhook are valid and signed with the correct signature.
+    
+    In MOCK_MODE, signature verification is skipped for local testing.
     """
 
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Skip signature verification in mock mode
+        if os.getenv("MOCK_MODE", "false").lower() == "true":
+            logging.info("[MOCK MODE] Skipping signature verification")
+            return f(*args, **kwargs)
+        
         signature = request.headers.get("X-Hub-Signature-256", "")[
             7:
         ]  # Removing 'sha256='

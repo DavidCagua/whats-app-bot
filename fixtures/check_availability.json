@@ -1,0 +1,31 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [{
+    "id": "WHATSAPP_BUSINESS_ACCOUNT_ID",
+    "changes": [{
+      "value": {
+        "messaging_product": "whatsapp",
+        "metadata": {
+          "display_phone_number": "15550555555",
+          "phone_number_id": "123456789"
+        },
+        "contacts": [{
+          "profile": {
+            "name": "Jane Smith"
+          },
+          "wa_id": "573009876543"
+        }],
+        "messages": [{
+          "from": "573009876543",
+          "id": "wamid.test_availability_001",
+          "timestamp": "1234567890",
+          "text": {
+            "body": "¿Qué horarios tienes disponibles mañana?"
+          },
+          "type": "text"
+        }]
+      },
+      "field": "messages"
+    }]
+  }]
+}

@@ -123,6 +123,7 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key (required if using Langfuse tracer) | No |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key (required if using Langfuse tracer) | No |
 | `LANGFUSE_HOST` | Langfuse host URL (default: `https://cloud.langfuse.com`) | No |
+| `MOCK_MODE` | Set to `"true"` to enable local testing without Meta API access | No |
 
 3. **Database setup:**
    ```bash
@@ -142,12 +143,54 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
    ```
    Server runs on `http://127.0.0.1:8000`
 
-6. **Configure webhook:**
+6. **Configure webhook (Production):**
    - Use ngrok or similar to expose localhost: `ngrok http 8000 --domain your-domain.ngrok-free.app`
    - In Meta App Dashboard → WhatsApp → Configuration:
      - Callback URL: `https://your-domain.ngrok-free.app/webhook`
      - Verify Token: Match your `VERIFY_TOKEN` from `.env`
      - Subscribe to `messages` field
+
+### Local Testing (Mock Mode)
+
+You can test the full webhook → agent → tools flow locally without Meta API access:
+
+1. **Enable mock mode:**
+   ```bash
+   export MOCK_MODE=true
+   # Or add to .env file:
+   # MOCK_MODE=true
+   ```
+
+2. **Start the server:**
+   ```bash
+   python run.py
+   ```
+
+3. **Replay fixtures:**
+   ```bash
+   # Test a single fixture
+   python replay_fixture.py fixtures/simple_greeting.json
+   
+   # Test all fixtures
+   python replay_fixture.py fixtures/*.json
+   
+   # Custom server URL
+   SERVER_URL=http://localhost:8000 python replay_fixture.py fixtures/appointment_request.json
+   ```
+
+**What mock mode does:**
+- ✅ Skips signature verification (no Meta credentials needed)
+- ✅ Mocks WhatsApp API calls (logs messages instead of sending)
+- ✅ Full agent flow works (LLM, tools, tracing)
+- ✅ Tests webhook routing, deduplication, and business context
+
+**Mock mode output:**
+- Server logs show full execution flow
+- Messages are logged with `[MOCK MODE]` prefix instead of being sent
+- Tracing information is available
+- Tool calls execute normally (calendar tools may need Google credentials)
+
+See `fixtures/README.md` for creating custom fixtures.
 
 ### Admin Console Setup
 

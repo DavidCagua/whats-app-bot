@@ -5,6 +5,7 @@ import requests
 
 from app.services.langchain_service import langchain_service
 from app.database.customer_service import customer_service
+from app.utils.mock_mode import is_mock_mode, mock_send_message
 import re
 
 
@@ -45,11 +46,17 @@ def send_message(data, business_context=None):
     Send message via WhatsApp API.
     Note: All businesses use the same Meta App (access_token from .env).
     Only phone_number_id differs per business.
+    
+    In MOCK_MODE, this function logs the message instead of sending it.
 
     Args:
         data: JSON message payload
         business_context: Optional dict with phone_number_id for routing
     """
+    # Check if mock mode is enabled
+    if is_mock_mode():
+        return mock_send_message(data, business_context)
+    
     # Get shared credentials from environment (same for all businesses)
     try:
         access_token = current_app.config['ACCESS_TOKEN']
