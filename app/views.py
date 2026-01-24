@@ -1,5 +1,6 @@
 import logging
 import json
+import time
 
 from flask import Blueprint, request, jsonify, current_app
 
@@ -30,6 +31,7 @@ def handle_message():
         response: A tuple containing a JSON response and an HTTP status code.
     """
     body = request.get_json()
+    webhook_start = time.time()
     logging.warning(f"[DEBUG] ========== INCOMING WEBHOOK ==========")
     logging.warning(f"[DEBUG] Full request body: {json.dumps(body, indent=2)}")
 
@@ -58,6 +60,9 @@ def handle_message():
             else:
                 logging.info(f"[STATUS] Message {status_type} to {recipient} (ID: {message_id})")
         
+        logging.warning(
+            f"[TIMING] handle_message (status update) took {time.time() - webhook_start:.3f}s"
+        )
         return jsonify({"status": "ok"}), 200
 
     try:
@@ -104,25 +109,44 @@ def handle_message():
                     if business_context:
                         logging.warning(f"[ROUTING] ✅ Routing to business: {business_context['business']['name']} (ID: {business_context['business_id']})")
                         # Pass business context to message processor
+                        processing_start = time.time()
                         process_whatsapp_message(body, business_context=business_context)
+                        logging.warning(
+                            f"[TIMING] process_whatsapp_message (with business_context) took {time.time() - processing_start:.3f}s"
+                        )
                     else:
                         logging.warning(f"[ROUTING] ⚠️ No business found for phone_number_id: {phone_number_id}. Using default PHONE_NUMBER_ID from .env")
                         # Fallback to default business - still process the message!
+                        processing_start = time.time()
                         process_whatsapp_message(body, business_context=None)
+                        logging.warning(
+                            f"[TIMING] process_whatsapp_message (default context) took {time.time() - processing_start:.3f}s"
+                        )
                 else:
                     logging.warning("[ROUTING] ⚠️ No phone_number_id in webhook. Using default PHONE_NUMBER_ID from .env")
                     logging.warning(f"[DEBUG] Full value object: {json.dumps(value, indent=2)}")
                     # Still process the message with default config
+                    processing_start = time.time()
                     process_whatsapp_message(body, business_context=None)
+                    logging.warning(
+                        f"[TIMING] process_whatsapp_message (no phone_number_id) took {time.time() - processing_start:.3f}s"
+                    )
 
             except Exception as e:
                 logging.error(f"[ROUTING] ❌ Error extracting business context: {e}")
                 import traceback
                 logging.error(f"[ROUTING] Traceback: {traceback.format_exc()}")
                 # Fallback to default business on error
+                processing_start = time.time()
                 process_whatsapp_message(body, business_context=None)
+                logging.warning(
+                    f"[TIMING] process_whatsapp_message (routing error) took {time.time() - processing_start:.3f}s"
+                )
 
             logging.warning("[DEBUG] ========== WEBHOOK PROCESSING COMPLETE ==========")
+            logging.warning(
+                f"[TIMING] handle_message total took {time.time() - webhook_start:.3f}s"
+            )
             return jsonify({"status": "ok"}), 200
         else:
             # if the request is not a WhatsApp API event, return an error

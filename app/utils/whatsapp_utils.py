@@ -7,6 +7,7 @@ from app.services.langchain_service import langchain_service
 from app.database.customer_service import customer_service
 from app.utils.mock_mode import is_mock_mode, mock_send_message
 import re
+import time
 
 
 def log_http_response(response):
@@ -169,12 +170,14 @@ def process_whatsapp_message(body, business_context=None):
         body: Webhook payload from WhatsApp
         business_context: Optional dict with business info (business_id, access_token, etc.)
     """
+    overall_start = time.time()
     try:
         logging.warning("[DEBUG] ========== PROCESSING MESSAGE ==========")
         wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
         logging.warning(f"[DEBUG] Extracted wa_id: {wa_id}")
 
         # Get customer name from database (NO fallback to WhatsApp display name)
+        db_start = time.time()
         try:
             customer_data = customer_service.get_customer(wa_id)
             if customer_data and customer_data.get('name'):
@@ -191,6 +194,8 @@ def process_whatsapp_message(body, business_context=None):
             import traceback
             logging.error(f"[CUSTOMER] Traceback: {traceback.format_exc()}")
             name = "Cliente"
+        db_duration = time.time() - db_start
+        logging.warning(f"[TIMING] Customer lookup took {db_duration:.3f}s")
 
         message = body["entry"][0]["changes"][0]["value"]["messages"][0]
         message_body = message["text"]["body"]
@@ -207,6 +212,7 @@ def process_whatsapp_message(body, business_context=None):
         message_id = extract_message_id(body)
         
         # LangChain Integration with Calendar Tools
+        llm_start = time.time()
         try:
             logging.warning("[DEBUG] Calling LangChain service...")
             response = langchain_service.generate_response(
@@ -227,6 +233,8 @@ def process_whatsapp_message(body, business_context=None):
             import traceback
             logging.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
             response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
+        llm_duration = time.time() - llm_start
+        logging.warning(f"[TIMING] LangChain generate_response took {llm_duration:.3f}s")
 
         logging.warning(f"[DEBUG] Processing response for WhatsApp...")
         processed_response = process_text_for_whatsapp(response)
@@ -237,7 +245,10 @@ def process_whatsapp_message(body, business_context=None):
         logging.warning(f"[DEBUG] Message data: {data}")
 
         logging.warning(f"[DEBUG] Sending message to WhatsApp API...")
+        send_start = time.time()
         result = send_message(data, business_context=business_context)
+        send_duration = time.time() - send_start
+        logging.warning(f"[TIMING] send_message took {send_duration:.3f}s")
 
         if result is None:
             logging.error("❌ Failed to send message to WhatsApp API")
@@ -251,6 +262,9 @@ def process_whatsapp_message(body, business_context=None):
         import traceback
         logging.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
         logging.error(f"[DEBUG] Message body: {json.dumps(body, indent=2)}")
+    finally:
+        total_duration = time.time() - overall_start
+        logging.warning(f"[TIMING] process_whatsapp_message total took {total_duration:.3f}s")
 
 
 def extract_message_id(body):
