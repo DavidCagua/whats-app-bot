@@ -129,10 +129,10 @@ def get_available_slots(date: str = "", time_range: str = "morning", injected_bu
 
     Args:
         date: Date in YYYY-MM-DD format (default: tomorrow)
-        time_range: "morning" (8AM-12PM), "afternoon" (12PM-5PM), "evening" (5PM-8PM), or "all"
+        time_range: "morning" (before 12PM), "afternoon" (12PM-5PM), "evening" (after 5PM), or "all" (recommended - shows all available slots within business hours)
 
     Returns:
-        String with available time slots
+        String with available time slots based on actual business hours for that day
     """
     logging.warning(f"[CALENDAR] Tool called: get_available_slots with date='{date}', time_range='{time_range}'")
     logging.warning(f"[DEBUG] injected_business_context type: {type(injected_business_context)}, is None: {injected_business_context is None}")
@@ -201,13 +201,30 @@ def get_available_slots(date: str = "", time_range: str = "morning", injected_bu
             else:
                 all_slots.append(f"{hour - 12}:00 PM")
 
-        # Filter slots based on time_range
+        # Filter slots based on time_range (dynamically based on business hours)
+        # Convert slot to hour for filtering
+        def get_slot_hour(slot_str):
+            """Convert slot string like '3:00 PM' to 24-hour integer (15)"""
+            try:
+                parts = slot_str.replace(':00', '').split(' ')
+                hour = int(parts[0])
+                if parts[1] == 'PM' and hour != 12:
+                    hour += 12
+                elif parts[1] == 'AM' and hour == 12:
+                    hour = 0
+                return hour
+            except:
+                return 12  # Default to noon if parsing fails
+
         if time_range == "morning":
-            slots = [s for s in all_slots if any(h in s for h in ["8:00 AM", "9:00 AM", "10:00 AM", "11:00 AM"])]
+            # Morning: from open until 12 PM
+            slots = [s for s in all_slots if get_slot_hour(s) < 12]
         elif time_range == "afternoon":
-            slots = [s for s in all_slots if any(h in s for h in ["12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"])]
+            # Afternoon: 12 PM to 5 PM (17:00)
+            slots = [s for s in all_slots if 12 <= get_slot_hour(s) < 17]
         elif time_range == "evening":
-            slots = [s for s in all_slots if "PM" in s and not any(h in s for h in ["12:00 PM", "1:00 PM", "2:00 PM", "3:00 PM", "4:00 PM"])]
+            # Evening: 5 PM (17:00) until close
+            slots = [s for s in all_slots if get_slot_hour(s) >= 17]
         else:  # "all"
             slots = all_slots
 
@@ -253,10 +270,13 @@ def get_available_slots(date: str = "", time_range: str = "morning", injected_bu
         if available_slots:
             logging.warning(f"[CALENDAR] available_slots: {available_slots}")
             slots_text = ", ".join(available_slots)
-            result = f"📅 Horarios disponibles para {date} ({time_range}):\n\n🕐 {slots_text}\n\n¿Cuál te gustaría?"
+            # Include actual business hours in response for AI context
+            hours_info = f"(Horario del día: {open_time} - {close_time})"
+            result = f"📅 Horarios disponibles para {date} ({time_range}) {hours_info}:\n\n🕐 {slots_text}\n\n¿Cuál te gustaría?"
             logging.warning(f"[CALENDAR] get_available_slots completed: {len(available_slots)} slots available")
         else:
-            result = f"❌ Lo siento, no hay horarios disponibles para {date} en la {time_range}. ¿Te gustaría probar otro día o horario?"
+            hours_info = f"Horario del día: {open_time} - {close_time}"
+            result = f"❌ Lo siento, no hay horarios disponibles para {date} en la {time_range}. {hours_info}. ¿Te gustaría probar otro día o horario?"
             logging.warning(f"[CALENDAR] get_available_slots completed: no slots available")
 
         return result
