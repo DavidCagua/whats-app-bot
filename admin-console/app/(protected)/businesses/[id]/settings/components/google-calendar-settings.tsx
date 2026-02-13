@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Calendar, Link2, Unlink, Loader2, CheckCircle2, XCircle } from "lucide-react"
+import { Calendar, Link2, Unlink, Loader2, CheckCircle2, XCircle, Mail } from "lucide-react"
 import { toast } from "sonner"
 import { getCalendarStatus, disconnectGoogleCalendar, type CalendarStatus } from "@/lib/actions/calendar"
 import {
@@ -116,18 +116,20 @@ export function GoogleCalendarSettings({
         {status.is_configured ? (
           <>
             <div className="flex items-center gap-3 p-4 bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-lg">
-              <CheckCircle2 className="h-5 w-5 text-green-600" />
-              <div className="flex-1">
+              <CheckCircle2 className="h-5 w-5 text-green-600 shrink-0" />
+              <div className="flex-1 min-w-0">
                 <p className="font-medium text-green-900 dark:text-green-100">
                   Calendar Connected
                 </p>
-                {status.connected_email && (
-                  <p className="text-sm text-green-700 dark:text-green-300">
-                    {status.connected_email}
-                  </p>
-                )}
+                <div className="flex items-center gap-2 mt-1 text-sm text-green-700 dark:text-green-300">
+                  <Mail className="h-4 w-4 shrink-0" />
+                  <span className="font-medium">Connected account:</span>
+                  <span className="truncate" title={status.connected_email || undefined}>
+                    {status.connected_email || "Unknown (connected before this was tracked)"}
+                  </span>
+                </div>
               </div>
-              <Badge variant="secondary" className="bg-green-100 text-green-800">
+              <Badge variant="secondary" className="bg-green-100 text-green-800 shrink-0">
                 Active
               </Badge>
             </div>
