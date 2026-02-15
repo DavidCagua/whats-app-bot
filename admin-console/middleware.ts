@@ -16,13 +16,17 @@ export function middleware(request: NextRequest) {
   const sessionCookie = request.cookies.get("authjs.session-token") || 
                        request.cookies.get("__Secure-authjs.session-token")
 
-  // If on login page and already authenticated, redirect to dashboard
+  // Public routes that don't require authentication
+  const publicPaths = ["/login", "/privacy", "/terms"]
+  const isPublicPath = publicPaths.some((p) => pathname === p || pathname.startsWith(`${p}/`))
+
+  // If on a public page and already authenticated (except login), allow (they can still view privacy/terms)
   if (pathname === "/login" && sessionCookie) {
     return NextResponse.redirect(new URL("/", request.url))
   }
 
-  // If not on login page and not authenticated, redirect to login
-  if (pathname !== "/login" && !sessionCookie) {
+  // If not on a public path and not authenticated, redirect to login
+  if (!isPublicPath && !sessionCookie) {
     return NextResponse.redirect(new URL("/login", request.url))
   }
 

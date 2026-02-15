@@ -141,7 +141,7 @@ export default function PrivacyPolicyPage() {
               If you have any questions about this Privacy Policy, please contact us at:
             </p>
             <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-              <p className="text-gray-700"><strong>Email:</strong> privacy@yourdomain.com</p>
+              <p className="text-gray-700"><strong>Email:</strong> <a href="mailto:dfcaguazango@gmail.com" className="text-blue-600 hover:underline">dfcaguazango@gmail.com</a></p>
               <p className="text-gray-700 mt-2"><strong>Website:</strong> https://whats-app-bot-ten.vercel.app</p>
             </div>
           </section>

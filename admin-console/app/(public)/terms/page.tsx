@@ -197,7 +197,7 @@ export default function TermsOfServicePage() {
           <section>
             <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">15. Governing Law</h2>
             <p className="text-gray-700 leading-relaxed">
-              These Terms shall be governed by and construed in accordance with the laws of the United States and the State of [Your State], without regard to its conflict of law provisions.
+              These Terms shall be governed by and construed in accordance with the laws of the Republic of Colombia, without regard to its conflict of law provisions.
             </p>
           </section>
 
@@ -221,7 +221,7 @@ export default function TermsOfServicePage() {
               If you have any questions about these Terms, please contact us at:
             </p>
             <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-              <p className="text-gray-700"><strong>Email:</strong> legal@yourdomain.com</p>
+              <p className="text-gray-700"><strong>Email:</strong> <a href="mailto:dfcaguazango@gmail.com" className="text-blue-600 hover:underline">dfcaguazango@gmail.com</a></p>
               <p className="text-gray-700 mt-2"><strong>Website:</strong> https://whats-app-bot-ten.vercel.app</p>
             </div>
           </section>
