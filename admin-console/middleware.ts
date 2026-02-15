@@ -17,7 +17,7 @@ export function middleware(request: NextRequest) {
                        request.cookies.get("__Secure-authjs.session-token")
 
   // Public routes that don't require authentication
-  const publicPaths = ["/login", "/privacy", "/terms"]
+  const publicPaths = ["/login", "/privacy", "/terms", "/data-deletion"]
   const isPublicPath = publicPaths.some((p) => pathname === p || pathname.startsWith(`${p}/`))
 
   // If on a public page and already authenticated (except login), allow (they can still view privacy/terms)

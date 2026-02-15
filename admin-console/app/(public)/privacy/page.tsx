@@ -108,7 +108,7 @@ export default function PrivacyPolicyPage() {
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li>Access your personal information</li>
               <li>Request correction of inaccurate data</li>
-              <li>Request deletion of your data</li>
+              <li>Request deletion of your data (see our <Link href="/data-deletion" className="text-blue-600 hover:underline">Data Deletion Instructions</Link>)</li>
               <li>Opt-out of the Service by stopping WhatsApp interactions</li>
               <li>Revoke Google Calendar access at any time through the admin console</li>
             </ul>
