@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import Image from "next/image"
 import { signIn } from "next-auth/react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
@@ -8,6 +9,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { toast } from "sonner"
+import logo from "@/app/logo.png"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -46,7 +48,10 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-1">
-          <CardTitle className="text-2xl font-bold">Super Admin Console</CardTitle>
+          <div className="mx-auto mb-2 flex justify-center">
+            <Image src={logo} alt="Logo" width={120} height={120} priority className="object-contain" />
+          </div>
+          <CardTitle className="text-2xl font-bold text-center">Super Admin Console</CardTitle>
           <CardDescription>
             Enter your credentials to access the admin panel
           </CardDescription>
