@@ -125,9 +125,14 @@ export function GoogleCalendarSettings({
                   <Mail className="h-4 w-4 shrink-0" />
                   <span className="font-medium">Connected account:</span>
                   <span className="truncate" title={status.connected_email || undefined}>
-                    {status.connected_email || "Unknown (connected before this was tracked)"}
+                    {status.connected_email || "—"}
                   </span>
                 </div>
+                {!status.connected_email && (
+                  <p className="text-xs text-green-600 dark:text-green-400 mt-1">
+                    Disconnect and reconnect to see which Google account is linked.
+                  </p>
+                )}
               </div>
               <Badge variant="secondary" className="bg-green-100 text-green-800 shrink-0">
                 Active

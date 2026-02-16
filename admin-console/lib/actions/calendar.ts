@@ -10,7 +10,10 @@ import { Prisma } from "@prisma/client"
 // Google Calendar OAuth configuration
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET
-const SCOPES = ["https://www.googleapis.com/auth/calendar"]
+const SCOPES = [
+  "https://www.googleapis.com/auth/calendar",
+  "https://www.googleapis.com/auth/userinfo.email",
+]
 
 export type GoogleCalendarSettings = {
   client_id: string
