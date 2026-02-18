@@ -98,7 +98,13 @@ class PromptBuilder:
         Build context section with business, customer, and runtime information.
         This replaces the old CORE_TEMPLATE's context variables.
         """
-        context = "### CONTEXTO ACTUAL\n\n"
+        context = "### IDIOMA / LANGUAGE\n"
+        context += "- Detecta el idioma del mensaje del cliente (español o inglés).\n"
+        context += "- Si el cliente escribe en inglés, responde SIEMPRE en inglés con un tono profesional y amigable.\n"
+        context += "- Si el cliente escribe en español, responde en español (con el estilo y expresiones definidos en el prompt).\n"
+        context += "- Mantén el mismo idioma durante toda la conversación.\n\n"
+
+        context += "### CONTEXTO ACTUAL\n\n"
 
         # Business context
         context += "**Negocio:**\n"
@@ -175,6 +181,7 @@ class PromptBuilder:
     def _get_default_prompt(self) -> str:
         """Default prompt when none is configured (no variables)."""
         return """Eres un asistente virtual amigable para el negocio.
+Responde en el mismo idioma que use el cliente (español o inglés).
 
 Tu función es ayudar a los clientes con:
 - Información sobre servicios y precios
@@ -193,6 +200,7 @@ REGLAS IMPORTANTES:
     def _get_fallback_prompt(self, name: str, wa_id: str, current_date: str, current_year: int) -> str:
         """Emergency fallback prompt if everything fails."""
         return f"""You are a helpful AI assistant for appointment scheduling.
+Respond in the same language the customer uses (Spanish or English).
 
 Current customer: {name} (WhatsApp ID: {wa_id})
 Current date: {current_date}
