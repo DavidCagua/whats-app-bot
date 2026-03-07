@@ -21,22 +21,31 @@ def twilio_signature_required(f):
         try:
             auth_token = current_app.config.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
             if not auth_token:
-                logging.error("TWILIO_AUTH_TOKEN not configured")
+                logging.error("[TWILIO] TWILIO_AUTH_TOKEN not configured")
                 return jsonify({"status": "error", "message": "Twilio not configured"}), 503
 
             from twilio.request_validator import RequestValidator
             validator = RequestValidator(auth_token)
             signature = request.headers.get("X-Twilio-Signature", "")
-            # Build full URL (Twilio requires the full callback URL for validation)
             url = request.url
             params = dict(request.form) if request.form else {}
 
+            logging.info(
+                "[TWILIO] Validating signature: url=%s, has_signature=%s, param_count=%d",
+                url, bool(signature), len(params)
+            )
+
             if not validator.validate(url, params, signature):
-                logging.info("Twilio signature verification failed!")
+                logging.warning(
+                    "[TWILIO] Signature validation FAILED. Check: 1) TWILIO_AUTH_TOKEN matches Console "
+                    "2) URL matches Twilio webhook config (https, correct domain) 3) Proxy headers"
+                )
                 return jsonify({"status": "error", "message": "Invalid signature"}), 403
+
+            logging.info("[TWILIO] Signature validation passed")
             return f(*args, **kwargs)
         except Exception as e:
-            logging.error(f"Twilio signature validation error: {e}")
+            logging.error("[TWILIO] Signature validation error: %s", e, exc_info=True)
             return jsonify({"status": "error", "message": "Validation failed"}), 403
 
     return decorated_function
