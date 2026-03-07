@@ -172,6 +172,51 @@ class BusinessService:
     # WHATSAPP NUMBER OPERATIONS
     # ========================================================================
 
+    def _normalize_phone_for_lookup(self, phone: str) -> str:
+        """Normalize phone for Twilio lookup (strip whatsapp: prefix, digits + leading +)."""
+        if not phone:
+            return ""
+        s = str(phone).strip().lower()
+        if s.startswith("whatsapp:"):
+            s = s[9:].strip()
+        import re
+        digits = re.sub(r"[^\d+]", "", s)
+        if digits and not digits.startswith("+"):
+            digits = "+" + digits
+        return digits
+
+    def get_whatsapp_number_by_phone_number(self, phone: str) -> Optional[Dict]:
+        """
+        Get WhatsApp number by phone number (E.164).
+        Used for routing both Meta and Twilio webhooks - single lookup key.
+
+        Args:
+            phone: E.164 number (e.g. whatsapp:+573126783216 or +573126783216)
+
+        Returns:
+            WhatsApp number info with business_id, or None if not found
+        """
+        try:
+            normalized = self._normalize_phone_for_lookup(phone)
+            if not normalized:
+                return None
+
+            session: Session = get_db_session()
+            rows = session.query(WhatsappNumber).filter(
+                WhatsappNumber.is_active == True
+            ).all()
+            session.close()
+
+            for wn in rows:
+                if self._normalize_phone_for_lookup(wn.phone_number) == normalized:
+                    return wn.to_dict()
+            logging.warning(f"No active WhatsApp number found for {phone}")
+            return None
+
+        except Exception as e:
+            logging.error(f"Error getting WhatsApp number by phone: {e}")
+            return None
+
     def get_whatsapp_number_by_phone_number_id(self, phone_number_id: str) -> Optional[Dict]:
         """
         Get WhatsApp number by Meta's phone_number_id.
@@ -210,12 +255,11 @@ class BusinessService:
                               phone_number: str, display_name: str = None) -> Optional[Dict]:
         """
         Create a new WhatsApp number for a business.
-        Note: Credentials (access_token, app_id, etc.) are shared and stored in .env.
 
         Args:
             business_id: Business UUID
-            phone_number_id: Meta's phone number ID (unique per business)
-            phone_number: Display phone number (e.g., +15556738752)
+            phone_number_id: Meta's phone number ID, or "twilio:+15556738752" for Twilio
+            phone_number: E.164 number (e.g., +15556738752)
             display_name: Optional friendly name (e.g., "Main Line", "Support Line")
 
         Returns:
@@ -477,6 +521,49 @@ class BusinessService:
 
         except Exception as e:
             logging.error(f"Error getting business context: {e}")
+            return None
+
+    def get_business_context_by_phone_number(self, phone: str) -> Optional[Dict]:
+        """
+        Get business context by phone number (unified for Meta and Twilio).
+        Infers send path from phone_number_id: if it starts with "twilio:" -> Twilio API.
+
+        Args:
+            phone: E.164 number (from Meta metadata.display_phone_number or Twilio To)
+
+        Returns:
+            Context dict with business, phone_number_id or provider/twilio_phone_number
+        """
+        try:
+            whatsapp_number = self.get_whatsapp_number_by_phone_number(phone)
+            if not whatsapp_number:
+                return None
+
+            business = self.get_business(whatsapp_number['business_id'])
+            if not business:
+                logging.error(f"No business found for {whatsapp_number['business_id']}")
+                return None
+
+            pnid = whatsapp_number.get('phone_number_id', '')
+            is_twilio = str(pnid).startswith('twilio:')
+
+            context = {
+                'business': business,
+                'whatsapp_number': whatsapp_number,
+                'business_id': business['id'],
+                'whatsapp_number_id': whatsapp_number['id'],
+            }
+            if is_twilio:
+                phone_val = whatsapp_number.get('phone_number', '')
+                context['provider'] = 'twilio'
+                context['twilio_phone_number'] = f"whatsapp:{phone_val}" if phone_val and not str(phone_val).startswith('whatsapp:') else (phone_val or "")
+            else:
+                context['phone_number_id'] = pnid
+
+            logging.info(f"[CONTEXT] Loaded context for business: {business['name']}")
+            return context
+        except Exception as e:
+            logging.error(f"Error getting business context by phone number: {e}")
             return None
 
 

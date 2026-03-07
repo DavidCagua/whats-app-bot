@@ -45,25 +45,62 @@ def get_text_message_input(recipient, text):
 def send_message(data, business_context=None):
     """
     Send message via WhatsApp API.
-    Note: All businesses use the same Meta App (access_token from .env).
-    Only phone_number_id differs per business.
-    
+    Uses Meta Graph API by default; uses Twilio REST API when
+    business_context has provider="twilio".
+
     In MOCK_MODE, this function logs the message instead of sending it.
 
     Args:
-        data: JSON message payload
-        business_context: Optional dict with phone_number_id for routing
+        data: JSON message payload (from get_text_message_input)
+        business_context: Optional dict with phone_number_id (Meta) or
+            provider="twilio" + twilio_phone_number (Twilio)
     """
     # Check if mock mode is enabled
     if is_mock_mode():
         return mock_send_message(data, business_context)
-    
-    # Get shared credentials from environment (same for all businesses)
+
+    # Twilio path: use Twilio REST API
+    if business_context and business_context.get("provider") == "twilio":
+        try:
+            import os
+            account_sid = current_app.config.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
+            auth_token = current_app.config.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
+            from_number = business_context.get("twilio_phone_number") or (
+                current_app.config.get("TWILIO_WHATSAPP_NUMBER") or os.getenv("TWILIO_WHATSAPP_NUMBER")
+            )
+            if from_number and not from_number.startswith("whatsapp:"):
+                from_number = f"whatsapp:{from_number}"
+
+            if not all([account_sid, auth_token, from_number]):
+                logging.error("Missing Twilio credentials: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER")
+                return None
+
+            payload = json.loads(data) if isinstance(data, str) else data
+            to_recipient = payload.get("to", "")
+            body_text = (payload.get("text") or {}).get("body", "")
+            to_whatsapp = f"whatsapp:{to_recipient}" if to_recipient and not str(to_recipient).startswith("whatsapp:") else to_recipient
+
+            from twilio.rest import Client
+            client = Client(account_sid, auth_token)
+            msg = client.messages.create(body=body_text, from_=from_number, to=to_whatsapp)
+
+            mock_response = type("Response", (), {})()
+            mock_response.status_code = 200
+            mock_response.text = json.dumps({"sid": msg.sid})
+            mock_response.headers = {}
+            log_http_response(mock_response)
+            return mock_response
+        except Exception as e:
+            logging.error(f"Twilio send_message failed: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+
+    # Meta path: use Graph API
     try:
         access_token = current_app.config['ACCESS_TOKEN']
         version = current_app.config['VERSION']
     except RuntimeError:
-        # Not in Flask context, use environment variables directly
         import os
         access_token = os.getenv('ACCESS_TOKEN')
         version = os.getenv('VERSION', 'v18.0')

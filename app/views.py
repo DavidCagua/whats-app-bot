@@ -1,10 +1,11 @@
 import logging
 import json
+import os
 import time
 
 from flask import Blueprint, request, jsonify, current_app
 
-from .decorators.security import signature_required
+from .decorators.security import signature_required, twilio_signature_required
 from .utils.whatsapp_utils import (
     process_whatsapp_message,
     is_valid_whatsapp_message,
@@ -12,6 +13,7 @@ from .utils.whatsapp_utils import (
 )
 from .database.business_service import business_service
 from .services.message_deduplication import message_deduplication_service
+from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message
 
 webhook_blueprint = Blueprint("webhook", __name__)
 
@@ -78,58 +80,32 @@ def handle_message():
                 # Mark as processed before processing (prevents race conditions)
                 message_deduplication_service.mark_as_processed(message_id)
             
-            # Extract phone_number_id from webhook for multi-tenant routing
-            # Try multiple locations where phone_number_id might be
-            phone_number_id = None
+            # Extract receiving phone number for routing (unified lookup for Meta/Twilio)
+            value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
+            metadata = value.get("metadata", {})
+            display_phone_number = metadata.get("display_phone_number")
+            phone_number_id = metadata.get("phone_number_id") or value.get("phone_number_id")
+
             try:
-                value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
-                
-                # Try metadata first
-                metadata = value.get("metadata", {})
-                phone_number_id = metadata.get("phone_number_id")
-                
-                # If not in metadata, try top-level value
-                if not phone_number_id:
-                    phone_number_id = value.get("phone_number_id")
-                
-                # If still not found, try in the entry level
-                if not phone_number_id:
-                    phone_number_id = body.get("entry", [{}])[0].get("phone_number_id")
-                
-                logging.warning(f"[DEBUG] Value object keys: {list(value.keys())}")
-                logging.warning(f"[DEBUG] Metadata: {json.dumps(metadata, indent=2)}")
-                logging.warning(f"[DEBUG] Extracted phone_number_id: {phone_number_id}")
-
-                if phone_number_id:
-                    logging.warning(f"[ROUTING] Extracted phone_number_id: {phone_number_id}")
-
-                    # Get business context for this phone number
+                business_context = None
+                if display_phone_number:
+                    business_context = business_service.get_business_context_by_phone_number(display_phone_number)
+                if not business_context and phone_number_id:
                     business_context = business_service.get_business_context(phone_number_id)
 
-                    if business_context:
-                        logging.warning(f"[ROUTING] ✅ Routing to business: {business_context['business']['name']} (ID: {business_context['business_id']})")
-                        # Pass business context to message processor
-                        processing_start = time.time()
-                        process_whatsapp_message(body, business_context=business_context)
-                        logging.warning(
-                            f"[TIMING] process_whatsapp_message (with business_context) took {time.time() - processing_start:.3f}s"
-                        )
-                    else:
-                        logging.warning(f"[ROUTING] ⚠️ No business found for phone_number_id: {phone_number_id}. Using default PHONE_NUMBER_ID from .env")
-                        # Fallback to default business - still process the message!
-                        processing_start = time.time()
-                        process_whatsapp_message(body, business_context=None)
-                        logging.warning(
-                            f"[TIMING] process_whatsapp_message (default context) took {time.time() - processing_start:.3f}s"
-                        )
+                if business_context:
+                    logging.warning(f"[ROUTING] ✅ Routing to business: {business_context['business']['name']}")
+                    processing_start = time.time()
+                    process_whatsapp_message(body, business_context=business_context)
+                    logging.warning(
+                        f"[TIMING] process_whatsapp_message (with business_context) took {time.time() - processing_start:.3f}s"
+                    )
                 else:
-                    logging.warning("[ROUTING] ⚠️ No phone_number_id in webhook. Using default PHONE_NUMBER_ID from .env")
-                    logging.warning(f"[DEBUG] Full value object: {json.dumps(value, indent=2)}")
-                    # Still process the message with default config
+                    logging.warning("[ROUTING] ⚠️ No business found for this number. Using default from .env")
                     processing_start = time.time()
                     process_whatsapp_message(body, business_context=None)
                     logging.warning(
-                        f"[TIMING] process_whatsapp_message (no phone_number_id) took {time.time() - processing_start:.3f}s"
+                        f"[TIMING] process_whatsapp_message (default context) took {time.time() - processing_start:.3f}s"
                     )
 
             except Exception as e:
@@ -157,6 +133,74 @@ def handle_message():
     except json.JSONDecodeError:
         logging.error("Failed to decode JSON")
         return jsonify({"status": "error", "message": "Invalid JSON provided"}), 400
+
+
+def handle_twilio_message():
+    """
+    Handle incoming webhook events from Twilio WhatsApp.
+    Normalizes form data to Meta format and reuses process_whatsapp_message.
+    Returns TwiML empty response (bot replies async via REST API).
+    """
+    webhook_start = time.time()
+    form_data = dict(request.form) if request.form else {}
+    logging.warning("[DEBUG] ========== INCOMING TWILIO WEBHOOK ==========")
+    logging.warning(f"[DEBUG] Twilio form data: {json.dumps(form_data, indent=2)}")
+
+    if not is_valid_twilio_message(form_data):
+        logging.warning("[TWILIO] Invalid Twilio message (missing Body or From)")
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            200,
+            {"Content-Type": "text/xml"},
+        )
+
+    message_sid = form_data.get("MessageSid")
+    if message_sid:
+        if message_deduplication_service.is_duplicate(message_sid):
+            logging.info(f"[DEDUPE] Duplicate Twilio message, skipping: {message_sid}")
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200,
+                {"Content-Type": "text/xml"},
+            )
+        message_deduplication_service.mark_as_processed(message_sid)
+
+    # Look up business by receiving number (To) - same pattern as Meta
+    to_number = form_data.get("To", "")
+    business_context = business_service.get_business_context_by_phone_number(to_number)
+    if not business_context:
+        twilio_number = current_app.config.get("TWILIO_WHATSAPP_NUMBER") or os.getenv("TWILIO_WHATSAPP_NUMBER")
+        if twilio_number and not str(twilio_number).startswith("whatsapp:"):
+            twilio_number = f"whatsapp:{twilio_number}"
+        business_context = {
+            "provider": "twilio",
+            "twilio_phone_number": twilio_number or "",
+            "business": {"name": "Twilio"},
+            "business_id": "twilio",
+        }
+
+    normalized_body = normalize_twilio_to_meta(form_data)
+    logging.warning("[DEBUG] Valid Twilio message, processing...")
+
+    try:
+        processing_start = time.time()
+        process_whatsapp_message(normalized_body, business_context=business_context)
+        logging.warning(
+            f"[TIMING] process_whatsapp_message (Twilio) took {time.time() - processing_start:.3f}s"
+        )
+    except Exception as e:
+        logging.error(f"[TWILIO] Error processing message: {e}")
+        import traceback
+        logging.error(f"[TWILIO] Traceback: {traceback.format_exc()}")
+
+    logging.warning(
+        f"[TIMING] handle_twilio_message total took {time.time() - webhook_start:.3f}s"
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+        200,
+        {"Content-Type": "text/xml"},
+    )
 
 
 # Required webhook verifictaion for WhatsApp
@@ -190,6 +234,12 @@ def webhook_get():
 @signature_required
 def webhook_post():
     return handle_message()
+
+
+@webhook_blueprint.route("/webhook/twilio", methods=["POST"])
+@twilio_signature_required
+def webhook_twilio_post():
+    return handle_twilio_message()
 
 
 @webhook_blueprint.route("/health", methods=["GET"])

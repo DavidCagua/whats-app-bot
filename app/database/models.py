@@ -68,9 +68,9 @@ class WhatsappNumber(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
-    phone_number_id = Column(String(255), nullable=False, unique=True, index=True)  # Meta's phone number ID for routing
-    phone_number = Column(String(50), nullable=False)  # Display number (e.g., +15556738752)
-    display_name = Column(String(255), nullable=True)  # Optional friendly name (e.g., "Main Line", "Support Line")
+    phone_number_id = Column(String(255), nullable=False, unique=True, index=True)  # Meta ID or "twilio:+123" for Twilio
+    phone_number = Column(String(50), nullable=False)  # E.164 number for lookup (e.g., +15556738752)
+    display_name = Column(String(255), nullable=True)  # Optional friendly name
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
