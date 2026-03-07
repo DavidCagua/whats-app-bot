@@ -27,8 +27,17 @@ def twilio_signature_required(f):
             from twilio.request_validator import RequestValidator
             validator = RequestValidator(auth_token)
             signature = request.headers.get("X-Twilio-Signature", "")
-            url = request.url
             params = dict(request.form) if request.form else {}
+
+            # Use public URL for validation when behind proxy (Railway, Heroku, etc.)
+            base_url = current_app.config.get("TWILIO_WEBHOOK_BASE_URL") or os.getenv("TWILIO_WEBHOOK_BASE_URL")
+            if base_url:
+                url = base_url.rstrip("/") + request.path
+                if request.query_string:
+                    url = url + "?" + request.query_string.decode("utf-8")
+                logging.info("[TWILIO] Using TWILIO_WEBHOOK_BASE_URL for validation: %s", url)
+            else:
+                url = request.url
 
             logging.info(
                 "[TWILIO] Validating signature: url=%s, has_signature=%s, param_count=%d",
