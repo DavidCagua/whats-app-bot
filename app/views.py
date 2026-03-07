@@ -165,7 +165,7 @@ def handle_twilio_message():
             )
         message_deduplication_service.mark_as_processed(message_sid)
 
-    # Look up business by receiving number (To) - same pattern as Meta
+    # Look up business by receiving number (To)
     to_number = form_data.get("To", "")
     business_context = business_service.get_business_context_by_phone_number(to_number)
     if not business_context:
@@ -178,6 +178,12 @@ def handle_twilio_message():
             "business": {"name": "Twilio"},
             "business_id": "twilio",
         }
+    else:
+        # Message came via Twilio webhook - always send reply via Twilio (not Meta)
+        twilio_from = to_number if str(to_number).startswith("whatsapp:") else f"whatsapp:{to_number}"
+        business_context["provider"] = "twilio"
+        business_context["twilio_phone_number"] = twilio_from
+        business_context.pop("phone_number_id", None)  # avoid Meta API
 
     normalized_body = normalize_twilio_to_meta(form_data)
     logging.warning("[DEBUG] Valid Twilio message, processing...")
