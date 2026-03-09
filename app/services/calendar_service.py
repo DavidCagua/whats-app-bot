@@ -7,6 +7,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from ..utils.encryption import decrypt, is_encrypted
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -41,12 +42,35 @@ class GoogleCalendarService:
 
         try:
             logging.info(f"[CALENDAR] Creating service from business credentials (calendar: {calendar_id})")
+            
+            # Decrypt credentials if they are encrypted
+            decrypted_client_secret = client_secret
+            decrypted_refresh_token = refresh_token
+            
+            if is_encrypted(client_secret):
+                try:
+                    logging.info("[CALENDAR] Decrypting client_secret")
+                    decrypted_client_secret = decrypt(client_secret)
+                    logging.info("[CALENDAR] Successfully decrypted client_secret")
+                except Exception as decrypt_error:
+                    logging.error(f"[CALENDAR] Failed to decrypt client_secret: {decrypt_error}")
+                    raise ValueError(f"Cannot decrypt client_secret - credentials may have been encrypted with a different secret key. Please re-save the Google Calendar credentials in the admin console.")
+            
+            if is_encrypted(refresh_token):
+                try:
+                    logging.info("[CALENDAR] Decrypting refresh_token")
+                    decrypted_refresh_token = decrypt(refresh_token)
+                    logging.info("[CALENDAR] Successfully decrypted refresh_token")
+                except Exception as decrypt_error:
+                    logging.error(f"[CALENDAR] Failed to decrypt refresh_token: {decrypt_error}")
+                    raise ValueError(f"Cannot decrypt refresh_token - credentials may have been encrypted with a different secret key. Please re-save the Google Calendar credentials in the admin console.")
+            
             instance.creds = Credentials(
                 token=None,
-                refresh_token=refresh_token,
+                refresh_token=decrypted_refresh_token,
                 token_uri='https://oauth2.googleapis.com/token',
                 client_id=client_id,
-                client_secret=client_secret,
+                client_secret=decrypted_client_secret,
                 scopes=SCOPES
             )
             # Refresh to get a valid access token
