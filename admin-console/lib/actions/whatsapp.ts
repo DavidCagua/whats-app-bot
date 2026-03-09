@@ -8,7 +8,7 @@ import { revalidatePath } from "next/cache"
 export type WhatsAppNumber = {
   id: string
   business_id: string
-  phone_number_id: string
+  phone_number_id: string | null
   phone_number: string
   display_name: string | null
   is_active: boolean
@@ -50,7 +50,7 @@ export async function getWhatsAppNumbers(businessId: string) {
  */
 export async function addWhatsAppNumber(data: {
   businessId: string
-  phoneNumberId: string
+  phoneNumberId?: string
   phoneNumber: string
   displayName?: string
 }) {
@@ -64,8 +64,8 @@ export async function addWhatsAppNumber(data: {
     return { success: false, error: "Only super admins can add WhatsApp numbers" }
   }
 
-  // Validate phone_number_id format (should be numeric, 15-20 digits typically)
-  if (!/^\d{10,25}$/.test(data.phoneNumberId)) {
+  // Validate phone_number_id format if provided (should be numeric, 15-20 digits typically)
+  if (data.phoneNumberId && !/^\d{10,25}$/.test(data.phoneNumberId)) {
     return {
       success: false,
       error: "Invalid Phone Number ID format. Should be 10-25 digits (e.g., 123456789012345)",
@@ -81,15 +81,32 @@ export async function addWhatsAppNumber(data: {
   }
 
   try {
-    // Check if phone_number_id already exists
-    const existing = await prisma.whatsapp_numbers.findUnique({
-      where: { phone_number_id: data.phoneNumberId },
+    // Check if phone_number_id already exists (if provided)
+    if (data.phoneNumberId) {
+      const existing = await prisma.whatsapp_numbers.findUnique({
+        where: { phone_number_id: data.phoneNumberId },
+      })
+
+      if (existing) {
+        return {
+          success: false,
+          error: "This Phone Number ID is already registered to another business",
+        }
+      }
+    }
+
+    // Check if phone number already exists for this business
+    const existingPhone = await prisma.whatsapp_numbers.findFirst({
+      where: {
+        business_id: data.businessId,
+        phone_number: data.phoneNumber,
+      },
     })
 
-    if (existing) {
+    if (existingPhone) {
       return {
         success: false,
-        error: "This Phone Number ID is already registered to another business",
+        error: "This phone number is already registered for this business",
       }
     }
 
@@ -97,7 +114,7 @@ export async function addWhatsAppNumber(data: {
     const whatsappNumber = await prisma.whatsapp_numbers.create({
       data: {
         business_id: data.businessId,
-        phone_number_id: data.phoneNumberId,
+        phone_number_id: data.phoneNumberId || null,
         phone_number: data.phoneNumber,
         display_name: data.displayName || null,
         is_active: true,

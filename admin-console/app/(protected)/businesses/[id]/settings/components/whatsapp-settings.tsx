@@ -160,10 +160,10 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
             </p>
             <ol className="list-decimal pl-4 space-y-1 text-blue-800 dark:text-blue-200">
               <li>Business owner provides their WhatsApp Business phone number</li>
-              <li>Add their number to your Meta Business Manager account</li>
-              <li>In Meta Business Manager, navigate to the phone number settings</li>
-              <li>Copy the &quot;Phone Number ID&quot; (15-20 digit number, NOT the phone number itself)</li>
-              <li>Paste both the Phone Number ID and display number below</li>
+              <li>Enter the phone number below (with country code, e.g., +573001234567)</li>
+              <li>
+                <strong>Optional:</strong> If using Meta&apos;s WhatsApp Business API, you can also add the Phone Number ID from Meta Business Manager for more reliable routing
+              </li>
             </ol>
             <a
               href="https://developers.facebook.com/docs/whatsapp/business-management-api/manage-phone-numbers"
@@ -203,9 +203,11 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                         </Badge>
                       )}
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      ID: {number.phone_number_id}
-                    </p>
+                    {number.phone_number_id && (
+                      <p className="text-xs text-muted-foreground">
+                        Meta ID: {number.phone_number_id}
+                      </p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="flex items-center gap-2">
@@ -238,26 +240,8 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
           {showAddForm ? (
             <form onSubmit={handleAddNumber} className="space-y-4 border p-4 rounded-lg">
               <div className="space-y-2">
-                <Label htmlFor="phoneNumberId">
-                  Phone Number ID <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="phoneNumberId"
-                  placeholder="e.g., 123456789012345"
-                  value={formData.phoneNumberId}
-                  onChange={(e) =>
-                    setFormData({ ...formData, phoneNumberId: e.target.value })
-                  }
-                  required
-                />
-                <p className="text-xs text-muted-foreground">
-                  The unique ID from Meta Business Manager (15-20 digits)
-                </p>
-              </div>
-
-              <div className="space-y-2">
                 <Label htmlFor="phoneNumber">
-                  Display Phone Number <span className="text-destructive">*</span>
+                  Phone Number <span className="text-destructive">*</span>
                 </Label>
                 <Input
                   id="phoneNumber"
@@ -267,7 +251,7 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                   required
                 />
                 <p className="text-xs text-muted-foreground">
-                  The actual phone number (with country code)
+                  The WhatsApp Business phone number (with country code)
                 </p>
               </div>
 
@@ -281,6 +265,23 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                 />
                 <p className="text-xs text-muted-foreground">
                   A friendly name to identify this number
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="phoneNumberId">
+                  Phone Number ID (Optional - Meta only)
+                </Label>
+                <Input
+                  id="phoneNumberId"
+                  placeholder="e.g., 123456789012345"
+                  value={formData.phoneNumberId}
+                  onChange={(e) =>
+                    setFormData({ ...formData, phoneNumberId: e.target.value })
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  The unique ID from Meta Business Manager (15-20 digits). Only needed if using Meta&apos;s WhatsApp Business API.
                 </p>
               </div>
 
