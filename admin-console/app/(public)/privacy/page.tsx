@@ -99,7 +99,7 @@ export default function PrivacyPolicyPage() {
           <section>
             <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">7. Data Retention</h2>
             <p className="text-gray-700 leading-relaxed">
-              We retain conversation history and appointment data as long as necessary to provide the Service. Business administrators can request deletion of their data by contacting us. Conversation history is kept for service improvement and to provide context for ongoing appointments.
+              We retain conversation history and appointment data as long as necessary to provide the Service. Business administrators can request deletion of their data by contacting us. Conversation history may be retained to provide service functionality, maintain context for ongoing appointments, and improve system performance.
             </p>
           </section>
 
