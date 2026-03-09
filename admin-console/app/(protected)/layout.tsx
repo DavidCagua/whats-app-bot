@@ -11,7 +11,7 @@ import {
   SidebarFooter,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
-import { Building2, Home, LogOut, Users } from "lucide-react"
+import { Building2, Home, LogOut, Users, MessageSquare } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 
@@ -56,6 +56,15 @@ export default async function DashboardLayout({
                   <Link href="/businesses">
                     <Building2 className="h-4 w-4" />
                     <span>Businesses</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild>
+                  <Link href="/conversations">
+                    <MessageSquare className="h-4 w-4" />
+                    <span>Conversations</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
