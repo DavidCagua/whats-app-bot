@@ -114,9 +114,9 @@ export async function addWhatsAppNumber(data: {
     const whatsappNumber = await prisma.whatsapp_numbers.create({
       data: {
         business_id: data.businessId,
-        phone_number_id: data.phoneNumberId || null,
+        phone_number_id: data.phoneNumberId ?? null,
         phone_number: data.phoneNumber,
-        display_name: data.displayName || null,
+        display_name: data.displayName ?? null,
         is_active: true,
       },
     })
