@@ -53,7 +53,7 @@ export default function LoginPage() {
           </div>
           <CardTitle className="text-2xl font-bold text-center">Super Admin Console</CardTitle>
           <CardDescription>
-            Enter your credentials to access the admin panel
+            Omniabot helps businesses automate customer interactions such as appointment scheduling and support via WhatsApp. Enter your credentials to access the admin panel.
           </CardDescription>
         </CardHeader>
         <CardContent>

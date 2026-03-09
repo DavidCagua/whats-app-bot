@@ -47,7 +47,8 @@ export default function PrivacyPolicyPage() {
 
           <section>
             <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">3. How We Use Your Information</h2>
-            <p className="text-gray-700 leading-relaxed">We use the collected information for:</p>
+            <p className="text-gray-700 leading-relaxed">Businesses using the platform are responsible for obtaining user consent before sending messages through WhatsApp or SMS.</p>
+            <p className="text-gray-700 leading-relaxed mt-2">We use the collected information for:</p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li><strong>Appointment Scheduling:</strong> Processing and managing appointment requests through natural language conversations</li>
               <li><strong>Calendar Integration:</strong> Creating, updating, and managing appointments in Google Calendar</li>
@@ -141,8 +142,10 @@ export default function PrivacyPolicyPage() {
               If you have any questions about this Privacy Policy, please contact us at:
             </p>
             <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-              <p className="text-gray-700"><strong>Email:</strong> <a href="mailto:dfcaguazango@gmail.com" className="text-blue-600 hover:underline">dfcaguazango@gmail.com</a></p>
-              <p className="text-gray-700 mt-2"><strong>Website:</strong> https://whats-app-bot-ten.vercel.app</p>
+              <p className="text-gray-700"><strong>Operator:</strong> David Caguazango</p>
+              <p className="text-gray-700 mt-2"><strong>Location:</strong> Colombia</p>
+              <p className="text-gray-700 mt-2"><strong>Email:</strong> <a href="mailto:felipe0160@gmail.com" className="text-blue-600 hover:underline">felipe0160@gmail.com</a></p>
+              <p className="text-gray-700 mt-2"><strong>Website:</strong> <a href="https://omniabot.site" className="text-blue-600 hover:underline">https://omniabot.site</a></p>
             </div>
           </section>
         </div>

@@ -221,8 +221,10 @@ export default function TermsOfServicePage() {
               If you have any questions about these Terms, please contact us at:
             </p>
             <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-              <p className="text-gray-700"><strong>Email:</strong> <a href="mailto:dfcaguazango@gmail.com" className="text-blue-600 hover:underline">dfcaguazango@gmail.com</a></p>
-              <p className="text-gray-700 mt-2"><strong>Website:</strong> https://whats-app-bot-ten.vercel.app</p>
+              <p className="text-gray-700"><strong>Operator:</strong> David Caguazango</p>
+              <p className="text-gray-700 mt-2"><strong>Location:</strong> Colombia</p>
+              <p className="text-gray-700 mt-2"><strong>Email:</strong> <a href="mailto:felipe0160@gmail.com" className="text-blue-600 hover:underline">felipe0160@gmail.com</a></p>
+              <p className="text-gray-700 mt-2"><strong>Website:</strong> <a href="https://omniabot.site" className="text-blue-600 hover:underline">https://omniabot.site</a></p>
             </div>
           </section>
         </div>

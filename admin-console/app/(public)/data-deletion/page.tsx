@@ -28,7 +28,7 @@ export default function DataDeletionPage() {
               If you are an end user who communicated with a business through our WhatsApp bot (e.g. to book an appointment):
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
-              <li>Send an email to <a href="mailto:dfcaguazango@gmail.com" className="text-blue-600 hover:underline">dfcaguazango@gmail.com</a> with the subject &quot;Data deletion request&quot;.</li>
+              <li>Send an email to <a href="mailto:felipe0160@gmail.com" className="text-blue-600 hover:underline">felipe0160@gmail.com</a> with the subject &quot;Data deletion request&quot;.</li>
               <li>Include the phone number you used on WhatsApp (with country code, e.g. +57 300 123 4567).</li>
               <li>Optionally, tell us the business name if you remember it so we can locate your data faster.</li>
             </ul>
@@ -43,7 +43,7 @@ export default function DataDeletionPage() {
               If you have an admin account and want to delete your business data or your user account:
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
-              <li>Send an email to <a href="mailto:dfcaguazango@gmail.com" className="text-blue-600 hover:underline">dfcaguazango@gmail.com</a> with the subject &quot;Account / business data deletion request&quot;.</li>
+              <li>Send an email to <a href="mailto:felipe0160@gmail.com" className="text-blue-600 hover:underline">felipe0160@gmail.com</a> with the subject &quot;Account / business data deletion request&quot;.</li>
               <li>Include the email address associated with your admin account and, if applicable, the business name.</li>
               <li>Specify whether you want to delete only certain data (e.g. Google Calendar connection) or your full account and business data.</li>
             </ul>
@@ -70,7 +70,7 @@ export default function DataDeletionPage() {
             <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">Contact</h2>
             <p className="text-gray-700 leading-relaxed">
               For any questions about data deletion or your privacy, contact us at{" "}
-              <a href="mailto:dfcaguazango@gmail.com" className="text-blue-600 hover:underline">dfcaguazango@gmail.com</a>.
+              <a href="mailto:felipe0160@gmail.com" className="text-blue-600 hover:underline">felipe0160@gmail.com</a>.
             </p>
           </section>
         </div>
