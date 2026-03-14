@@ -49,7 +49,15 @@ class CustomerService:
             logging.error(f"Error getting customer info for {whatsapp_id}: {e}")
             return None
 
-    def create_customer(self, whatsapp_id: str, name: str, age: Optional[int] = None) -> Optional[Dict]:
+    def create_customer(
+        self,
+        whatsapp_id: str,
+        name: str,
+        age: Optional[int] = None,
+        address: Optional[str] = None,
+        phone: Optional[str] = None,
+        payment_method: Optional[str] = None,
+    ) -> Optional[Dict]:
         """
         Create a new customer record.
         Note: One customer record per WhatsApp ID (business-agnostic).
@@ -58,6 +66,9 @@ class CustomerService:
             whatsapp_id: WhatsApp ID (unique)
             name: Customer name
             age: Customer age (optional)
+            address: Delivery address (optional)
+            phone: Contact phone (optional)
+            payment_method: Preferred payment method (optional)
 
         Returns:
             Created customer information as dictionary, or None if failed
@@ -65,11 +76,13 @@ class CustomerService:
         try:
             session: Session = get_db_session()
 
-            # Create new customer record
             customer = Customer(
                 whatsapp_id=whatsapp_id,
                 name=name,
-                age=age
+                age=age,
+                address=address,
+                phone=phone,
+                payment_method=payment_method,
             )
 
             session.add(customer)
@@ -81,15 +94,29 @@ class CustomerService:
             logging.info(f"Created customer: {name} (WhatsApp: {whatsapp_id})")
             return customer_dict
 
-        except IntegrityError as e:
+        except IntegrityError:
             logging.warning(f"Customer already exists for WhatsApp ID {whatsapp_id}")
-            # Customer already exists, try to update instead
-            return self.update_customer(whatsapp_id, name, age)
+            return self.update_customer(
+                whatsapp_id,
+                name=name,
+                age=age,
+                address=address,
+                phone=phone,
+                payment_method=payment_method,
+            )
         except Exception as e:
             logging.error(f"Error creating customer for {whatsapp_id}: {e}")
             return None
 
-    def update_customer(self, whatsapp_id: str, name: str = None, age: int = None) -> Optional[Dict]:
+    def update_customer(
+        self,
+        whatsapp_id: str,
+        name: Optional[str] = None,
+        age: Optional[int] = None,
+        address: Optional[str] = None,
+        phone: Optional[str] = None,
+        payment_method: Optional[str] = None,
+    ) -> Optional[Dict]:
         """
         Update existing customer information.
 
@@ -97,6 +124,9 @@ class CustomerService:
             whatsapp_id: WhatsApp ID
             name: New customer name (optional)
             age: New customer age (optional)
+            address: Delivery address (optional)
+            phone: Contact phone (optional)
+            payment_method: Preferred payment method (optional)
 
         Returns:
             Updated customer information as dictionary, or None if failed
@@ -104,20 +134,27 @@ class CustomerService:
         try:
             session: Session = get_db_session()
 
-            customer = session.query(Customer)\
-                .filter(Customer.whatsapp_id == whatsapp_id)\
+            customer = (
+                session.query(Customer)
+                .filter(Customer.whatsapp_id == whatsapp_id)
                 .first()
+            )
 
             if not customer:
                 session.close()
                 logging.warning(f"No customer found to update for WhatsApp ID {whatsapp_id}")
                 return None
 
-            # Update fields if provided
             if name is not None:
                 customer.name = name
             if age is not None:
                 customer.age = age
+            if address is not None:
+                customer.address = address
+            if phone is not None:
+                customer.phone = phone
+            if payment_method is not None:
+                customer.payment_method = payment_method
 
             session.commit()
             customer_dict = customer.to_dict()

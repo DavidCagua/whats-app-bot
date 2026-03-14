@@ -3,7 +3,7 @@ Database models for Multi-Tenant WhatsApp bot.
 Includes models for businesses, users, WhatsApp numbers, customers, and conversations.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, create_engine
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Numeric, create_engine
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -160,6 +160,86 @@ class UserBusiness(Base):
 # EXISTING MODELS (UPDATED FOR MULTI-TENANCY)
 # ============================================================================
 
+class AgentType(Base):
+    """Reference table for available agent types."""
+    __tablename__ = 'agent_types'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    type = Column(String(50), nullable=False, unique=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'type': self.type,
+            'name': self.name,
+            'description': self.description,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class BusinessAgent(Base):
+    """Maps which agents are enabled per business."""
+    __tablename__ = 'business_agents'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    agent_type = Column(String(50), nullable=False)
+    enabled = Column(Boolean, default=True)
+    priority = Column(Integer, default=100)
+    config = Column(JSONB, default={})
+    created_by = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'agent_type': self.agent_type,
+            'enabled': self.enabled,
+            'priority': self.priority,
+            'config': self.config,
+            'created_by': str(self.created_by) if self.created_by else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ConversationSession(Base):
+    """Per-conversation session state for multi-turn flows."""
+    __tablename__ = 'conversation_sessions'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    wa_id = Column(String(50), nullable=False)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False)
+    active_agents = Column(JSONB, default=[])
+    order_context = Column(JSONB, default={})
+    booking_context = Column(JSONB, default={})
+    agent_contexts = Column(JSONB, default={})
+    last_order_id = Column(String(50), nullable=True)
+    last_booking_id = Column(String(50), nullable=True)
+    last_activity_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'wa_id': self.wa_id,
+            'business_id': str(self.business_id),
+            'active_agents': self.active_agents or [],
+            'order_context': self.order_context or {},
+            'booking_context': self.booking_context or {},
+            'agent_contexts': self.agent_contexts or {},
+            'last_order_id': self.last_order_id,
+            'last_booking_id': self.last_booking_id,
+            'last_activity_at': self.last_activity_at.isoformat() if self.last_activity_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Conversation(Base):
     """Model for storing conversation messages."""
     __tablename__ = 'conversations'
@@ -170,6 +250,7 @@ class Conversation(Base):
     whatsapp_id = Column(String(50), nullable=False, index=True)  # Customer's WhatsApp ID
     message = Column(Text, nullable=False)
     role = Column(String(20), nullable=False)  # 'user' or 'assistant'
+    agent_type = Column(String(50), nullable=True)  # Future-proofing for per-agent history
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -190,9 +271,11 @@ class Conversation(Base):
             'message': self.message,
             'content': self.message,  # For compatibility with existing code that expects 'content'
             'role': self.role,
+            'agent_type': self.agent_type,
             'timestamp': self.timestamp.isoformat() if self.timestamp else None,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
+
 
 class Customer(Base):
     """
@@ -206,6 +289,9 @@ class Customer(Base):
     whatsapp_id = Column(String(50), nullable=False, unique=True, index=True)  # Unique - one customer record per WhatsApp ID
     name = Column(String(100), nullable=False)
     age = Column(Integer, nullable=True)
+    address = Column(Text, nullable=True)
+    phone = Column(String(50), nullable=True)
+    payment_method = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -219,9 +305,112 @@ class Customer(Base):
             'whatsapp_id': self.whatsapp_id,
             'name': self.name,
             'age': self.age,
+            'address': self.address,
+            'phone': self.phone,
+            'payment_method': self.payment_method,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+
+
+# ============================================================================
+# PRODUCTS AND ORDERS (Migration 007/008)
+# ============================================================================
+
+class Product(Base):
+    """Model for products in a business catalog."""
+    __tablename__ = 'products'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    price = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(10), default='COP')
+    category = Column(String(50), nullable=True, index=True)
+    sku = Column(String(50), nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'name': self.name,
+            'description': self.description,
+            'price': float(self.price) if self.price else 0,
+            'currency': self.currency,
+            'category': self.category,
+            'sku': self.sku,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Order(Base):
+    """Model for customer orders."""
+    __tablename__ = 'orders'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey('customers.id', ondelete='SET NULL'), nullable=True, index=True)
+    whatsapp_id = Column(String(50), nullable=True)
+    status = Column(String(20), default='pending', index=True)
+    total_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    notes = Column(Text, nullable=True)
+    delivery_address = Column(Text, nullable=True)
+    contact_phone = Column(String(50), nullable=True)
+    payment_method = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'customer_id': self.customer_id,
+            'whatsapp_id': self.whatsapp_id,
+            'status': self.status,
+            'total_amount': float(self.total_amount) if self.total_amount else 0,
+            'notes': self.notes,
+            'delivery_address': self.delivery_address,
+            'contact_phone': self.contact_phone,
+            'payment_method': self.payment_method,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class OrderItem(Base):
+    """Model for order line items."""
+    __tablename__ = 'order_items'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_id = Column(UUID(as_uuid=True), ForeignKey('orders.id', ondelete='CASCADE'), nullable=False, index=True)
+    product_id = Column(UUID(as_uuid=True), ForeignKey('products.id', ondelete='RESTRICT'), nullable=False, index=True)
+    quantity = Column(Integer, nullable=False)
+    unit_price = Column(Numeric(12, 2), nullable=False)
+    line_total = Column(Numeric(12, 2), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    order = relationship("Order", back_populates="order_items")
+    product = relationship("Product", backref="order_items")
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'order_id': str(self.order_id),
+            'product_id': str(self.product_id),
+            'quantity': self.quantity,
+            'unit_price': float(self.unit_price) if self.unit_price else 0,
+            'line_total': float(self.line_total) if self.line_total else 0,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
 
 # Database configuration
 DATABASE_URL = os.getenv('DATABASE_URL')

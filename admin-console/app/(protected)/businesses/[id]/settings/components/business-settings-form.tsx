@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Plus, X, Save, Clock, MapPin, Users, CreditCard, Gift, Calendar, MessageSquare } from "lucide-react"
+import { Switch } from "@/components/ui/switch"
+import { Plus, X, Save, Clock, MapPin, Users, CreditCard, Gift, Calendar, MessageSquare, Package } from "lucide-react"
 import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
 
@@ -50,6 +51,8 @@ const businessSettingsSchema = z.object({
     default_duration_minutes: z.number().min(1, "Must be at least 1 minute"),
   }),
   ai_prompt: z.string().min(1, "AI prompt is required"),
+  products_enabled: z.boolean(),
+  menu_url: z.string().optional(),
 })
 
 type BusinessSettingsFormData = z.infer<typeof businessSettingsSchema>
@@ -273,6 +276,36 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
                   <SelectItem value="es-PE">Español (Perú)</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="md:col-span-2 flex items-center justify-between rounded-lg border p-4">
+              <div className="space-y-0.5">
+                <Label htmlFor="products_enabled" className="flex items-center gap-2">
+                  <Package className="h-4 w-4" />
+                  Habilitar pedidos de productos
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  Permite a los clientes ver el menú y realizar pedidos por WhatsApp
+                </p>
+              </div>
+              <Switch
+                id="products_enabled"
+                checked={form.watch("products_enabled")}
+                onCheckedChange={(checked) => form.setValue("products_enabled", checked)}
+              />
+            </div>
+
+            <div className="md:col-span-2 space-y-2">
+              <Label htmlFor="menu_url">URL del menú</Label>
+              <Input
+                id="menu_url"
+                {...form.register("menu_url")}
+                placeholder="https://ejemplo.com/menu.html"
+                type="url"
+              />
+              <p className="text-sm text-muted-foreground">
+                Enlace al menú completo. El asistente lo incluirá en el saludo inicial.
+              </p>
             </div>
           </div>
         </CardContent>

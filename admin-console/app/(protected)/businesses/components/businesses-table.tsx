@@ -65,7 +65,14 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
             ) : (
               data.map((business) => (
                 <TableRow key={business.id}>
-                  <TableCell className="font-medium">{business.name}</TableCell>
+                  <TableCell className="font-medium">
+                    <Link
+                      href={`/businesses/${business.id}`}
+                      className="hover:underline"
+                    >
+                      {business.name}
+                    </Link>
+                  </TableCell>
                   <TableCell className="capitalize">
                     {business.business_type || "N/A"}
                   </TableCell>

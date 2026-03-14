@@ -81,10 +81,13 @@ export async function addWhatsAppNumber(data: {
   }
 
   try {
+    // Normalize empty string to null - multiple NULLs allowed (partial unique index), empty string would violate
+    const phoneNumberId = data.phoneNumberId?.trim() || null
+
     // Check if phone_number_id already exists (if provided)
-    if (data.phoneNumberId) {
+    if (phoneNumberId) {
       const existing = await prisma.whatsapp_numbers.findUnique({
-        where: { phone_number_id: data.phoneNumberId },
+        where: { phone_number_id: phoneNumberId },
       })
 
       if (existing) {
@@ -114,7 +117,7 @@ export async function addWhatsAppNumber(data: {
     const whatsappNumber = await prisma.whatsapp_numbers.create({
       data: {
         business_id: data.businessId,
-        phone_number_id: data.phoneNumberId ?? null,
+        phone_number_id: phoneNumberId,
         phone_number: data.phoneNumber,
         display_name: data.displayName ?? null,
         is_active: true,

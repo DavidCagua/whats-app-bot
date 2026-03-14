@@ -40,6 +40,8 @@ type BusinessSettingsData = {
     default_duration_minutes: number
   }
   ai_prompt?: string
+  products_enabled?: boolean
+  menu_url?: string
 }
 
 export type BusinessSettings = {
@@ -93,6 +95,12 @@ export type BusinessSettings = {
   
   // AI Prompt
   ai_prompt: string
+
+  // Products / Orders
+  products_enabled: boolean
+
+  // Menu
+  menu_url: string
 }
 
 export async function getBusinessSettings(businessId: string): Promise<BusinessSettings | null> {
@@ -146,6 +154,8 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
         default_duration_minutes: 60,
       },
       ai_prompt: settings?.ai_prompt || "",
+      products_enabled: settings?.products_enabled ?? true,
+      menu_url: settings?.menu_url ?? "",
     }
   } catch (error) {
     console.error("Error fetching business settings:", error)
@@ -211,6 +221,8 @@ export async function updateBusinessSettings(
       ...(settings.staff !== undefined && { staff: settings.staff }),
       ...(settings.appointment_settings !== undefined && { appointment_settings: settings.appointment_settings }),
       ...(settings.ai_prompt !== undefined && { ai_prompt: settings.ai_prompt }),
+      ...(settings.products_enabled !== undefined && { products_enabled: settings.products_enabled }),
+      ...(settings.menu_url !== undefined && { menu_url: settings.menu_url }),
     }
 
     updateData.settings = newSettings

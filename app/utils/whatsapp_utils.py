@@ -3,7 +3,7 @@ from flask import current_app, jsonify
 import json
 import requests
 
-from app.services.langchain_service import langchain_service
+from app.orchestration.conversation_manager import conversation_manager
 from app.database.customer_service import customer_service
 from app.utils.mock_mode import is_mock_mode, mock_send_message
 import re
@@ -248,30 +248,32 @@ def process_whatsapp_message(body, business_context=None):
         # Extract message ID for tracing
         message_id = extract_message_id(body)
         
-        # LangChain Integration with Calendar Tools
+        # Multi-agent orchestration (ConversationManager -> AgentExecutor -> Agent)
         llm_start = time.time()
         try:
-            logging.warning("[DEBUG] Calling LangChain service...")
-            response = langchain_service.generate_response(
-                message_body, wa_id, name, 
+            logging.warning("[DEBUG] Calling ConversationManager...")
+            response = conversation_manager.process(
+                message_body=message_body,
+                wa_id=wa_id,
+                name=name,
                 business_context=business_context,
-                message_id=message_id
+                message_id=message_id,
             )
-            logging.warning(f"[DEBUG] Raw LangChain response: '{response}'")
+            logging.warning(f"[DEBUG] Response from ConversationManager: '{response}'")
             logging.warning(f"[DEBUG] Response length: {len(response) if response else 0}")
             logging.warning(f"[DEBUG] Response is empty: {not response or not response.strip()}")
 
             if not response:
-                logging.error("❌ LangChain service returned None or empty response")
+                logging.error("❌ ConversationManager returned None or empty response")
                 response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
 
         except Exception as e:
-            logging.error(f"❌ Error in LangChain service: {e}")
+            logging.error(f"❌ Error in ConversationManager: {e}")
             import traceback
             logging.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
             response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
         llm_duration = time.time() - llm_start
-        logging.warning(f"[TIMING] LangChain generate_response took {llm_duration:.3f}s")
+        logging.warning(f"[TIMING] ConversationManager.process took {llm_duration:.3f}s")
 
         logging.warning(f"[DEBUG] Processing response for WhatsApp...")
         processed_response = process_text_for_whatsapp(response)
