@@ -1,8 +1,10 @@
 """
 Service for product catalog and order creation.
+Includes category normalization and hybrid lookup (category + semantic fallback).
 """
 
 import logging
+import unicodedata
 import uuid
 from typing import Dict, List, Optional, Any
 
@@ -10,6 +12,60 @@ from .models import Product, Order, OrderItem, get_db_session
 from .customer_service import customer_service
 
 logger = logging.getLogger(__name__)
+
+# Map natural-language category terms to canonical DB category values
+CATEGORY_MAP = {
+    "hamburguesa": "BURGERS",
+    "hamburguesas": "BURGERS",
+    "burger": "BURGERS",
+    "burgers": "BURGERS",
+    "bebida": "BEBIDAS",
+    "bebidas": "BEBIDAS",
+    "drink": "BEBIDAS",
+    "drinks": "BEBIDAS",
+    "postre": "DESSERTS",
+    "postres": "DESSERTS",
+    "dessert": "DESSERTS",
+    "desserts": "DESSERTS",
+    "papas": "FRIES",
+    "fries": "FRIES",
+    "hot dog": "HOT DOGS",
+    "hot dogs": "HOT DOGS",
+    "perro": "HOT DOGS",
+    "perros": "HOT DOGS",
+    "pollo": "CHICKEN BURGERS",
+    "chicken": "CHICKEN BURGERS",
+    "infantil": "MENÚ INFANTIL",
+    "niños": "MENÚ INFANTIL",
+    "niñas": "MENÚ INFANTIL",
+    "steak": "STEAK & RIBS",
+    "ribs": "STEAK & RIBS",
+    "costilla": "STEAK & RIBS",
+    "costillas": "STEAK & RIBS",
+}
+
+
+def normalize_category(input_category: str) -> str:
+    """
+    Map natural-language category to canonical DB category.
+    Lowercases and strips; optional accent stripping; lookup in CATEGORY_MAP; else return original.
+    """
+    if not input_category or not input_category.strip():
+        return input_category or ""
+    raw = input_category.strip().lower()
+    # Strip accents for lookup (e.g. "bebidas" vs "bebídas")
+    normalized_key = unicodedata.normalize("NFD", raw)
+    normalized_key = "".join(c for c in normalized_key if unicodedata.category(c) != "Mn")
+    canonical = CATEGORY_MAP.get(normalized_key) or CATEGORY_MAP.get(raw)
+    if canonical:
+        logger.warning(
+            "[CATEGORY_NORMALIZATION] input=%s normalized=%s",
+            input_category.strip(),
+            canonical,
+        )
+        return canonical
+    return input_category.strip()
+
 
 # Common words to skip when searching by tokens (Spanish)
 _SEARCH_STOPWORDS = frozenset(
@@ -65,6 +121,37 @@ class ProductOrderService:
             return result
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error listing products: {e}")
+            return []
+
+    def list_categories(self, business_id: str) -> List[str]:
+        """
+        Return distinct category names for active products of a business, ordered by name.
+
+        Args:
+            business_id: Business UUID
+
+        Returns:
+            List of non-null category strings (e.g. ["BEBIDAS", "HAMBURGUESAS", ...])
+        """
+        try:
+            db_session = get_db_session()
+            rows = (
+                db_session.query(Product.category)
+                .filter(
+                    Product.business_id == uuid.UUID(business_id),
+                    Product.is_active == True,
+                    Product.category.isnot(None),
+                    Product.category != "",
+                )
+                .distinct()
+                .order_by(Product.category)
+                .all()
+            )
+            result = [r[0] for r in rows if r[0]]
+            db_session.close()
+            return result
+        except Exception as e:
+            logger.error(f"[PRODUCT_ORDER] Error listing categories: {e}")
             return []
 
     def get_product(
@@ -155,9 +242,9 @@ class ProductOrderService:
         query: str,
     ) -> List[Dict[str, Any]]:
         """
-        Search products by name OR description. Handles multi-word queries:
+        Search products by name, description, or category. Handles multi-word queries:
         - "hamburguesa barracuda" -> matches BARRACUDA
-        - "hamburguesa con queso azul" -> matches MONTESA (ingredients in description)
+        - "bebidas" -> matches products in category BEBIDAS
         - "coca zero" -> matches Coca-Cola Zero
         """
         try:
@@ -169,11 +256,13 @@ class ProductOrderService:
             business_uuid = uuid.UUID(business_id)
             qnorm = query.strip().lower()
 
-            def name_or_desc_contains(term: str):
+            def name_desc_or_category_contains(term: str):
                 desc_col = func.coalesce(Product.description, "")
+                cat_col = func.coalesce(Product.category, "")
                 return or_(
                     Product.name.ilike(f"%{term}%"),
                     desc_col.ilike(f"%{term}%"),
+                    cat_col.ilike(f"%{term}%"),
                 )
 
             base = (
@@ -185,10 +274,10 @@ class ProductOrderService:
             )
 
             # Build OR of: full query + each significant token
-            conditions = [name_or_desc_contains(qnorm)]
+            conditions = [name_desc_or_category_contains(qnorm)]
             for tok in _search_tokens(query):
                 if tok != qnorm:
-                    conditions.append(name_or_desc_contains(tok))
+                    conditions.append(name_desc_or_category_contains(tok))
 
             combined = or_(*conditions)
             products = base.filter(combined).order_by(Product.name).all()
@@ -198,6 +287,74 @@ class ProductOrderService:
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error searching products: {e}")
             return []
+
+    def search_products_semantic(
+        self,
+        business_id: str,
+        query: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search products by name and description (and ingredients if column exists) using ILIKE.
+        No embeddings; for small menus. Used as fallback when category lookup returns no rows.
+        """
+        try:
+            if not query or not query.strip():
+                return []
+            from sqlalchemy import or_, func
+
+            db_session = get_db_session()
+            business_uuid = uuid.UUID(business_id)
+            q = query.strip()
+            desc_col = func.coalesce(Product.description, "")
+            # name OR description (ingredients not in schema; description often holds ingredients)
+            condition = or_(
+                Product.name.ilike(f"%{q}%"),
+                desc_col.ilike(f"%{q}%"),
+            )
+            products = (
+                db_session.query(Product)
+                .filter(
+                    Product.business_id == business_uuid,
+                    Product.is_active == True,
+                    condition,
+                )
+                .order_by(Product.name)
+                .limit(limit)
+                .all()
+            )
+            result = [p.to_dict() for p in products]
+            db_session.close()
+            logger.warning(
+                "[SEMANTIC_SEARCH] query=%s results=%s",
+                q,
+                len(result),
+            )
+            return result
+        except Exception as e:
+            logger.error(f"[PRODUCT_ORDER] Error in search_products_semantic: {e}")
+            return []
+
+    def list_products_with_fallback(
+        self,
+        business_id: str,
+        category: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        List products by category with normalization and semantic fallback.
+        1) Normalize category (e.g. hamburguesas -> BURGERS), list by category.
+        2) If no rows, run semantic search on the original category/query string.
+        """
+        raw = (category or "").strip()
+        normalized = normalize_category(category) if raw else ""
+        products = self.list_products(business_id=business_id, category=normalized or None)
+        if not products and raw:
+            logger.warning(
+                "[LOOKUP_FALLBACK] category_lookup_empty → semantic_search_used category=%s",
+                raw,
+            )
+            products = self.search_products_semantic(business_id=business_id, query=raw)
+        return products
 
     def create_order(
         self,
@@ -209,6 +366,7 @@ class ProductOrderService:
         delivery_address: Optional[str] = None,
         contact_phone: Optional[str] = None,
         payment_method: Optional[str] = None,
+        customer_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create an order with line items and delivery info.
@@ -222,6 +380,7 @@ class ProductOrderService:
             delivery_address: Delivery address for this order
             contact_phone: Contact phone (optional, for delivery)
             payment_method: Payment method for this order
+            customer_name: Customer name for order; used when creating/updating customer
 
         Returns:
             {"success": True, "order_id": "uuid", "total": float} or {"success": False, "error": str}
@@ -267,9 +426,11 @@ class ProductOrderService:
 
             # Create or update customer with delivery info
             cust = customer_service.get_customer(whatsapp_id)
+            name_to_use = (customer_name or "").strip() or (cust.get("name") if cust else None) or "Cliente"
             if cust:
                 customer_service.update_customer(
                     whatsapp_id,
+                    name=name_to_use,
                     address=delivery_address or cust.get("address"),
                     phone=contact_phone if contact_phone is not None else cust.get("phone"),
                     payment_method=payment_method or cust.get("payment_method"),
@@ -278,7 +439,7 @@ class ProductOrderService:
             else:
                 new_cust = customer_service.create_customer(
                     whatsapp_id=whatsapp_id,
-                    name="Cliente",
+                    name=name_to_use,
                     address=delivery_address,
                     phone=contact_phone,
                     payment_method=payment_method,

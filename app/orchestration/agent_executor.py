@@ -1,6 +1,6 @@
 """
 AgentExecutor: Invokes a single agent and returns its output.
-Phase 1: executes one agent. Expects AgentOutput from agent.
+For order agent: loads session first and passes it so backend is single source of truth.
 """
 
 import logging
@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from ..agents import get_agent
 from ..database.conversation_service import conversation_service
+from ..database.session_state_service import session_state_service
 
 
 def execute_agent(
@@ -22,7 +23,7 @@ def execute_agent(
     Execute the specified agent and return AgentOutput.
 
     Args:
-        agent_type: e.g. "booking"
+        agent_type: e.g. "booking", "order"
         message_body: User message
         wa_id: WhatsApp ID
         name: Customer name
@@ -46,7 +47,7 @@ def execute_agent(
         wa_id, limit=10, business_id=business_id
     )
 
-    output = agent.execute(
+    kwargs = dict(
         message_body=message_body,
         wa_id=wa_id,
         name=name,
@@ -54,4 +55,11 @@ def execute_agent(
         conversation_history=conversation_history,
         message_id=message_id,
     )
+
+    if agent_type == "order" and business_id:
+        load_result = session_state_service.load(wa_id, str(business_id))
+        session = load_result.get("session", {})
+        kwargs["session"] = session
+
+    output = agent.execute(**kwargs)
     return output

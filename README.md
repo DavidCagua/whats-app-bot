@@ -1,64 +1,81 @@
 # WhatsApp AI Agent
 
-A production-ready WhatsApp bot built on Meta's Cloud API that provides intelligent conversational AI with calendar integration and multi-tenant business support.
+A production-ready WhatsApp bot built on Meta's Cloud API that provides intelligent conversational AI with **multi-agent support** (orders, bookings), calendar integration, and multi-tenant business support.
 
 ## What It Does
 
 - **WhatsApp Cloud API Webhook Bot**: Receives and processes incoming messages via Meta's webhook infrastructure with signature verification and multi-tenant routing based on phone number IDs
-- **LangChain Tool Calling**: Uses OpenAI GPT-4o-mini with LangChain's tool binding to execute calendar operations (list, create, update, delete events) based on natural language requests
-- **Google Calendar Actions**: Integrates with Google Calendar API to manage appointments, check availability, and enforce business-specific concurrency limits (e.g., max simultaneous appointments)
-- **Dynamic Role/System Prompts**: Generates AI system prompts dynamically from database configuration, allowing admins to customize business personality, services, pricing, and behavior without code deployments
-- **Conversational Message Flow**: Maintains conversation history in PostgreSQL, processes messages through a multi-iteration agent loop, and formats responses for WhatsApp's text formatting (bold, italic, character limits)
+- **Multi-Agent Architecture**: Routes messages to enabled agents per business (e.g. **Order Agent** for product orders, **Booking Agent** for appointments). ConversationManager persists agent state updates; for Order agent, the executor loads session first so the backend is the single source of truth
+- **Order Agent (Planner / Executor / Response)**: No LLM tool loop. Per turn: (1) **Planner** LLM outputs one intent + params; (2) **Executor** validates intent against order state machine, runs one tool, updates session; (3) **Response** LLM generates reply from actual tool result and cart state—never from LLM belief. Cart lives only in session; cart changes only via tools; response shows real cart after mutations
+- **Order State Machine**: Explicit states in `order_context.state`: GREETING → ORDERING → COLLECTING_DELIVERY → READY_TO_PLACE. Backend restricts which intents are allowed per state (e.g. no PLACE_ORDER in ORDERING). Cart debug logging (cart_before / tool / cart_after) for add/remove/update
+- **Booking Agent**: LangChain tool calling with Google Calendar (list, create, update, delete events), availability checks, business-specific concurrency limits
+- **Session State**: Short-term state in `conversation_sessions` (active agents, order_context with items, total, delivery_info, state, last_order_id). Long-term history in `conversations`. State derived on load when missing; session expiration (e.g. 2h) resets context but keeps the row
+- **Dynamic Prompts & Settings**: Business settings (menu URL, products enabled, calendar, agents) configurable from the Admin Console
+- **Conversational Flow**: Conversation history in PostgreSQL; Order agent uses two LLM calls per turn (planner + response generator); WhatsApp-friendly formatting (bold, character limits)
 
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ 1. Webhook Reception                                        │
-│    Meta Cloud API → POST /webhook                          │
-│    Signature verification (HMAC SHA256)                    │
+│    Meta Cloud API / Twilio → POST /webhook                   │
+│    Signature verification (HMAC SHA256)                      │
 └─────────────┬───────────────────────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. Router & Business Context                                │
-│    Extract phone_number_id from webhook                     │
-│    Lookup business configuration from database             │
-│    Load business-specific settings (prompts, limits, etc.)  │
+│    Extract phone_number_id or Twilio number                  │
+│    Lookup business + enabled agents from database            │
 └─────────────┬───────────────────────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 3. AI Agent (LangChain Service)                            │
-│    Retrieve conversation history (last 10 messages)         │
-│    Build dynamic system prompt from business config         │
-│    Invoke GPT-4o-mini with calendar tools bound           │
+│ 3. ConversationManager → AgentExecutor                      │
+│    Route to first enabled agent (order, booking, etc.)       │
+│    For Order: load session first, pass to agent              │
+│    Load conversation history; invoke agent                   │
 └─────────────┬───────────────────────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 4. Tool Execution (if needed)                              │
-│    Execute calendar tools (schedule_appointment, etc.)     │
-│    Respect business-specific max_concurrent limits          │
-│    Create/update Google Calendar events                    │
-│    Return tool results to agent for final response          │
+│ 4. Agent execution                                           │
+│    Order: Planner (intent+params) → Order flow executor      │
+│           (validate state, run one tool, update session)      │
+│           → Response generator (from tool result + cart)     │
+│    Booking: LLM + calendar tools (slots, create, update)     │
+│    Session state updated (order_context, state, active_agents)│
 └─────────────┬───────────────────────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 5. Response & Storage                                       │
-│    Format response (markdown → WhatsApp format)             │
-│    Send via Meta WhatsApp API                               │
-│    Store conversation in PostgreSQL (scoped to business)   │
+│ 5. Response & Persistence                                    │
+│    Persist state_update to conversation_sessions             │
+│    Format response → WhatsApp API                            │
+│    Store message in conversations (long-term history)       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **Key Components:**
-- **Flask Application** (`app/`): Webhook handlers, message processing, business routing
-- **LangChain Service** (`app/services/langchain_service.py`): AI agent with tool calling, conversation management
-- **Calendar Tools** (`app/services/calendar_tools.py`): Google Calendar operations as LangChain tools
-- **Database Services** (`app/database/`): Business configuration, conversation history, customer management
-- **Admin Console** (`admin-console/`): Next.js dashboard for managing businesses, users, and AI prompts
+- **Flask App** (`app/`): Webhook handlers, business routing (Meta + Twilio)
+- **ConversationManager** (`app/orchestration/conversation_manager.py`): Routes to agent, persists session state
+- **AgentExecutor** (`app/orchestration/agent_executor.py`): For Order agent, loads session before calling agent and passes it in
+- **Order Agent** (`app/agents/order_agent.py`): Planner (one intent per turn) → executor → response generator from real tool result and cart
+- **Order Flow** (`app/orchestration/order_flow.py`): State machine (GREETING/ORDERING/COLLECTING_DELIVERY/READY_TO_PLACE), intent validation, one-tool execution, state transitions, cart debug logging
+- **Order Tools** (`app/services/order_tools.py`): Product search (name + ingredients), cart (session only), delivery info, place_order (validates cart from session)
+- **Session State** (`app/database/session_state_service.py`): conversation_sessions (order_context with state, items, delivery_info, active_agents, last_order_id); state derived when missing; expiration on read
+- **Database** (`app/database/`): Businesses, products, orders, customers, conversation_sessions, conversations
+- **Admin Console** (`admin-console/`): Businesses, Products, Orders, Settings (menu URL, products on/off, agents, calendar)
+
+### Order Flow & Session Lifecycle
+
+- **State machine**: Order state is stored in `order_context.state` (GREETING → ORDERING → COLLECTING_DELIVERY → READY_TO_PLACE). The executor only allows intents that are valid for the current state (e.g. PLACE_ORDER only in READY_TO_PLACE). Cart lives only in session; it is never inferred from the LLM.
+- **Greet (GREETING)**: Share menu URL (if set), ask what they want. Allowed: GREET, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, CHAT.
+- **Take order (ORDERING)**: Flexible product lookup by name or ingredients. Add/remove/update cart via tools only; planner outputs intent (e.g. REMOVE_FROM_CART with product_id), executor runs the tool, response is generated from the actual tool result and current cart summary. Corrections and ambiguity handled via intents (e.g. SEARCH_PRODUCTS then ask which). When user says "listo"/"procedamos", intent PROCEED_TO_CHECKOUT transitions to COLLECTING_DELIVERY.
+- **Collect delivery (COLLECTING_DELIVERY)**: GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO. Returning customers: confirm address; new: collect address, phone, payment method. After submit_delivery_info success, state becomes READY_TO_PLACE.
+- **Place order (READY_TO_PLACE)**: PLACE_ORDER reads cart and delivery_info from session only; cart is validated (non-empty, valid items) before creating the order. Never from LLM description.
+- **After order confirmed**: Session is reset (order_context cleared, active_agents cleared, last_order_id stored). Session row kept so the user can ask "¿cuánto demora?" or start a new order. Expiration (e.g. 2h inactivity) resets context on next load.
+- **Desync prevention**: Response generator never claims a cart change unless the executed intent was the matching mutation and the tool succeeded; after add/remove/update the reply includes the backend cart summary. Cart-mutating tools are logged (cart_before, tool_called, cart_after) for debugging.
 
 ## Operational Notes
 

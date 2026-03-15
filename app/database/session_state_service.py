@@ -14,6 +14,39 @@ from .models import ConversationSession, get_db_session
 # Default session timeout: 2 hours
 DEFAULT_SESSION_TIMEOUT_MINUTES = 120
 
+# Order flow states (stored in order_context["state"])
+ORDER_STATE_GREETING = "GREETING"
+ORDER_STATE_ORDERING = "ORDERING"
+ORDER_STATE_COLLECTING_DELIVERY = "COLLECTING_DELIVERY"
+ORDER_STATE_READY_TO_PLACE = "READY_TO_PLACE"
+
+
+def derive_order_state(order_context: Optional[Dict]) -> str:
+    """
+    Derive order state from order_context when not explicitly set.
+    In-progress cart lives only in session (order_context); no separate DB cart.
+    """
+    if not order_context:
+        return ORDER_STATE_GREETING
+    items = order_context.get("items") or []
+    delivery_info = order_context.get("delivery_info") or {}
+    if order_context.get("state") in (
+        ORDER_STATE_GREETING,
+        ORDER_STATE_ORDERING,
+        ORDER_STATE_COLLECTING_DELIVERY,
+        ORDER_STATE_READY_TO_PLACE,
+    ):
+        return order_context["state"]
+    if not items:
+        return ORDER_STATE_GREETING
+    name = (delivery_info.get("name") or "").strip()
+    address = (delivery_info.get("address") or "").strip()
+    phone = (delivery_info.get("phone") or "").strip()
+    payment = (delivery_info.get("payment_method") or "").strip()
+    if name and address and phone and payment:
+        return ORDER_STATE_READY_TO_PLACE
+    return ORDER_STATE_ORDERING
+
 
 class SessionStateService:
     """Service for conversation session CRUD and expiration."""
@@ -53,11 +86,9 @@ class SessionStateService:
             db_session.close()
 
             if not row:
-                return {
-                    "session": self._empty_session(),
-                    "is_new": True,
-                    "is_expired": False,
-                }
+                sess = self._empty_session()
+                sess["order_context"] = dict(sess.get("order_context") or {}, state=ORDER_STATE_GREETING)
+                return {"session": sess, "is_new": True, "is_expired": False}
 
             last_activity = row.last_activity_at
             if last_activity:
@@ -74,24 +105,21 @@ class SessionStateService:
                     cutoff = cutoff.replace(tzinfo=timezone.utc)
                 if last_activity < cutoff:
                     self._reset_session(wa_id, business_id)
-                    return {
-                        "session": self._empty_session(),
-                        "is_new": True,
-                        "is_expired": True,
-                    }
+                    sess = self._empty_session()
+                    sess["order_context"] = dict(sess.get("order_context") or {}, state=ORDER_STATE_GREETING)
+                    return {"session": sess, "is_new": True, "is_expired": True}
 
-            return {
-                "session": row.to_dict(),
-                "is_new": False,
-                "is_expired": False,
-            }
+            sess = row.to_dict()
+            oc = sess.get("order_context") or {}
+            if "state" not in oc:
+                oc = {**oc, "state": derive_order_state(oc)}
+                sess["order_context"] = oc
+            return {"session": sess, "is_new": False, "is_expired": False}
         except Exception as e:
             logging.error(f"[SESSION] Error loading session: {e}")
-            return {
-                "session": self._empty_session(),
-                "is_new": True,
-                "is_expired": False,
-            }
+            sess = self._empty_session()
+            sess["order_context"] = dict(sess.get("order_context") or {}, state=ORDER_STATE_GREETING)
+            return {"session": sess, "is_new": True, "is_expired": False}
 
     def save(self, wa_id: str, business_id: str, state_update: Dict) -> None:
         """

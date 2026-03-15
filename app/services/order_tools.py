@@ -18,6 +18,29 @@ def _format_price(price: float, currency: str = "COP") -> str:
     """Format price for display."""
     return f"${int(price):,}".replace(",", ".")
 
+# Terms that suggest the user is asking by ingredient (include description in search result for LLM).
+_INGREDIENT_LIKE_WORDS = frozenset({
+    "queso", "pollo", "carne", "tocineta", "cebolla", "salsa", "jamón", "jamón",
+    "pepinillo", "tomate", "lechuga", "aguacate", "guacamole", "champiñón",
+    "jalapeño", "chipotle", "bbq", "mostaza", "mayonesa", "crema", "hongo",
+    "azul", "cheddar", "mozzarella", "parmesano", "pastor", "costilla",
+    "con", "algo", "alguna", "algún", "tienen", "tienes", "con",
+})
+
+# Max length for description snippet when including in search result (ingredient-like queries).
+_SEARCH_DESC_SNIPPET_LEN = 140
+
+
+def _is_ingredient_like_query(query: str) -> bool:
+    """True if query looks like an ingredient or multi-item request (include description in result)."""
+    if not query or not query.strip():
+        return False
+    q = query.strip().lower()
+    words = set(w for w in q.split() if len(w) > 1)
+    if len(words) >= 2:
+        return True
+    return bool(words & _INGREDIENT_LIKE_WORDS)
+
 
 def _get_context(injected_business_context: Optional[Dict]) -> tuple:
     """Extract business_id and wa_id from injected context."""
@@ -36,34 +59,41 @@ def _products_enabled(ctx: Optional[Dict]) -> bool:
 
 
 def _cart_from_session(wa_id: str, business_id: str) -> Dict:
-    """Load order_context (cart + delivery_info) from session."""
+    """
+    Load order_context (cart + delivery_info + state) from session.
+    In-progress cart lives only in session; no separate DB cart.
+    """
     if not wa_id or not business_id:
-        return {"items": [], "total": 0, "delivery_info": None}
+        return {"items": [], "total": 0, "delivery_info": None, "state": None}
     result = session_state_service.load(wa_id, business_id)
     order_context = result.get("session", {}).get("order_context") or {}
     items = order_context.get("items") or []
     total = order_context.get("total") or 0
     delivery_info = order_context.get("delivery_info")
-    return {"items": items, "total": total, "delivery_info": delivery_info}
+    state = order_context.get("state")
+    return {"items": items, "total": total, "delivery_info": delivery_info, "state": state}
 
 
 def _save_cart(wa_id: str, business_id: str, cart: Dict) -> None:
-    """Save cart to session order_context."""
+    """
+    Save cart to session order_context. Preserves existing state if cart omits it.
+    """
     if not wa_id or not business_id:
         return
-    session_state_service.save(wa_id, business_id, {"order_context": cart})
+    existing = _cart_from_session(wa_id, business_id) if cart.get("state") is None else {}
+    merged = {**existing, **cart}
+    if merged.get("state") is None and existing.get("state") is not None:
+        merged["state"] = existing["state"]
+    session_state_service.save(wa_id, business_id, {"order_context": merged})
 
 
 @tool
-def list_products(category: str = "", injected_business_context: dict = None) -> str:
+def get_menu_categories(injected_business_context: dict = None) -> str:
     """
-    List products from the menu. Use when the customer wants to see the menu, browse products,
-    or ask what is available. Optionally filter by category (e.g. BURGERS, BEBIDAS, FRIES).
-
-    Args:
-        category: Optional category filter (e.g. BURGERS, BEBIDAS, HOT DOGS, FRIES, MENU INFANTIL, STEAK AND RIBS)
+    Show menu categories. Use when the user asks what is on the menu, what categories exist,
+    or what they can order in general (e.g. "qué tienes", "qué hay en el menú").
     """
-    logger.info(f"[ORDER_TOOL] list_products category='{category}'")
+    logger.info("[ORDER_TOOL] get_menu_categories")
     try:
         business_id, _ = _get_context(injected_business_context)
         if not _products_enabled(injected_business_context):
@@ -71,9 +101,36 @@ def list_products(category: str = "", injected_business_context: dict = None) ->
         if not business_id:
             return "❌ No se pudo identificar el negocio. Intenta de nuevo."
 
-        products = product_order_service.list_products(
+        categories = product_order_service.list_categories(business_id=business_id)
+        if not categories:
+            return "No hay categorías disponibles en el menú por ahora."
+        return "Categorías del menú: " + ", ".join(categories) + ". Pregunta por una categoría para ver los productos (ej. qué tienes de bebidas)."
+    except Exception as e:
+        logger.error(f"[ORDER_TOOL] get_menu_categories error: {e}")
+        return f"❌ Error al listar categorías: {str(e)}"
+
+
+@tool
+def list_category_products(category: str = "", injected_business_context: dict = None) -> str:
+    """
+    List items in a category. Use when the user asks what you have in a category
+    (e.g. drinks, bebidas, hamburguesas). Pass category (e.g. BEBIDAS, HAMBURGUESAS).
+    Leave category empty to list the full menu.
+
+    Args:
+        category: Category filter (e.g. BEBIDAS, HAMBURGUESAS, FRIES). Empty = full menu.
+    """
+    logger.info(f"[ORDER_TOOL] list_category_products category='{category}'")
+    try:
+        business_id, _ = _get_context(injected_business_context)
+        if not _products_enabled(injected_business_context):
+            return "❌ Los pedidos de productos no están habilitados en este momento."
+        if not business_id:
+            return "❌ No se pudo identificar el negocio. Intenta de nuevo."
+
+        products = product_order_service.list_products_with_fallback(
             business_id=business_id,
-            category=category.strip() if category else None,
+            category=category.strip() if category else "",
         )
 
         if not products:
@@ -89,21 +146,19 @@ def list_products(category: str = "", injected_business_context: dict = None) ->
         header = f"Menú{f' - {category}' if category and category.strip() else ''}:\n\n"
         return header + "\n".join(lines)
     except Exception as e:
-        logger.error(f"[ORDER_TOOL] list_products error: {e}")
+        logger.error(f"[ORDER_TOOL] list_category_products error: {e}")
         return f"❌ Error al listar productos: {str(e)}"
 
 
 @tool
 def search_products(query: str, injected_business_context: dict = None) -> str:
     """
-    Search products by name OR ingredients/description. Use for flexible lookups.
-    - "hamburguesa barracuda" -> finds Barracuda
-    - "hamburguesa con queso azul" -> finds Montesa (ingredients in description)
-    - "coca zero" -> finds Coca-Cola Zero
-    Returns ALL matches. If multiple, list them and ASK which one. If single match, add to cart.
+    Find a specific product by name or ingredients. Use when the user names a product or
+    ingredient (e.g. barracuda, coca cola, queso azul). Not for "what do you have in category X"
+    — use list_category_products for that.
 
     Args:
-        query: Search term - can be product name or ingredient/description
+        query: Search term - product name or ingredient/description
     """
     logger.info(f"[ORDER_TOOL] search_products query='{query}'")
     try:
@@ -121,10 +176,17 @@ def search_products(query: str, injected_business_context: dict = None) -> str:
         if not products:
             return f"❌ No hay productos que coincidan con '{query}'."
 
+        include_desc = _is_ingredient_like_query(query)
         lines = []
         for p in products:
             price_str = _format_price(p.get("price", 0), p.get("currency", "COP"))
-            lines.append(f"• {p['name']} - {price_str} (ID: {p['id']})")
+            line = f"• {p['name']} - {price_str} (ID: {p['id']})"
+            if include_desc:
+                desc = (p.get("description") or "").strip()
+                if desc:
+                    snippet = desc if len(desc) <= _SEARCH_DESC_SNIPPET_LEN else desc[:_SEARCH_DESC_SNIPPET_LEN].rsplit(" ", 1)[0] + "…"
+                    line += f"\n  {snippet}"
+            lines.append(line)
 
         header = f"Productos que coinciden con '{query}':\n\n"
         return header + "\n".join(lines)
@@ -134,17 +196,16 @@ def search_products(query: str, injected_business_context: dict = None) -> str:
 
 
 @tool
-def get_product(product_id: str = "", product_name: str = "", injected_business_context: dict = None) -> str:
+def get_product_details(product_id: str = "", product_name: str = "", injected_business_context: dict = None) -> str:
     """
-    Get a single product by ID or by name/description. Supports flexible lookup:
-    - "barracuda", "hamburguesa barracuda" -> finds Barracuda
-    - "queso azul", "coca zero" -> finds by ingredients or partial name
+    Get details of one product (name, price, description/ingredients). Use when the user
+    asks what a product contains or what it is (e.g. qué trae la barracuda).
 
     Args:
         product_id: Product UUID (preferred when known)
         product_name: Product name, ingredients, or partial description
     """
-    logger.info(f"[ORDER_TOOL] get_product product_id='{product_id}' product_name='{product_name}'")
+    logger.info(f"[ORDER_TOOL] get_product_details product_id='{product_id}' product_name='{product_name}'")
     try:
         business_id, _ = _get_context(injected_business_context)
         if not _products_enabled(injected_business_context):
@@ -162,13 +223,13 @@ def get_product(product_id: str = "", product_name: str = "", injected_business_
         )
 
         if not product:
-            return "❌ Producto no encontrado. Usa list_products para ver el menú."
+            return "❌ Producto no encontrado. Usa list_category_products para ver el menú."
 
         price_str = _format_price(product.get("price", 0), product.get("currency", "COP"))
         desc = product.get("description") or ""
         return f"**{product['name']}** - {price_str}\n" + (f"{desc}\n" if desc else "") + f"ID: {product['id']}"
     except Exception as e:
-        logger.error(f"[ORDER_TOOL] get_product error: {e}")
+        logger.error(f"[ORDER_TOOL] get_product_details error: {e}")
         return f"❌ Error al buscar producto: {str(e)}"
 
 
@@ -201,7 +262,7 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
             product = product_order_service.get_product(product_name=product_name, business_id=business_id)
 
         if not product:
-            return "❌ Producto no encontrado. Usa list_products para ver el menú."
+            return "❌ Producto no encontrado. Pregunta por el menú o una categoría para ver productos."
 
         price = float(product.get("price", 0))
         pid = product["id"]
@@ -251,7 +312,7 @@ def view_cart(injected_business_context: dict = None) -> str:
         total = cart.get("total") or 0
 
         if not items:
-            return "Tu carrito está vacío. ¿Qué te gustaría ordenar? Usa list_products para ver el menú."
+            return "Tu carrito está vacío. ¿Qué te gustaría ordenar? Pregunta por el menú o una categoría (ej. qué tienes de bebidas)."
 
         lines = []
         for it in items:
@@ -340,39 +401,66 @@ def remove_from_cart(product_id: str = "", injected_business_context: dict = Non
         return f"❌ Error al eliminar del carrito: {str(e)}"
 
 
+NO_REGISTRADO = "NO_REGISTRADO"
+NO_REGISTRADA = "NO_REGISTRADA"
+
+
 @tool
 def get_customer_info(injected_business_context: dict = None) -> str:
     """
-    Get customer information from the database. Call this ONLY after the customer has finished
-    adding items and wants to proceed/confirm. Do NOT call while still taking the order.
+    Get merged delivery/customer status: session delivery_info + DB customer.
+    Call when in COLLECTING_DELIVERY to know what we have and what is missing (name, address, phone, payment).
 
-    Returns structured data. Use the EXACT values returned - never invent placeholders like [dirección].
-    - If address shows NO_REGISTRADA: ask the customer for their address.
-    - If address shows a real value: confirm with the customer "¿Deseas recibir en [that exact address] o en otra?"
+    Returns DELIVERY_STATUS|name=...|address=...|phone=...|payment=...|all_present=true| or |missing=name,address,...
+    Use the exact values; if all_present=true confirm with the customer; if missing=... ask only for those fields; if all missing ask for all.
     """
     logger.info("[ORDER_TOOL] get_customer_info")
     try:
-        _, wa_id = _get_context(injected_business_context)
+        business_id, wa_id = _get_context(injected_business_context)
         if not wa_id:
             return "❌ No se pudo identificar al cliente."
 
+        cart = _cart_from_session(wa_id, business_id) if business_id else {}
+        session_delivery = cart.get("delivery_info") or {}
+
         cust = customer_service.get_customer(wa_id)
-        if not cust:
-            return (
-                "NEW_CUSTOMER|name=Cliente|address=NO_REGISTRADA|phone=NO_REGISTRADO|payment=NO_REGISTRADO|"
-                "Debes recolectar: dirección (obligatoria), teléfono (obligatorio, puede ser el mismo WhatsApp), medio de pago (obligatorio)."
-            )
+        db_name = (cust.get("name") or "").strip() if cust else ""
+        db_address = (cust.get("address") or "").strip() if cust else ""
+        db_phone = (cust.get("phone") or "").strip() if cust else ""
+        db_payment = (cust.get("payment_method") or "").strip() if cust else ""
 
-        name = cust.get("name") or "Cliente"
-        address = (cust.get("address") or "").strip()
-        phone = (cust.get("phone") or "").strip()
-        payment = (cust.get("payment_method") or "").strip()
+        name_val = (session_delivery.get("name") or "").strip() or db_name
+        address_val = (session_delivery.get("address") or "").strip() or db_address
+        phone_val = (session_delivery.get("phone") or "").strip() or db_phone
+        payment_val = (session_delivery.get("payment_method") or "").strip() or db_payment
 
-        addr_val = address if address else "NO_REGISTRADA"
-        phone_val = phone if phone else "NO_REGISTRADO"
-        pay_val = payment if payment else "NO_REGISTRADO"
+        name_display = name_val if name_val else NO_REGISTRADO
+        addr_display = address_val if address_val else NO_REGISTRADA
+        phone_display = phone_val if phone_val else NO_REGISTRADO
+        pay_display = payment_val if payment_val else NO_REGISTRADO
 
-        return f"RETURNING_CUSTOMER|name={name}|address={addr_val}|phone={phone_val}|payment={pay_val}"
+        missing = []
+        if not name_val:
+            missing.append("name")
+        if not address_val:
+            missing.append("address")
+        if not phone_val:
+            missing.append("phone")
+        if not payment_val:
+            missing.append("payment")
+
+        # Never report all_present=true if any value is still a placeholder
+        all_present = (
+            len(missing) == 0
+            and addr_display != NO_REGISTRADA
+            and phone_display != NO_REGISTRADO
+            and pay_display != NO_REGISTRADO
+        )
+        missing_str = ",".join(missing) if missing else ""
+        return (
+            f"DELIVERY_STATUS|name={name_display}|address={addr_display}|phone={phone_display}|payment={pay_display}|"
+            f"all_present={'true' if all_present else 'false'}|missing={missing_str}"
+        )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] get_customer_info error: {e}")
         return f"❌ Error al consultar datos: {str(e)}"
@@ -380,48 +468,64 @@ def get_customer_info(injected_business_context: dict = None) -> str:
 
 @tool
 def submit_delivery_info(
-    address: str,
-    payment_method: str,
+    address: str = "",
+    payment_method: str = "",
     phone: str = "",
+    name: str = "",
     injected_business_context: dict = None,
 ) -> str:
     """
-    Save delivery info. Call AFTER collecting from customer, BEFORE place_order.
-    Required: address, payment_method. Phone: required for order; if customer uses same WhatsApp, pass wa_id.
+    Save or update delivery info (merge with existing). Call when the user provides one or more of:
+    address, phone, name, payment_method. Params are optional; only provided non-empty values are merged.
 
     Args:
-        address: Delivery address (required)
-        payment_method: Payment method (e.g. Efectivo, Nequi, Tarjeta)
-        phone: Contact phone - use WhatsApp number if customer says "mismo"/"este número"
+        address: Delivery address (optional; merge if provided)
+        payment_method: Payment method e.g. Efectivo, Nequi (optional; merge if provided)
+        phone: Contact phone; use WhatsApp number if "mismo"/"este número" (optional; merge if provided)
+        name: Customer name for the order (optional; merge if provided)
     """
-    logger.info(f"[ORDER_TOOL] submit_delivery_info address={bool(address)} payment={payment_method}")
+    logger.info(
+        "[ORDER_TOOL] submit_delivery_info address=%s payment=%s phone=%s name=%s",
+        bool(address and address.strip()),
+        bool(payment_method and payment_method.strip()),
+        bool(phone and str(phone).strip()),
+        bool(name and name.strip()),
+    )
     try:
         business_id, wa_id = _get_context(injected_business_context)
         if not business_id or not wa_id:
             return "❌ No se pudo identificar la sesión. Intenta de nuevo."
 
-        if not address or not address.strip():
-            return "❌ La dirección es requerida."
-
-        if not payment_method or not payment_method.strip():
-            return "❌ El medio de pago es requerido."
-
-        delivery_info = {
-            "address": address.strip(),
-            "payment_method": payment_method.strip(),
-        }
-        if phone and str(phone).strip():
-            delivery_info["phone"] = str(phone).strip()
-
-        # Merge into order_context
         cart = _cart_from_session(wa_id, business_id)
+        existing = (cart.get("delivery_info") or {}).copy()
+
+        if name and str(name).strip():
+            existing["name"] = str(name).strip()
+        if address and str(address).strip():
+            existing["address"] = str(address).strip()
+        if phone is not None and str(phone).strip():
+            existing["phone"] = str(phone).strip()
+        if payment_method and str(payment_method).strip():
+            existing["payment_method"] = str(payment_method).strip()
+
+        has_new = any(
+            (
+                name and str(name).strip(),
+                address and str(address).strip(),
+                str(phone).strip() if phone is not None else False,
+                payment_method and str(payment_method).strip(),
+            )
+        )
+        if not has_new:
+            return "✅ Sin cambios. Indica los datos que faltan (dirección, teléfono, nombre, medio de pago) para continuar."
+
         updated = {
             "items": cart.get("items") or [],
             "total": cart.get("total") or 0,
-            "delivery_info": delivery_info,
+            "delivery_info": existing,
         }
         _save_cart(wa_id, business_id, updated)
-        return "✅ Datos de entrega guardados. Puedes confirmar el pedido con place_order."
+        return "✅ Datos de entrega guardados. Puedes confirmar el pedido con place_order cuando tengas todo."
     except Exception as e:
         logger.error(f"[ORDER_TOOL] submit_delivery_info error: {e}")
         return f"❌ Error al guardar: {str(e)}"
@@ -452,15 +556,34 @@ def place_order(injected_business_context: dict = None) -> str:
         if not items:
             return "❌ Tu carrito está vacío. Agrega productos antes de confirmar el pedido."
 
+        # Validate cart: each item must have product_id, name, price, quantity (from session only)
+        for i, it in enumerate(items):
+            if not it.get("product_id") or not it.get("name"):
+                return f"❌ Item en el carrito sin producto válido. Por favor revisa tu pedido."
+            try:
+                q = int(it.get("quantity") or 0)
+                p = float(it.get("price") or 0)
+            except (TypeError, ValueError):
+                return "❌ Cantidades o precios inválidos en el carrito. Intenta de nuevo."
+            if q < 1 or p < 0:
+                return "❌ Cantidades o precios inválidos en el carrito. Intenta de nuevo."
+
         address = (delivery_info.get("address") or "").strip()
         payment_method = (delivery_info.get("payment_method") or "").strip()
+        phone = (delivery_info.get("phone") or "").strip() or wa_id
+        delivery_name = (delivery_info.get("name") or "").strip()
 
         if not address or not payment_method:
             return (
                 "MISSING_DELIVERY_INFO|Falta información para confirmar el pedido. "
-                "Necesito: dirección de entrega (obligatoria), medio de pago (obligatorio), y teléfono de contacto (obligatorio; si es el mismo WhatsApp, indícalo y lo usamos). "
-                "Usa submit_delivery_info cuando tengas dirección, teléfono y medio de pago."
+                "Necesito: nombre, dirección, teléfono y medio de pago. "
+                "Usa submit_delivery_info cuando tengas los datos."
             )
+
+        cust = customer_service.get_customer(wa_id)
+        customer_name = delivery_name or (cust.get("name") or "").strip() if cust else delivery_name
+        if not customer_name:
+            customer_name = "Cliente"
 
         order_items = [
             {
@@ -472,16 +595,14 @@ def place_order(injected_business_context: dict = None) -> str:
             for it in items
         ]
 
-        # contact_phone: use provided phone or WhatsApp number
-        contact_phone = (delivery_info.get("phone") or "").strip() or wa_id
-
         result = product_order_service.create_order(
             business_id=business_id,
             whatsapp_id=wa_id,
             items=order_items,
             delivery_address=address,
-            contact_phone=contact_phone,
+            contact_phone=phone,
             payment_method=payment_method,
+            customer_name=customer_name,
         )
 
         if not result.get("success"):
@@ -509,9 +630,10 @@ def place_order(injected_business_context: dict = None) -> str:
 
 # List of all order tools
 order_tools = [
-    list_products,
+    get_menu_categories,
+    list_category_products,
     search_products,
-    get_product,
+    get_product_details,
     add_to_cart,
     view_cart,
     update_cart_item,
