@@ -47,6 +47,7 @@ Otras reglas:
 - Si pide quitar algo: REMOVE_FROM_CART con product_id.
 - Si dice "listo", "procedamos", "confirmar": PROCEED_TO_CHECKOUT.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY): usa GET_CUSTOMER_INFO cuando necesites saber qué tenemos o qué falta (ej. usuario dice "listo", "ok", o para mostrar confirmación). Usa SUBMIT_DELIVERY_INFO cuando el usuario proporcione uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}.
+- Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
 - Si ya tienen todos los datos y confirman pedido: PLACE_ORDER.
 - Si solo conversa: CHAT.
 
@@ -62,8 +63,63 @@ Reglas críticas:
 - Si hubo error, explica brevemente y sugiere qué hacer.
 - Después de un ADD_TO_CART exitoso: (1) confirma lo que se agregó, (2) muestra el resumen del carrito actual, (3) sugiere el siguiente paso: pregunta si desea agregar algo más (ej. bebida) o si procede con el pedido (ej. "¿Te gustaría agregar alguna bebida o procedemos con el pedido?").
 - Búsqueda por ingrediente: cuando el resultado de la herramienta incluya descripciones de productos (varias líneas por producto) y el usuario preguntó por un ingrediente o tipo de plato (ej. "algo con queso azul", "hamburguesa con pollo"), menciona primero y de forma explícita el producto cuya descripción coincida con lo que pidió (ej. "La que lleva queso azul es la MONTESA: ...") y luego puedes listar brevemente otras opciones si aplica.
-- Datos de entrega: NUNCA digas "Tengo esta dirección, teléfono y tipo de pago" a menos que el resultado de la herramienta contenga exactamente "DELIVERY_STATUS" y "all_present=true". Si el resultado es "OK_COLLECTING_DELIVERY" (sin DELIVERY_STATUS), responde pidiendo los datos: "Para continuar con tu pedido necesito: nombre, dirección, teléfono y medio de pago. ¿Me los indicas?". Si el resultado tiene DELIVERY_STATUS y all_present=true, confirma incluyendo los valores reales (dirección, teléfono, medio de pago) en el mensaje: "Tengo esta dirección: [valor], teléfono [valor] y pago [valor]. ¿Gustas proceder o quieres enviarla a otra dirección?". Si DELIVERY_STATUS tiene missing= o all_present=false, pide solo lo que falta (Me falta: ...) o todo si faltan todos.
+- Datos de entrega: NUNCA digas "Tengo esta dirección, teléfono y tipo de pago" a menos que el resultado de la herramienta contenga exactamente "DELIVERY_STATUS" y "all_present=true". Si el resultado es "OK_COLLECTING_DELIVERY" (sin DELIVERY_STATUS), responde pidiendo los datos: "Para continuar con tu pedido necesito: nombre, dirección, teléfono y medio de pago. ¿Me los indicas?". Si el resultado tiene DELIVERY_STATUS y all_present=true, confirma incluyendo los valores reales (dirección, teléfono, medio de pago) en el mensaje: "Tengo esta dirección: [valor], teléfono [valor] y pago [valor]. ¿Gustas proceder o quieres enviarla a otra dirección?". Si DELIVERY_STATUS tiene missing= o all_present=false: pide SOLO lo que falta (ej. "Me falta: teléfono y medio de pago. ¿Me los indicas?") o todo si faltan todos; NUNCA en ese caso sugieras "proceder con el pedido" ni "agregar algo más" hasta que todos los datos estén completos.
+- Ubicación y datos del negocio: si el usuario pregunta dónde estamos ubicados, horarios, teléfono de contacto o dirección del local, responde usando ÚNICAMENTE la "Información del negocio" que te doy a continuación. Si esa información está vacía o dice "no configurada", di que por el momento no tienes esa información a mano y que puede preguntar por el menú o hacer su pedido.
+- Combos / hamburguesas con papas: si el usuario pregunta si tienen combos, si las hamburguesas vienen con papas o si incluyen papas, responde SIEMPRE usando la sección "Reglas y contexto del negocio" de la Información del negocio (aunque la intención ejecutada haya sido GET_MENU_CATEGORIES o GET_PRODUCT). No digas "no encontré información" ni solo listes categorías; da la respuesta de las reglas (ej. todas las hamburguesas vienen con papas, bebida aparte).
 """
+
+
+def _format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
+    """Format address, phone, hours from business_context for the response generator."""
+    if not business_context or not business_context.get("business"):
+        return "Información del negocio: (no configurada)."
+    raw_settings = business_context["business"].get("settings")
+    # Support both dict and None; JSONB can sometimes be dict-like
+    settings = dict(raw_settings) if raw_settings is not None else {}
+    if not isinstance(settings, dict):
+        settings = {}
+    address = (settings.get("address") or settings.get("Address") or "").strip()
+    phone = (settings.get("phone") or "").strip()
+    city = (settings.get("city") or "").strip()
+    state = (settings.get("state") or "").strip()
+    country = (settings.get("country") or "").strip()
+    hours = settings.get("business_hours") or {}
+    parts = []
+    if address:
+        parts.append(f"Dirección: {address}")
+    if city or state or country:
+        loc = ", ".join(filter(None, [city, state, country]))
+        if loc:
+            parts.append(f"Ciudad/país: {loc}")
+    if phone:
+        parts.append(f"Teléfono: {phone}")
+    if hours and isinstance(hours, dict):
+        day_names = {"monday": "Lunes", "tuesday": "Martes", "wednesday": "Miércoles", "thursday": "Jueves", "friday": "Viernes", "saturday": "Sábado", "sunday": "Domingo"}
+        hour_lines = []
+        for day_key, day_label in day_names.items():
+            day_h = hours.get(day_key) or {}
+            if isinstance(day_h, dict):
+                o, c = day_h.get("open", ""), day_h.get("close", "")
+                if o and c and o != "closed" and c != "closed":
+                    hour_lines.append(f"  {day_label}: {o} - {c}")
+                elif o == "closed" or c == "closed":
+                    hour_lines.append(f"  {day_label}: cerrado")
+        if hour_lines:
+            parts.append("Horarios:\n" + "\n".join(hour_lines))
+    # One clear line for location questions: address if set, else city/state/country
+    location_parts = []
+    if address:
+        location_parts.append(address)
+    if city or state or country:
+        location_parts.append(", ".join(filter(None, [city, state, country])))
+    if location_parts:
+        parts.append("Ubicación (para preguntas 'dónde están'): " + " ".join(location_parts))
+    ai_prompt = (settings.get("ai_prompt") or "").strip()
+    if ai_prompt:
+        parts.append("IMPORTANTE: Reglas y contexto del negocio (usa para preguntas sobre combos, hamburguesas con papas, etc.):\n" + ai_prompt)
+    if not parts:
+        return "Información del negocio: (no configurada)."
+    return "Información del negocio:\n" + "\n".join(parts)
 
 
 def _parse_planner_response(text: str) -> Dict[str, Any]:
@@ -215,7 +271,7 @@ class OrderAgent(BaseAgent):
                     final_response_text += "Puedes preguntarme por el menú por categorías. "
                 final_response_text += "¿Qué te gustaría ordenar?"
             else:
-                response_system = RESPONSE_GENERATOR_SYSTEM
+                response_system = RESPONSE_GENERATOR_SYSTEM + "\n\n" + _format_business_info_for_prompt(business_context)
                 if intent in (INTENT_ADD_TO_CART, INTENT_REMOVE_FROM_CART, INTENT_UPDATE_CART_ITEM) and success:
                     response_system += f"\nEl backend confirmó la acción. Incluye este resumen del carrito actual: {cart_summary_after}"
                 resp_input = f"Usuario: {message_body}\nIntención ejecutada: {intent}. Éxito: {success}.\nResultado del backend: {tool_result}\nResumen carrito: {cart_summary_after}"
