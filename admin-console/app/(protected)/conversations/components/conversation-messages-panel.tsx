@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useRef } from "react"
 import { ConversationThread } from "@/lib/conversations-queries"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -16,6 +17,11 @@ export function ConversationMessagesPanel({
   thread,
 }: ConversationMessagesPanelProps) {
   const displayName = thread.customer_name || "Unknown Customer"
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [thread.messages.length])
 
   return (
     <Card className="h-full flex flex-col">
@@ -118,6 +124,7 @@ export function ConversationMessagesPanel({
               })}
             </div>
           )}
+          <div ref={messagesEndRef} />
         </CardContent>
       </ScrollArea>
     </Card>
