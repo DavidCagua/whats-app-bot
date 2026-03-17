@@ -33,6 +33,8 @@ export type ConversationThread = {
   phone_number_id: string | null
   /** E.164 phone number for the channel when phone_number_id is null; use for send lookup. */
   phone_number: string | null
+  /** Conversation-level agent enable flag (defaults to true). */
+  agent_enabled: boolean
 }
 
 /**
@@ -205,6 +207,12 @@ export async function getConversationThread({
     phone_number = fallback?.phone_number ?? null
   }
 
+  const agentRow = await prisma.conversation_agent_settings.findFirst({
+    where: { business_id: businessId, whatsapp_id: whatsappId },
+    orderBy: { updated_at: "desc" },
+    select: { agent_enabled: true },
+  })
+
   const [business, customer] = await Promise.all([
     prisma.businesses.findUnique({
       where: { id: businessId },
@@ -226,6 +234,7 @@ export async function getConversationThread({
     total_messages: messages.length,
     phone_number_id,
     phone_number,
+    agent_enabled: agentRow?.agent_enabled ?? true,
   }
 }
 

@@ -285,7 +285,6 @@ class OrderAgent(BaseAgent):
                 final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)
                 final_response_text = (final_response_text or "").strip() or "Listo. ¿En qué más puedo ayudarte?"
 
-            conversation_service.store_conversation_message(wa_id, message_body, "user", business_id=business_id)
             conversation_service.store_conversation_message(wa_id, final_response_text, "assistant", business_id=business_id)
 
             tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)

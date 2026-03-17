@@ -5,6 +5,9 @@ import requests
 
 from app.orchestration.conversation_manager import conversation_manager
 from app.database.customer_service import customer_service
+from app.database.conversation_service import conversation_service
+from app.database.business_service import business_service
+from app.database.conversation_agent_service import conversation_agent_service
 from app.utils.mock_mode import is_mock_mode, mock_send_message
 import re
 import time
@@ -249,7 +252,46 @@ def process_whatsapp_message(body, business_context=None):
 
         # Extract message ID for tracing
         message_id = extract_message_id(body)
+
+        # Always store inbound user message before any agent gating
+        try:
+            inferred_business_id = (business_context or {}).get("business_id")
+            inferred_whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
+            conversation_service.store_conversation_message(
+                wa_id=wa_id,
+                message=message_body,
+                role="user",
+                business_id=inferred_business_id,
+                whatsapp_number_id=inferred_whatsapp_number_id,
+            )
+        except Exception as e:
+            logging.error(f"[CONVERSATION] Failed to store inbound user message: {e}")
         
+        # Gate: agent runs only when both business and conversation are enabled
+        try:
+            inferred_business_id = (business_context or {}).get("business_id")
+            business_agent_enabled = True
+            conversation_agent_enabled = True
+
+            if inferred_business_id:
+                business = business_service.get_business(inferred_business_id)
+                settings = (business or {}).get("settings") or {}
+                business_agent_enabled = settings.get("agent_enabled", True) is not False
+                conversation_agent_enabled = conversation_agent_service.get_agent_enabled(
+                    inferred_business_id, wa_id
+                )
+
+            if not business_agent_enabled or not conversation_agent_enabled:
+                logging.warning(
+                    "[AGENT] Agent disabled (business=%s conversation=%s); skipping automation",
+                    "on" if business_agent_enabled else "off",
+                    "on" if conversation_agent_enabled else "off",
+                )
+                return
+        except Exception as e:
+            # Fail open: keep existing behavior if gating check fails
+            logging.error(f"[AGENT] Error checking enable flags (defaulting to enabled): {e}")
+
         # Multi-agent orchestration (ConversationManager -> AgentExecutor -> Agent)
         llm_start = time.time()
         try:

@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 
 type ConversationMessagesPanelProps = {
   thread: ConversationThread
@@ -23,18 +24,44 @@ export function ConversationMessagesPanel({
   const [draft, setDraft] = useState("")
   const [isSending, setIsSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const [agentEnabled, setAgentEnabled] = useState(thread.agent_enabled)
+  const [isTogglingAgent, setIsTogglingAgent] = useState(false)
 
   const [localMessages, setLocalMessages] = useState(thread.messages)
 
   useEffect(() => {
     setLocalMessages(thread.messages)
-  }, [thread.whatsapp_id, thread.business_id, thread.total_messages])
+    setAgentEnabled(thread.agent_enabled)
+  }, [thread.whatsapp_id, thread.business_id, thread.total_messages, thread.agent_enabled])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [localMessages.length])
 
   const canSend = useMemo(() => Boolean(draft.trim()) && !isSending, [draft, isSending])
+
+  const onToggleAgent = async (next: boolean) => {
+    setIsTogglingAgent(true)
+    try {
+      const res = await fetch("/api/conversations/agent-enabled", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          whatsappId: thread.whatsapp_id,
+          businessId: thread.business_id,
+          agentEnabled: next,
+        }),
+      })
+      if (!res.ok) {
+        throw new Error("Failed to update")
+      }
+      setAgentEnabled(next)
+    } catch {
+      // keep previous state
+    } finally {
+      setIsTogglingAgent(false)
+    }
+  }
 
   const onSend = async () => {
     const text = draft.trim()
@@ -102,6 +129,15 @@ export function ConversationMessagesPanel({
               <div className="flex items-center gap-1">
                 <Building2 className="h-3 w-3" />
                 <span>{thread.business_name}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Bot className="h-3 w-3" />
+                <span>Agent</span>
+                <Switch
+                  checked={agentEnabled}
+                  disabled={isTogglingAgent}
+                  onCheckedChange={(checked) => void onToggleAgent(checked)}
+                />
               </div>
               <Badge variant="secondary" className="text-xs">
                 {thread.total_messages} messages

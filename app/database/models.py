@@ -240,6 +240,28 @@ class ConversationSession(Base):
         }
 
 
+class ConversationAgentSetting(Base):
+    """Per-conversation agent enable/disable overrides."""
+    __tablename__ = 'conversation_agent_settings'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    whatsapp_id = Column(String(50), nullable=False, index=True)
+    agent_enabled = Column(Boolean, default=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'whatsapp_id': self.whatsapp_id,
+            'agent_enabled': bool(self.agent_enabled),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Conversation(Base):
     """Model for storing conversation messages."""
     __tablename__ = 'conversations'

@@ -53,6 +53,7 @@ const businessSettingsSchema = z.object({
   ai_prompt: z.string().min(1, "AI prompt is required"),
   products_enabled: z.boolean(),
   menu_url: z.string().optional(),
+  agent_enabled: z.boolean(),
 })
 
 type BusinessSettingsFormData = z.infer<typeof businessSettingsSchema>
@@ -162,6 +163,21 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
+            <div className="space-y-1">
+              <Label className="text-base font-medium">AI Agent</Label>
+              <p className="text-sm text-muted-foreground">
+                When off, incoming messages are still saved but no automated replies are sent.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Switch
+                checked={form.watch("agent_enabled")}
+                onCheckedChange={(checked) => form.setValue("agent_enabled", checked)}
+              />
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="name">Business Name</Label>

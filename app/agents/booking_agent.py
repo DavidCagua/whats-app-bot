@@ -184,9 +184,6 @@ Please help the customer with scheduling and questions."""
             )
 
             conversation_service.store_conversation_message(
-                wa_id, message_body, "user", business_id=business_id
-            )
-            conversation_service.store_conversation_message(
                 wa_id, final_response_text, "assistant", business_id=business_id
             )
 

@@ -42,6 +42,7 @@ type BusinessSettingsData = {
   ai_prompt?: string
   products_enabled?: boolean
   menu_url?: string
+  agent_enabled?: boolean
 }
 
 export type BusinessSettings = {
@@ -101,6 +102,9 @@ export type BusinessSettings = {
 
   // Menu
   menu_url: string
+
+  // Agent master switch
+  agent_enabled: boolean
 }
 
 export async function getBusinessSettings(businessId: string): Promise<BusinessSettings | null> {
@@ -156,6 +160,7 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
       ai_prompt: settings?.ai_prompt || "",
       products_enabled: settings?.products_enabled ?? true,
       menu_url: settings?.menu_url ?? "",
+      agent_enabled: settings?.agent_enabled ?? true,
     }
   } catch (error) {
     console.error("Error fetching business settings:", error)
@@ -223,6 +228,7 @@ export async function updateBusinessSettings(
       ...(settings.ai_prompt !== undefined && { ai_prompt: settings.ai_prompt }),
       ...(settings.products_enabled !== undefined && { products_enabled: settings.products_enabled }),
       ...(settings.menu_url !== undefined && { menu_url: settings.menu_url }),
+      ...(settings.agent_enabled !== undefined && { agent_enabled: settings.agent_enabled }),
     }
 
     updateData.settings = newSettings
