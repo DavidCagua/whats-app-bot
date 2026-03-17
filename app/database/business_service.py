@@ -544,8 +544,11 @@ class BusinessService:
                 logging.error(f"No business found for {whatsapp_number['business_id']}")
                 return None
 
-            pnid = whatsapp_number.get('phone_number_id', '')
-            is_twilio = str(pnid).startswith('twilio:')
+            pnid = whatsapp_number.get('phone_number_id') or ''
+            pnid_str = str(pnid).strip()
+            phone_val = whatsapp_number.get('phone_number', '')
+            # Twilio: explicit "twilio:..." id or no Meta id (phone_number only) -> use Twilio send path
+            is_twilio = pnid_str.startswith('twilio:') or (not pnid_str and phone_val)
 
             context = {
                 'business': business,
@@ -554,16 +557,40 @@ class BusinessService:
                 'whatsapp_number_id': whatsapp_number['id'],
             }
             if is_twilio:
-                phone_val = whatsapp_number.get('phone_number', '')
                 context['provider'] = 'twilio'
                 context['twilio_phone_number'] = f"whatsapp:{phone_val}" if phone_val and not str(phone_val).startswith('whatsapp:') else (phone_val or "")
             else:
-                context['phone_number_id'] = pnid
+                context['phone_number_id'] = pnid_str or pnid
 
             logging.info(f"[CONTEXT] Loaded context for business: {business['name']}")
             return context
         except Exception as e:
             logging.error(f"Error getting business context by phone number: {e}")
+            return None
+
+    def get_business_context_by_business_id(self, business_id: str) -> Optional[Dict]:
+        """
+        Get business context using only business_id.
+        Picks an active WhatsApp number; uses phone_number_id if set, else phone_number (E.164) for lookup.
+        """
+        try:
+            numbers = self.get_business_whatsapp_numbers(business_id)
+            if not numbers:
+                return None
+
+            # Prefer active numbers if present; fallback to first entry.
+            active = [n for n in numbers if n.get("is_active")]
+            chosen = active[0] if active else numbers[0]
+            phone_number_id = chosen.get("phone_number_id")
+            if phone_number_id:
+                return self.get_business_context(phone_number_id)
+            # When phone_number_id is null (e.g. only phone_number stored), resolve by phone number
+            phone_number = chosen.get("phone_number")
+            if phone_number:
+                return self.get_business_context_by_phone_number(phone_number)
+            return None
+        except Exception as e:
+            logging.error(f"Error getting business context by business_id: {e}")
             return None
 
 

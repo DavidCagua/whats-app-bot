@@ -6,6 +6,25 @@ import hmac
 import os
 
 
+def admin_api_key_required(f):
+    """
+    Decorator to protect internal admin endpoints.
+    Requires X-Admin-API-Key to match ADMIN_API_KEY.
+    """
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        configured = current_app.config.get("ADMIN_API_KEY") or os.getenv("ADMIN_API_KEY")
+        provided = request.headers.get("X-Admin-API-Key", "")
+
+        if not configured or not provided or not hmac.compare_digest(str(provided), str(configured)):
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
 def twilio_signature_required(f):
     """
     Decorator to validate incoming Twilio webhook requests using X-Twilio-Signature.

@@ -5,13 +5,16 @@ import time
 
 from flask import Blueprint, request, jsonify, current_app
 
-from .decorators.security import signature_required, twilio_signature_required
+from .decorators.security import signature_required, twilio_signature_required, admin_api_key_required
 from .utils.whatsapp_utils import (
     process_whatsapp_message,
     is_valid_whatsapp_message,
     extract_message_id,
+    get_text_message_input,
+    send_message,
 )
 from .database.business_service import business_service
+from .database.conversation_service import conversation_service
 from .services.message_deduplication import message_deduplication_service
 from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message
 
@@ -252,5 +255,52 @@ def webhook_twilio_post():
 def health():
     """Health check endpoint for Railway deployment."""
     return jsonify({"status": "ok", "service": "whatsapp-bot"}), 200
+
+
+@webhook_blueprint.route("/admin/send-message", methods=["POST"])
+@admin_api_key_required
+def admin_send_message():
+    """
+    Internal admin endpoint to send a WhatsApp message via Meta/Twilio path
+    and persist it to the conversations table.
+    """
+    body = request.get_json(silent=True) or {}
+    whatsapp_id = body.get("whatsapp_id")
+    business_id = body.get("business_id")
+    text = body.get("text")
+    phone_number_id = body.get("phone_number_id")
+    phone_number = body.get("phone_number")
+
+    if not whatsapp_id or not business_id or not text or not str(text).strip():
+        logging.warning("[ADMIN SEND] 400: missing or empty whatsapp_id, business_id, or text")
+        return jsonify({"status": "error", "message": "whatsapp_id, business_id, and text are required"}), 400
+
+    if phone_number_id:
+        business_context = business_service.get_business_context(phone_number_id)
+    elif phone_number and str(phone_number).strip():
+        business_context = business_service.get_business_context_by_phone_number(phone_number.strip())
+    else:
+        business_context = business_service.get_business_context_by_business_id(business_id)
+    if not business_context:
+        logging.warning(
+            "[ADMIN SEND] 400: no WhatsApp number for business_id=%s (phone_number_id=%s, phone_number=%s)",
+            business_id, phone_number_id or "(none)", phone_number or "(none)"
+        )
+        return jsonify({"status": "error", "message": "No WhatsApp number for business"}), 400
+
+    data = get_text_message_input(whatsapp_id, text)
+    result = send_message(data, business_context=business_context)
+    if result is None:
+        return jsonify({"status": "error", "message": "Failed to send message"}), 503
+
+    conversation_service.store_conversation_message(
+        wa_id=whatsapp_id,
+        message=text,
+        role="assistant",
+        business_id=business_id,
+        whatsapp_number_id=business_context.get("whatsapp_number_id"),
+    )
+
+    return jsonify({"ok": True}), 200
 
 

@@ -61,6 +61,8 @@ def send_message(data, business_context=None):
 
     # Twilio path: use Twilio REST API
     if business_context and business_context.get("provider") == "twilio":
+        from_number = business_context.get("twilio_phone_number") or ""
+        logging.info(f"[SEND] Using Twilio path (from={from_number})")
         try:
             import os
             account_sid = current_app.config.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")

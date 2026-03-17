@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { ConversationThread } from "@/lib/conversations-queries"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -8,6 +8,8 @@ import { User, Building2, Phone, Bot } from "lucide-react"
 import { format } from "date-fns"
 import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 
 type ConversationMessagesPanelProps = {
   thread: ConversationThread
@@ -18,10 +20,69 @@ export function ConversationMessagesPanel({
 }: ConversationMessagesPanelProps) {
   const displayName = thread.customer_name || "Unknown Customer"
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const [draft, setDraft] = useState("")
+  const [isSending, setIsSending] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
+
+  const [localMessages, setLocalMessages] = useState(thread.messages)
+
+  useEffect(() => {
+    setLocalMessages(thread.messages)
+  }, [thread.whatsapp_id, thread.business_id, thread.total_messages])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [thread.messages.length])
+  }, [localMessages.length])
+
+  const canSend = useMemo(() => Boolean(draft.trim()) && !isSending, [draft, isSending])
+
+  const onSend = async () => {
+    const text = draft.trim()
+    if (!text || isSending) return
+
+    setIsSending(true)
+    setSendError(null)
+
+    // optimistic append
+    const optimistic = {
+      id: -Date.now(),
+      whatsapp_id: thread.whatsapp_id,
+      message: text,
+      role: "assistant",
+      timestamp: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    } as unknown as (typeof thread.messages)[number]
+
+    setLocalMessages((prev) => [...prev, optimistic])
+    setDraft("")
+
+    try {
+      const res = await fetch("/api/conversations/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          whatsappId: thread.whatsapp_id,
+          businessId: thread.business_id,
+          text,
+          ...(thread.phone_number_id ? { phoneNumberId: thread.phone_number_id } : {}),
+          ...(thread.phone_number ? { phoneNumber: thread.phone_number } : {}),
+        }),
+      })
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}))
+        throw new Error(payload?.error || "Failed to send")
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to send"
+      setSendError(msg)
+      // rollback optimistic
+      setLocalMessages((prev) => prev.filter((m) => m !== optimistic))
+      setDraft(text)
+    } finally {
+      setIsSending(false)
+    }
+  }
 
   return (
     <Card className="h-full flex flex-col">
@@ -53,13 +114,13 @@ export function ConversationMessagesPanel({
       {/* Messages */}
       <ScrollArea className="flex-1">
         <CardContent className="p-4">
-          {thread.messages.length === 0 ? (
+          {localMessages.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <p>No messages in this conversation</p>
             </div>
           ) : (
             <div className="space-y-4">
-              {thread.messages.map((message) => {
+              {localMessages.map((message) => {
                 const isUser = message.role === "user"
                 const isAssistant = message.role === "assistant"
 
@@ -127,6 +188,30 @@ export function ConversationMessagesPanel({
           <div ref={messagesEndRef} />
         </CardContent>
       </ScrollArea>
+
+      {/* Composer */}
+      <div className="border-t p-3 flex-shrink-0 space-y-2">
+        {sendError ? (
+          <div className="text-xs text-destructive">{sendError}</div>
+        ) : null}
+        <div className="flex gap-2">
+          <Input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Type a message..."
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault()
+                void onSend()
+              }
+            }}
+            disabled={isSending}
+          />
+          <Button onClick={onSend} disabled={!canSend}>
+            {isSending ? "Sending..." : "Send"}
+          </Button>
+        </div>
+      </div>
     </Card>
   )
 }

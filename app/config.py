@@ -18,6 +18,7 @@ def load_configurations(app):
     app.config["TWILIO_AUTH_TOKEN"] = os.getenv("TWILIO_AUTH_TOKEN")
     app.config["TWILIO_WHATSAPP_NUMBER"] = os.getenv("TWILIO_WHATSAPP_NUMBER")
     app.config["TWILIO_WEBHOOK_BASE_URL"] = os.getenv("TWILIO_WEBHOOK_BASE_URL")
+    app.config["ADMIN_API_KEY"] = os.getenv("ADMIN_API_KEY")
 
 
 def configure_logging():

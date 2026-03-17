@@ -29,6 +29,10 @@ export type ConversationThread = {
   customer_phone: string
   messages: ConversationMessage[]
   total_messages: number
+  /** Meta phone_number_id (or twilio:...) for the channel; use when sending so routing matches. */
+  phone_number_id: string | null
+  /** E.164 phone number for the channel when phone_number_id is null; use for send lookup. */
+  phone_number: string | null
 }
 
 /**
@@ -149,8 +153,8 @@ export async function getConversationThread({
   whatsappId: string
   businessId: string
 }): Promise<ConversationThread | null> {
-  // Get all messages for this conversation
-  const messages = await prisma.conversations.findMany({
+  // Get all messages for this conversation (include whatsapp_number_id to resolve routing channel)
+  const rawMessages = await prisma.conversations.findMany({
     where: {
       whatsapp_id: whatsappId,
       business_id: businessId,
@@ -163,14 +167,44 @@ export async function getConversationThread({
       role: true,
       timestamp: true,
       created_at: true,
+      whatsapp_number_id: true,
     },
   })
 
-  if (messages.length === 0) {
+  if (rawMessages.length === 0) {
     return null
   }
 
-  // Get business and customer info
+  const messages = rawMessages.map((m) => ({
+    id: m.id,
+    whatsapp_id: m.whatsapp_id,
+    message: m.message,
+    role: m.role,
+    timestamp: m.timestamp,
+    created_at: m.created_at,
+  }))
+
+  // Resolve channel (phone_number_id and/or phone_number) so send uses same number as routing
+  const firstWithNumber = rawMessages.find((m) => m.whatsapp_number_id != null)
+  let phone_number_id: string | null = null
+  let phone_number: string | null = null
+  if (firstWithNumber?.whatsapp_number_id) {
+    const wn = await prisma.whatsapp_numbers.findUnique({
+      where: { id: firstWithNumber.whatsapp_number_id },
+      select: { phone_number_id: true, phone_number: true },
+    })
+    phone_number_id = wn?.phone_number_id ?? null
+    phone_number = wn?.phone_number ?? null
+  }
+  if (phone_number_id == null && phone_number == null) {
+    const fallback = await prisma.whatsapp_numbers.findFirst({
+      where: { business_id: businessId, is_active: true },
+      select: { phone_number_id: true, phone_number: true },
+    })
+    phone_number_id = fallback?.phone_number_id ?? null
+    phone_number = fallback?.phone_number ?? null
+  }
+
   const [business, customer] = await Promise.all([
     prisma.businesses.findUnique({
       where: { id: businessId },
@@ -190,6 +224,8 @@ export async function getConversationThread({
     customer_phone: whatsappId,
     messages,
     total_messages: messages.length,
+    phone_number_id,
+    phone_number,
   }
 }
 
