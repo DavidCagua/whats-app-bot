@@ -12,6 +12,15 @@ export type ConversationGroup = {
   whatsapp_number: string | null
 }
 
+export type ConversationMessageAttachment = {
+  id: string
+  type: string
+  url: string | null
+  content_type: string | null
+  duration_sec: number | null
+  transcript: string | null
+}
+
 export type ConversationMessage = {
   id: number
   whatsapp_id: string
@@ -19,6 +28,7 @@ export type ConversationMessage = {
   role: string
   timestamp: Date
   created_at: Date
+  attachments?: ConversationMessageAttachment[]
 }
 
 export type ConversationThread = {
@@ -155,21 +165,15 @@ export async function getConversationThread({
   whatsappId: string
   businessId: string
 }): Promise<ConversationThread | null> {
-  // Get all messages for this conversation (include whatsapp_number_id to resolve routing channel)
+  // Get all messages for this conversation (include whatsapp_number_id and attachments)
   const rawMessages = await prisma.conversations.findMany({
     where: {
       whatsapp_id: whatsappId,
       business_id: businessId,
     },
     orderBy: { timestamp: "asc" },
-    select: {
-      id: true,
-      whatsapp_id: true,
-      message: true,
-      role: true,
-      timestamp: true,
-      created_at: true,
-      whatsapp_number_id: true,
+    include: {
+      conversation_attachments: true,
     },
   })
 
@@ -184,6 +188,14 @@ export async function getConversationThread({
     role: m.role,
     timestamp: m.timestamp,
     created_at: m.created_at,
+    attachments: (m.conversation_attachments ?? []).map((a) => ({
+      id: a.id,
+      type: a.type,
+      url: a.url,
+      content_type: a.content_type,
+      duration_sec: a.duration_sec != null ? Number(a.duration_sec) : null,
+      transcript: a.transcript,
+    })),
   }))
 
   // Resolve channel (phone_number_id and/or phone_number) so send uses same number as routing
