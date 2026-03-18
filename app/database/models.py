@@ -3,7 +3,7 @@ Database models for Multi-Tenant WhatsApp bot.
 Includes models for businesses, users, WhatsApp numbers, customers, and conversations.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Numeric, create_engine
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Numeric, create_engine, BigInteger
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -262,6 +262,44 @@ class ConversationAgentSetting(Base):
         }
 
 
+class ConversationAttachment(Base):
+    """One attachment per media (audio, image, video, document) linked to a conversation message."""
+    __tablename__ = 'conversation_attachments'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(Integer, ForeignKey('conversations.id', ondelete='CASCADE'), nullable=False, index=True)
+    type = Column(String(20), nullable=False, index=True)  # audio, image, video, document
+    content_type = Column(String(255), nullable=True)
+    provider_media_url = Column(Text, nullable=True)
+    provider_media_id = Column(String(255), nullable=True)
+    url = Column(Text, nullable=True)  # Our Supabase URL after upload
+    size_bytes = Column(BigInteger, nullable=True)
+    duration_sec = Column(Numeric(10, 2), nullable=True)
+    transcript = Column(Text, nullable=True)
+    provider_metadata = Column(JSONB, default={}, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    conversation = relationship("Conversation", back_populates="attachments")
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'conversation_id': self.conversation_id,
+            'type': self.type,
+            'content_type': self.content_type,
+            'provider_media_url': self.provider_media_url,
+            'provider_media_id': self.provider_media_id,
+            'url': self.url,
+            'size_bytes': self.size_bytes,
+            'duration_sec': float(self.duration_sec) if self.duration_sec is not None else None,
+            'transcript': self.transcript,
+            'provider_metadata': self.provider_metadata or {},
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Conversation(Base):
     """Model for storing conversation messages."""
     __tablename__ = 'conversations'
@@ -271,6 +309,7 @@ class Conversation(Base):
     whatsapp_number_id = Column(UUID(as_uuid=True), ForeignKey('whatsapp_numbers.id', ondelete='SET NULL'), nullable=True, index=True)
     whatsapp_id = Column(String(50), nullable=False, index=True)  # Customer's WhatsApp ID
     message = Column(Text, nullable=False)
+    message_type = Column(String(20), default='text', nullable=True)  # text | audio | image | document
     role = Column(String(20), nullable=False)  # 'user' or 'assistant'
     agent_type = Column(String(50), nullable=True)  # Future-proofing for per-agent history
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -279,6 +318,7 @@ class Conversation(Base):
     # Relationships
     business = relationship("Business", back_populates="conversations")
     whatsapp_number = relationship("WhatsappNumber", back_populates="conversations")
+    attachments = relationship("ConversationAttachment", back_populates="conversation", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Conversation(id={self.id}, business_id={self.business_id}, whatsapp_id='{self.whatsapp_id}', role='{self.role}')>"

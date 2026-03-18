@@ -56,16 +56,38 @@ model conversation_agent_settings {
   @@index([agent_enabled], map: "idx_conversation_agent_settings_agent_enabled")
 }
 
+model conversation_attachments {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversation_id    Int
+  type               String   @db.VarChar(20)
+  content_type       String?  @db.VarChar(255)
+  provider_media_url String?  @db.Text
+  provider_media_id  String?  @db.VarChar(255)
+  url                String?  @db.Text
+  size_bytes         BigInt?
+  duration_sec       Decimal? @db.Decimal(10, 2)
+  transcript         String?  @db.Text
+  provider_metadata  Json?    @default("{}")
+  created_at         DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime? @default(now()) @db.Timestamptz(6)
+  conversations      conversations @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+
+  @@index([conversation_id], map: "idx_conversation_attachments_conversation_id")
+  @@index([type], map: "idx_conversation_attachments_type")
+}
+
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model conversations {
   id                 Int      @id @default(autoincrement())
   whatsapp_id        String   @db.VarChar(50)
   message            String
+  message_type       String?  @default("text") @db.VarChar(20)
   role               String   @db.VarChar(20)
   timestamp          DateTime @db.Timestamp(6)
   created_at         DateTime @db.Timestamp(6)
   business_id        String   @db.Uuid
   whatsapp_number_id String?  @db.Uuid
+  conversation_attachments conversation_attachments[]
 
   @@index([business_id], map: "idx_conversations_business_id")
   @@index([whatsapp_number_id], map: "idx_conversations_whatsapp_number_id")

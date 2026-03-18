@@ -165,20 +165,37 @@ export async function getConversationThread({
   whatsappId: string
   businessId: string
 }): Promise<ConversationThread | null> {
-  // Get all messages for this conversation (include whatsapp_number_id and attachments)
+  // Get all messages for this conversation (and whatsapp_number_id for channel resolution)
   const rawMessages = await prisma.conversations.findMany({
     where: {
       whatsapp_id: whatsappId,
       business_id: businessId,
     },
     orderBy: { timestamp: "asc" },
-    include: {
-      conversation_attachments: true,
+    select: {
+      id: true,
+      whatsapp_id: true,
+      message: true,
+      role: true,
+      timestamp: true,
+      created_at: true,
+      whatsapp_number_id: true,
     },
   })
 
   if (rawMessages.length === 0) {
     return null
+  }
+
+  const conversationIds = rawMessages.map((m) => m.id)
+  const attachments = await prisma.conversation_attachments.findMany({
+    where: { conversation_id: { in: conversationIds } },
+  })
+  const attachmentsByConversationId = new Map<number, typeof attachments>()
+  for (const a of attachments) {
+    const list = attachmentsByConversationId.get(a.conversation_id) ?? []
+    list.push(a)
+    attachmentsByConversationId.set(a.conversation_id, list)
   }
 
   const messages = rawMessages.map((m) => ({
@@ -188,7 +205,7 @@ export async function getConversationThread({
     role: m.role,
     timestamp: m.timestamp,
     created_at: m.created_at,
-    attachments: (m.conversation_attachments ?? []).map((a) => ({
+    attachments: (attachmentsByConversationId.get(m.id) ?? []).map((a) => ({
       id: a.id,
       type: a.type,
       url: a.url,
