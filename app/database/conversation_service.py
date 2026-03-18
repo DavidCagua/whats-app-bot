@@ -8,7 +8,7 @@ import uuid
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from .models import Conversation, get_db_session, create_tables
+from .models import Conversation, ConversationAttachment, get_db_session, create_tables
 
 # Default business ID for backward compatibility
 DEFAULT_BUSINESS_ID = "00000000-0000-0000-0000-000000000001"
@@ -113,6 +113,66 @@ class ConversationService:
         except Exception as e:
             logging.error(f"Error storing conversation message for {wa_id}: {e}")
             return False
+
+    def store_conversation_message_with_attachments(
+        self,
+        wa_id: str,
+        message_text: str,
+        role: str,
+        attachments: List[Dict],
+        business_id: Optional[str] = None,
+        whatsapp_number_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """
+        Store one conversation message and N attachment rows (provider URLs only).
+        Used for voice/media: worker will later fill url and transcript.
+
+        Returns:
+            conversation id (conversations.id) for enqueueing media job, or None on failure.
+        """
+        if business_id is None:
+            business_id = DEFAULT_BUSINESS_ID
+        try:
+            session: Session = get_db_session()
+            message_type = "text"
+            if attachments:
+                first_type = attachments[0].get("type") or "document"
+                message_type = first_type
+            if not message_text.strip() and attachments:
+                message_text = "[audio]" if message_type == "audio" else "[media]"
+
+            conv = Conversation(
+                business_id=uuid.UUID(business_id),
+                whatsapp_number_id=uuid.UUID(whatsapp_number_id) if whatsapp_number_id else None,
+                whatsapp_id=wa_id,
+                message=message_text or "",
+                message_type=message_type,
+                role=role,
+            )
+            session.add(conv)
+            session.flush()
+            conv_id = conv.id
+
+            for a in attachments:
+                att = ConversationAttachment(
+                    conversation_id=conv_id,
+                    type=a.get("type") or "document",
+                    content_type=a.get("content_type") or None,
+                    provider_media_url=a.get("provider_media_url"),
+                    provider_media_id=a.get("provider_media_id"),
+                    url=a.get("url"),  # Outbound: we have URL up front; inbound: worker fills later
+                    size_bytes=a.get("size"),
+                    duration_sec=a.get("duration_sec"),
+                    provider_metadata=a.get("provider_metadata") or {},
+                )
+                session.add(att)
+            session.commit()
+            session.close()
+            logging.debug(f"Stored {role} message with {len(attachments)} attachments for user {wa_id}")
+            return conv_id
+        except Exception as e:
+            logging.error(f"Error storing conversation message with attachments for {wa_id}: {e}")
+            return None
 
     def store_conversation_history(self, wa_id: str, history: List[Dict],
                                    business_id: Optional[str] = None,

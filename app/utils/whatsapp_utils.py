@@ -1,16 +1,11 @@
 import logging
-from flask import current_app, jsonify
 import json
-import requests
-
-from app.orchestration.conversation_manager import conversation_manager
-from app.database.customer_service import customer_service
-from app.database.conversation_service import conversation_service
-from app.database.business_service import business_service
-from app.database.conversation_agent_service import conversation_agent_service
-from app.utils.mock_mode import is_mock_mode, mock_send_message
 import re
-import time
+
+import requests
+from flask import current_app, jsonify
+
+from app.utils.mock_mode import is_mock_mode, mock_send_message
 
 
 def log_http_response(response):
@@ -42,6 +37,21 @@ def get_text_message_input(recipient, text):
     )
 
 
+def get_audio_message_input(recipient, media_url, caption=None):
+    """Build Meta-format payload for an audio message. Same recipient normalization as text."""
+    cleaned_recipient = re.sub(r'[^\d+]', '', recipient)
+    if not cleaned_recipient.startswith('+'):
+        cleaned_recipient = '+' + cleaned_recipient
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": cleaned_recipient,
+        "type": "audio",
+        "audio": {"link": media_url},
+    }
+    if caption and str(caption).strip():
+        payload["audio"]["caption"] = str(caption).strip()
+    return json.dumps(payload)
 
 
 
@@ -82,12 +92,25 @@ def send_message(data, business_context=None):
 
             payload = json.loads(data) if isinstance(data, str) else data
             to_recipient = payload.get("to", "")
-            body_text = (payload.get("text") or {}).get("body", "")
             to_whatsapp = f"whatsapp:{to_recipient}" if to_recipient and not str(to_recipient).startswith("whatsapp:") else to_recipient
 
             from twilio.rest import Client
             client = Client(account_sid, auth_token)
-            msg = client.messages.create(body=body_text, from_=from_number, to=to_whatsapp)
+            if payload.get("type") == "audio":
+                audio_obj = payload.get("audio") or {}
+                media_url = audio_obj.get("link") or ""
+                body_text = (audio_obj.get("caption") or "").strip() or None
+                if not media_url:
+                    logging.error("[SEND] Twilio audio payload missing audio.link")
+                    return None
+                # WhatsApp/Twilio: avoid empty body with media (can trigger 63021); only send body if we have a caption
+                create_kw = {"from_": from_number, "to": to_whatsapp, "media_url": [media_url]}
+                if body_text:
+                    create_kw["body"] = body_text
+                msg = client.messages.create(**create_kw)
+            else:
+                body_text = (payload.get("text") or {}).get("body", "")
+                msg = client.messages.create(body=body_text, from_=from_number, to=to_whatsapp)
 
             mock_response = type("Response", (), {})()
             mock_response.status_code = 200
@@ -202,152 +225,6 @@ def process_text_for_whatsapp(text):
 
     logging.info(f"Final processed text: '{whatsapp_style_text}'")
     return whatsapp_style_text
-
-
-def process_whatsapp_message(body, business_context=None):
-    """
-    Process incoming WhatsApp message with optional business context.
-
-    Args:
-        body: Webhook payload from WhatsApp
-        business_context: Optional dict with business info (business_id, access_token, etc.)
-    """
-    overall_start = time.time()
-    try:
-        logging.warning("[DEBUG] ========== PROCESSING MESSAGE ==========")
-        wa_id = body["entry"][0]["changes"][0]["value"]["contacts"][0]["wa_id"]
-        logging.warning(f"[DEBUG] Extracted wa_id: {wa_id}")
-
-        # Get customer name from database (NO fallback to WhatsApp display name)
-        db_start = time.time()
-        try:
-            customer_data = customer_service.get_customer(wa_id)
-            if customer_data and customer_data.get('name'):
-                # Use database name
-                name = customer_data['name']
-                logging.info(f"[CUSTOMER] Using database name for {wa_id}: {name}")
-            else:
-                # Customer not in database or has no name - use generic greeting
-                name = "Cliente"
-                logging.info(f"[CUSTOMER] No database name for {wa_id}, using generic: {name}")
-        except Exception as e:
-            # Database query failed - use generic greeting
-            logging.error(f"[CUSTOMER] Database lookup failed for {wa_id}: {e}, using generic name")
-            import traceback
-            logging.error(f"[CUSTOMER] Traceback: {traceback.format_exc()}")
-            name = "Cliente"
-        db_duration = time.time() - db_start
-        logging.warning(f"[TIMING] Customer lookup took {db_duration:.3f}s")
-
-        message = body["entry"][0]["changes"][0]["value"]["messages"][0]
-        message_body = message["text"]["body"]
-
-        # Log business context if available
-        if business_context:
-            logging.warning(f"[BUSINESS] Processing for: {business_context['business']['name']} (ID: {business_context['business_id']})")
-        else:
-            logging.warning("[BUSINESS] ⚠️ No business context, using default")
-
-        logging.warning(f"[MESSAGE] Processing message from {name} ({wa_id}): {message_body}")
-
-        # Extract message ID for tracing
-        message_id = extract_message_id(body)
-
-        # Always store inbound user message before any agent gating
-        try:
-            inferred_business_id = (business_context or {}).get("business_id")
-            inferred_whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
-            conversation_service.store_conversation_message(
-                wa_id=wa_id,
-                message=message_body,
-                role="user",
-                business_id=inferred_business_id,
-                whatsapp_number_id=inferred_whatsapp_number_id,
-            )
-        except Exception as e:
-            logging.error(f"[CONVERSATION] Failed to store inbound user message: {e}")
-        
-        # Gate: agent runs only when both business and conversation are enabled
-        try:
-            inferred_business_id = (business_context or {}).get("business_id")
-            business_agent_enabled = True
-            conversation_agent_enabled = True
-
-            if inferred_business_id:
-                business = business_service.get_business(inferred_business_id)
-                settings = (business or {}).get("settings") or {}
-                business_agent_enabled = settings.get("agent_enabled", True) is not False
-                conversation_agent_enabled = conversation_agent_service.get_agent_enabled(
-                    inferred_business_id, wa_id
-                )
-
-            if not business_agent_enabled or not conversation_agent_enabled:
-                logging.warning(
-                    "[AGENT] Agent disabled (business=%s conversation=%s); skipping automation",
-                    "on" if business_agent_enabled else "off",
-                    "on" if conversation_agent_enabled else "off",
-                )
-                return
-        except Exception as e:
-            # Fail open: keep existing behavior if gating check fails
-            logging.error(f"[AGENT] Error checking enable flags (defaulting to enabled): {e}")
-
-        # Multi-agent orchestration (ConversationManager -> AgentExecutor -> Agent)
-        llm_start = time.time()
-        try:
-            logging.warning("[DEBUG] Calling ConversationManager...")
-            response = conversation_manager.process(
-                message_body=message_body,
-                wa_id=wa_id,
-                name=name,
-                business_context=business_context,
-                message_id=message_id,
-            )
-            logging.warning(f"[DEBUG] Response from ConversationManager: '{response}'")
-            logging.warning(f"[DEBUG] Response length: {len(response) if response else 0}")
-            logging.warning(f"[DEBUG] Response is empty: {not response or not response.strip()}")
-
-            if not response:
-                logging.error("❌ ConversationManager returned None or empty response")
-                response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
-
-        except Exception as e:
-            logging.error(f"❌ Error in ConversationManager: {e}")
-            import traceback
-            logging.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
-            response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
-        llm_duration = time.time() - llm_start
-        logging.warning(f"[TIMING] ConversationManager.process took {llm_duration:.3f}s")
-
-        logging.warning(f"[DEBUG] Processing response for WhatsApp...")
-        processed_response = process_text_for_whatsapp(response)
-        logging.warning(f"[DEBUG] Processed response: '{processed_response}'")
-
-        logging.warning(f"[DEBUG] Preparing message data...")
-        data = get_text_message_input(wa_id, processed_response)
-        logging.warning(f"[DEBUG] Message data: {data}")
-
-        logging.warning(f"[DEBUG] Sending message to WhatsApp API...")
-        send_start = time.time()
-        result = send_message(data, business_context=business_context)
-        send_duration = time.time() - send_start
-        logging.warning(f"[TIMING] send_message took {send_duration:.3f}s")
-
-        if result is None:
-            logging.error("❌ Failed to send message to WhatsApp API")
-        else:
-            logging.warning("✅ Message sent successfully to WhatsApp API")
-            logging.warning(f"[DEBUG] Response status: {result.status_code}")
-            logging.warning(f"[DEBUG] Response body: {result.text}")
-
-    except Exception as e:
-        logging.error(f"❌ Error processing WhatsApp message: {e}")
-        import traceback
-        logging.error(f"[DEBUG] Full traceback: {traceback.format_exc()}")
-        logging.error(f"[DEBUG] Message body: {json.dumps(body, indent=2)}")
-    finally:
-        total_duration = time.time() - overall_start
-        logging.warning(f"[TIMING] process_whatsapp_message total took {total_duration:.3f}s")
 
 
 def extract_message_id(body):

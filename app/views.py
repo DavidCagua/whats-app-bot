@@ -6,11 +6,13 @@ import time
 from flask import Blueprint, request, jsonify, current_app
 
 from .decorators.security import signature_required, twilio_signature_required, admin_api_key_required
+from .handlers.whatsapp_handler import process_whatsapp_message
+from .utils.media_utils import convert_webm_to_ogg, upload_outbound_media_to_supabase
 from .utils.whatsapp_utils import (
-    process_whatsapp_message,
     is_valid_whatsapp_message,
     extract_message_id,
     get_text_message_input,
+    get_audio_message_input,
     send_message,
 )
 from .database.business_service import business_service
@@ -261,19 +263,29 @@ def health():
 @admin_api_key_required
 def admin_send_message():
     """
-    Internal admin endpoint to send a WhatsApp message via Meta/Twilio path
+    Internal admin endpoint to send a WhatsApp message (text or audio) via Meta/Twilio path
     and persist it to the conversations table.
+    Accepts optional media_url and caption; requires either text or media_url.
     """
     body = request.get_json(silent=True) or {}
     whatsapp_id = body.get("whatsapp_id")
     business_id = body.get("business_id")
-    text = body.get("text")
+    text = (body.get("text") or "").strip()
+    media_url = (body.get("media_url") or "").strip()
+    caption = (body.get("caption") or "").strip()
     phone_number_id = body.get("phone_number_id")
     phone_number = body.get("phone_number")
 
-    if not whatsapp_id or not business_id or not text or not str(text).strip():
-        logging.warning("[ADMIN SEND] 400: missing or empty whatsapp_id, business_id, or text")
-        return jsonify({"status": "error", "message": "whatsapp_id, business_id, and text are required"}), 400
+    if not whatsapp_id or not business_id:
+        logging.warning("[ADMIN SEND] 400: missing whatsapp_id or business_id")
+        return jsonify({"status": "error", "message": "whatsapp_id and business_id are required"}), 400
+    if not text and not media_url:
+        logging.warning("[ADMIN SEND] 400: need either text or media_url")
+        return jsonify({"status": "error", "message": "Either text or media_url is required"}), 400
+    if media_url and text and not caption:
+        # If both provided, treat text as caption for audio
+        caption = text
+        text = ""
 
     if phone_number_id:
         business_context = business_service.get_business_context(phone_number_id)
@@ -287,6 +299,22 @@ def admin_send_message():
             business_id, phone_number_id or "(none)", phone_number or "(none)"
         )
         return jsonify({"status": "error", "message": "No WhatsApp number for business"}), 400
+
+    if media_url:
+        data = get_audio_message_input(whatsapp_id, media_url, caption=caption or None)
+        result = send_message(data, business_context=business_context)
+        if result is None:
+            return jsonify({"status": "error", "message": "Failed to send message"}), 503
+        message_text = caption or "[audio]"
+        conversation_service.store_conversation_message_with_attachments(
+            wa_id=whatsapp_id,
+            message_text=message_text,
+            role="assistant",
+            attachments=[{"type": "audio", "url": media_url}],
+            business_id=business_id,
+            whatsapp_number_id=business_context.get("whatsapp_number_id"),
+        )
+        return jsonify({"ok": True}), 200
 
     data = get_text_message_input(whatsapp_id, text)
     result = send_message(data, business_context=business_context)
@@ -302,5 +330,52 @@ def admin_send_message():
     )
 
     return jsonify({"ok": True}), 200
+
+
+@webhook_blueprint.route("/admin/upload-media", methods=["POST"])
+@admin_api_key_required
+def admin_upload_media():
+    """
+    Accept multipart file upload (e.g. audio/ogg, audio/mpeg), upload to Supabase Storage,
+    return { "url": public_url }. Used for outbound voice notes.
+    """
+    if "file" not in request.files:
+        return jsonify({"status": "error", "message": "Missing 'file' in multipart body"}), 400
+    f = request.files["file"]
+    if not f or not f.filename:
+        return jsonify({"status": "error", "message": "No file selected"}), 400
+    business_id = (request.form.get("business_id") or "").strip() or "default"
+    content_type = f.content_type or "audio/ogg"
+    try:
+        data = f.read()
+    except Exception as e:
+        logging.warning(f"[ADMIN UPLOAD] Read file failed: {e}")
+        return jsonify({"status": "error", "message": "Failed to read file"}), 400
+    if not data:
+        return jsonify({"status": "error", "message": "Empty file"}), 400
+
+    # Twilio/WhatsApp reject audio/webm (63021). Convert to OGG (Opus) when we detect WebM.
+    ct_lower = (content_type or "").split(";")[0].strip().lower()
+    filename_lower = (f.filename or "").lower()
+    # WebM/EBML magic bytes (so we convert even if Content-Type was lost in proxy)
+    is_webm_bytes = len(data) >= 4 and data[:4] == b"\x1aE\xdf\xa3"
+    is_webm_type = "webm" in ct_lower or filename_lower.endswith(".webm") or is_webm_bytes
+
+    if is_webm_type:
+        logging.info("[ADMIN UPLOAD] WebM detected (ct=%s, filename=%s), converting to OGG", content_type, f.filename)
+        converted = convert_webm_to_ogg(data)
+        if converted:
+            data, content_type = converted
+            logging.info("[ADMIN UPLOAD] Converted WebM to OGG for Twilio/WhatsApp")
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Voice note format not supported. Install ffmpeg for WebM, or upload OGG/MP3.",
+            }), 503
+
+    public_url = upload_outbound_media_to_supabase(data, content_type, business_id)
+    if not public_url:
+        return jsonify({"status": "error", "message": "Upload failed (check Supabase config)"}), 503
+    return jsonify({"url": public_url}), 200
 
 

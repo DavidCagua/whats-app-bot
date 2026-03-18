@@ -6,6 +6,10 @@ type Body = {
   whatsappId?: string
   businessId?: string
   text?: string
+  /** Public URL of audio (e.g. from upload-media). When set, sends voice message; optional caption. */
+  mediaUrl?: string
+  /** Caption for media (e.g. voice note). */
+  caption?: string
   /** Meta phone_number_id (or twilio:...) for the channel; must match the number used for this conversation. */
   phoneNumberId?: string | null
   /** E.164 phone number for the channel when phone_number_id is null in DB; used for send lookup. */
@@ -27,13 +31,21 @@ export async function POST(request: NextRequest) {
 
   const whatsappId = body.whatsappId
   const businessId = body.businessId
-  const text = body.text
+  const text = (body.text ?? "").trim()
+  const mediaUrl = (body.mediaUrl ?? "").trim()
+  const caption = (body.caption ?? "").trim()
   const phoneNumberId = body.phoneNumberId
   const phoneNumber = body.phoneNumber
 
-  if (!whatsappId || !businessId || !text || !text.trim()) {
+  if (!whatsappId || !businessId) {
     return NextResponse.json(
-      { error: "whatsappId, businessId, and text are required" },
+      { error: "whatsappId and businessId are required" },
+      { status: 400 }
+    )
+  }
+  if (!text && !mediaUrl) {
+    return NextResponse.json(
+      { error: "Either text or mediaUrl is required" },
       { status: 400 }
     )
   }
@@ -70,7 +82,9 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({
         whatsapp_id: whatsappId,
         business_id: businessId,
-        text,
+        ...(text ? { text } : {}),
+        ...(mediaUrl ? { media_url: mediaUrl } : {}),
+        ...(caption ? { caption } : {}),
         ...(phoneNumberId ? { phone_number_id: phoneNumberId } : {}),
         ...(phoneNumber ? { phone_number: phoneNumber } : {}),
       }),
