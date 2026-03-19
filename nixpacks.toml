@@ -1,0 +1,4 @@
+# Install ffmpeg so WebM→OGG conversion works for outbound voice notes (Twilio/WhatsApp).
+# Railway uses Nixpacks when builder is NIXPACKS; RAILPACK_* vars do not apply.
+[phases.setup]
+aptPkgs = ["...", "ffmpeg"]
