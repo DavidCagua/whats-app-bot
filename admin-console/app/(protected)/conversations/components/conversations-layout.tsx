@@ -42,20 +42,24 @@ export function ConversationsLayout({
 
   const [conversations, setConversations] = useState<ConversationGroup[]>(initialConversations)
   const [thread, setThread] = useState<ConversationThread | null>(initialThread)
+  // On mobile: "list" | "chat"
+  const [mobileView, setMobileView] = useState<"list" | "chat">("list")
 
   // Sync list from server when initial data changes (e.g. filter applied)
   useEffect(() => {
     setConversations(initialConversations)
   }, [initialConversations])
 
-  // Sync thread from server when selected conversation changes (e.g. user picked another chat)
+  // Sync thread + switch to chat view when a conversation is selected
   useEffect(() => {
     if (!conversationParam) {
       setThread(null)
+      setMobileView("list")
       return
     }
     if (initialThread && `${initialThread.whatsapp_id}:${initialThread.business_id}` === conversationParam) {
       setThread(initialThread)
+      setMobileView("chat")
     } else {
       setThread(null)
     }
@@ -118,9 +122,27 @@ export function ConversationsLayout({
     ? `${thread.whatsapp_id}:${thread.business_id}`
     : null
 
+  const handleConversationSelect = () => {
+    setMobileView("chat")
+  }
+
+  const handleBack = () => {
+    setMobileView("list")
+  }
+
   return (
-    <div className="flex gap-4 h-[calc(100vh-280px)]">
-      <div className="w-[380px] flex-shrink-0">
+    // Full viewport height minus the top bar (h-16) and padding (p-6 = 24px top + 24px bottom)
+    <div className="h-[calc(100vh-64px-48px)] flex gap-4">
+
+      {/* Sidebar — full width on mobile, fixed width on md+, hidden on mobile when in chat view */}
+      <div
+        className={[
+          "flex flex-col min-w-0",
+          // Mobile: full width, hidden when chatting
+          "w-full md:w-[340px] lg:w-[380px] md:flex-shrink-0",
+          mobileView === "chat" ? "hidden md:flex" : "flex",
+        ].join(" ")}
+      >
         <ConversationsSidebar
           conversations={conversations}
           selectedConversationId={selectedConversationId}
@@ -130,18 +152,25 @@ export function ConversationsLayout({
           canFilterByBusiness={canFilterByBusiness}
           showBusinessColumn={showBusinessColumn}
           initialFilters={initialFilters}
+          onConversationSelect={handleConversationSelect}
         />
       </div>
 
-      <div className="flex-1 min-w-0">
+      {/* Messages panel — hidden on mobile when in list view */}
+      <div
+        className={[
+          "flex-1 min-w-0",
+          mobileView === "list" ? "hidden md:flex md:flex-col" : "flex flex-col",
+        ].join(" ")}
+      >
         {thread ? (
-          <ConversationMessagesPanel thread={thread} />
+          <ConversationMessagesPanel thread={thread} onBack={handleBack} />
         ) : (
           <Card className="h-full flex items-center justify-center">
-            <div className="text-center text-muted-foreground">
-              <MessageSquare className="h-16 w-16 mx-auto mb-4 opacity-20" />
-              <p className="text-lg font-medium">Select a conversation</p>
-              <p className="text-sm">Choose a conversation from the list to view messages</p>
+            <div className="text-center text-muted-foreground px-6">
+              <MessageSquare className="h-14 w-14 mx-auto mb-4 opacity-20" />
+              <p className="text-base font-medium">Select a conversation</p>
+              <p className="text-sm mt-1">Choose a conversation from the list to view messages</p>
             </div>
           </Card>
         )}

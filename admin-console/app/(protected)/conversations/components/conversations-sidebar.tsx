@@ -31,6 +31,7 @@ type ConversationsSidebarProps = {
     dateFrom?: string
     dateTo?: string
   }
+  onConversationSelect?: () => void
 }
 
 export function ConversationsSidebar({
@@ -41,6 +42,7 @@ export function ConversationsSidebar({
   canFilterByBusiness,
   showBusinessColumn,
   initialFilters,
+  onConversationSelect,
 }: ConversationsSidebarProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -126,37 +128,39 @@ export function ConversationsSidebar({
     startTransition(() => {
       router.push(`/conversations?${params.toString()}`)
     })
+
+    onConversationSelect?.()
   }
 
   return (
-    <Card className="h-full flex flex-col">
-      <CardContent className="p-4 space-y-3 flex-shrink-0">
-        {/* Search Bar */}
+    <Card className="h-full flex flex-col overflow-hidden">
+      {/* Search + Filter header */}
+      <CardContent className="p-3 space-y-2 flex-shrink-0 border-b">
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
           <Input
             placeholder="Search conversations..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyPress={handleKeyPress}
-            className="pl-9 pr-10"
+            className="pl-9 pr-10 h-9"
           />
           <Button
             variant="ghost"
             size="icon"
-            className="absolute right-1 top-1/2 transform -translate-y-1/2 h-7 w-7"
+            className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
             onClick={() => setShowFilters(!showFilters)}
+            aria-label="Toggle filters"
           >
-            <Filter className="h-4 w-4" />
+            <Filter className={["h-4 w-4", showFilters ? "text-primary" : ""].join(" ")} />
           </Button>
         </div>
 
-        {/* Filters (collapsible) */}
         {showFilters && (
-          <div className="space-y-2 pt-2 border-t">
+          <div className="space-y-2 pt-1">
             {canFilterByBusiness && (
               <Select value={business} onValueChange={setBusiness}>
-                <SelectTrigger className="w-full">
+                <SelectTrigger className="w-full h-9">
                   <SelectValue placeholder="All businesses" />
                 </SelectTrigger>
                 <SelectContent>
@@ -171,7 +175,7 @@ export function ConversationsSidebar({
             )}
 
             <Select value={datePreset} onValueChange={setDatePreset}>
-              <SelectTrigger className="w-full">
+              <SelectTrigger className="w-full h-9">
                 <SelectValue placeholder="Date range" />
               </SelectTrigger>
               <SelectContent>
@@ -192,6 +196,7 @@ export function ConversationsSidebar({
                   onClick={clearFilters}
                   disabled={isPending}
                   size="sm"
+                  aria-label="Clear filters"
                 >
                   <X className="h-4 w-4" />
                 </Button>
@@ -201,7 +206,7 @@ export function ConversationsSidebar({
         )}
       </CardContent>
 
-      {/* Conversations List */}
+      {/* Conversations list */}
       <ScrollArea className="flex-1">
         <div className="divide-y">
           {conversations.length === 0 ? (

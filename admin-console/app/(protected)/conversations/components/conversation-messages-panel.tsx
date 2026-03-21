@@ -4,20 +4,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ConversationThread } from "@/lib/conversations-queries"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { User, Building2, Phone, Bot, Mic, Square } from "lucide-react"
+import { User, Building2, Phone, Bot, Mic, Square, ArrowLeft } from "lucide-react"
 import { format } from "date-fns"
 import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 
 type ConversationMessagesPanelProps = {
   thread: ConversationThread
+  onBack?: () => void
 }
 
 export function ConversationMessagesPanel({
   thread,
+  onBack,
 }: ConversationMessagesPanelProps) {
   const displayName = thread.customer_name || "Unknown Customer"
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -62,9 +64,7 @@ export function ConversationMessagesPanel({
           agentEnabled: next,
         }),
       })
-      if (!res.ok) {
-        throw new Error("Failed to update")
-      }
+      if (!res.ok) throw new Error("Failed to update")
       setAgentEnabled(next)
     } catch {
       // keep previous state
@@ -90,7 +90,6 @@ export function ConversationMessagesPanel({
     [thread.whatsapp_id, thread.business_id, thread.phone_number_id, thread.phone_number]
   )
 
-  /** Upload a voice file and send it; handles optimistic update and rollback. */
   const sendVoiceNote = useCallback(
     async (file: File, caption: string) => {
       setSendError(null)
@@ -218,7 +217,6 @@ export function ConversationMessagesPanel({
     else startRecording()
   }, [isRecording, startRecording, stopRecording])
 
-  // Cleanup mic stream on unmount
   useEffect(() => {
     return () => {
       const stream = streamRef.current
@@ -227,35 +225,52 @@ export function ConversationMessagesPanel({
   }, [])
 
   return (
-    <Card className="h-full flex flex-col">
+    <Card className="h-full flex flex-col overflow-hidden">
       {/* Header */}
-      <CardHeader className="border-b p-4 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-            <User className="h-5 w-5 text-primary" />
+      <CardHeader className="border-b p-3 sm:p-4 flex-shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Back button — mobile only */}
+          {onBack && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="md:hidden flex-shrink-0 h-8 w-8"
+              onClick={onBack}
+              aria-label="Back to conversations"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+          )}
+
+          <div className="h-9 w-9 sm:h-10 sm:w-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+            <User className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
           </div>
+
           <div className="flex-1 min-w-0">
-            <h3 className="font-semibold truncate">{displayName}</h3>
-            <div className="flex items-center gap-3 text-xs text-muted-foreground">
-              <div className="flex items-center gap-1">
-                <Phone className="h-3 w-3" />
-                <span>{thread.customer_phone}</span>
+            <h3 className="font-semibold truncate text-sm sm:text-base">{displayName}</h3>
+
+            {/* Info row — wraps on small screens */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-0.5">
+              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Phone className="h-3 w-3 flex-shrink-0" />
+                <span className="truncate max-w-[120px]">{thread.customer_phone}</span>
               </div>
-              <div className="flex items-center gap-1">
-                <Building2 className="h-3 w-3" />
-                <span>{thread.business_name}</span>
+              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Building2 className="h-3 w-3 flex-shrink-0" />
+                <span className="truncate max-w-[100px]">{thread.business_name}</span>
               </div>
-              <div className="flex items-center gap-2">
-                <Bot className="h-3 w-3" />
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Bot className="h-3 w-3 flex-shrink-0" />
                 <span>Agent</span>
                 <Switch
                   checked={agentEnabled}
                   disabled={isTogglingAgent}
                   onCheckedChange={(checked) => void onToggleAgent(checked)}
+                  className="scale-75 origin-left"
                 />
               </div>
-              <Badge variant="secondary" className="text-xs">
-                {thread.total_messages} messages
+              <Badge variant="secondary" className="text-xs px-1.5 py-0">
+                {thread.total_messages} msgs
               </Badge>
             </div>
           </div>
@@ -264,13 +279,13 @@ export function ConversationMessagesPanel({
 
       {/* Messages */}
       <ScrollArea className="flex-1">
-        <CardContent className="p-4">
+        <CardContent className="p-3 sm:p-4">
           {localMessages.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <p>No messages in this conversation</p>
             </div>
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-3 sm:space-y-4">
               {localMessages.map((message) => {
                 const isUser = message.role === "user"
                 const isAssistant = message.role === "assistant"
@@ -278,56 +293,56 @@ export function ConversationMessagesPanel({
                 return (
                   <div
                     key={message.id}
-                    className={cn("flex gap-3", isAssistant && "flex-row-reverse")}
+                    className={cn("flex gap-2 sm:gap-3", isAssistant && "flex-row-reverse")}
                   >
                     {/* Avatar */}
                     <div
                       className={cn(
-                        "h-8 w-8 rounded-full flex items-center justify-center flex-shrink-0",
+                        "h-7 w-7 sm:h-8 sm:w-8 rounded-full flex items-center justify-center flex-shrink-0 mt-1",
                         isUser && "bg-blue-100 text-blue-600",
                         isAssistant && "bg-green-100 text-green-600"
                       )}
                     >
                       {isUser ? (
-                        <User className="h-4 w-4" />
+                        <User className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                       ) : (
-                        <Bot className="h-4 w-4" />
+                        <Bot className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                       )}
                     </div>
 
-                    {/* Message Content */}
+                    {/* Bubble */}
                     <div
                       className={cn(
-                        "flex-1 space-y-1 max-w-[75%]",
+                        "flex-1 space-y-1 max-w-[80%] sm:max-w-[75%]",
                         isAssistant && "flex flex-col items-end"
                       )}
                     >
                       <div
                         className={cn(
-                          "text-xs text-muted-foreground flex items-center gap-2",
+                          "text-xs text-muted-foreground flex items-center gap-1.5",
                           isAssistant && "flex-row-reverse"
                         )}
                       >
                         <span className="font-medium">
                           {isUser ? "Customer" : "Assistant"}
                         </span>
-                        <span>
-                          {format(
-                            new Date(message.timestamp),
-                            "MMM d, yyyy 'at' h:mm a"
-                          )}
+                        <span className="hidden sm:inline">
+                          {format(new Date(message.timestamp), "MMM d, yyyy 'at' h:mm a")}
+                        </span>
+                        <span className="sm:hidden">
+                          {format(new Date(message.timestamp), "h:mm a")}
                         </span>
                       </div>
 
                       <div
                         className={cn(
-                          "rounded-lg p-3 space-y-2",
+                          "rounded-2xl px-3 py-2 sm:rounded-lg sm:p-3 space-y-2",
                           isUser && "bg-blue-50 text-blue-900",
                           isAssistant && "bg-green-50 text-green-900"
                         )}
                       >
                         {message.message ? (
-                          <p className="text-sm whitespace-pre-wrap break-words">
+                          <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
                             {message.message}
                           </p>
                         ) : null}
@@ -385,24 +400,22 @@ export function ConversationMessagesPanel({
 
       {/* Composer */}
       <div className="border-t p-3 flex-shrink-0 space-y-2">
-        {sendError ? (
-          <div className="text-xs text-destructive">{sendError}</div>
-        ) : null}
-        {recordError ? (
-          <div className="text-xs text-destructive">{recordError}</div>
-        ) : null}
-        {isRecording ? (
+        {sendError && <p className="text-xs text-destructive">{sendError}</p>}
+        {recordError && <p className="text-xs text-destructive">{recordError}</p>}
+        {isRecording && (
           <div className="text-xs text-muted-foreground flex items-center gap-2">
             <span className="inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-            Recording… Click the button again to stop and send.
+            Recording… tap again to stop and send.
           </div>
-        ) : null}
-        <div className="flex gap-2">
+        )}
+
+        <div className="flex gap-2 items-end">
+          {/* Voice note button */}
           <Button
             type="button"
             variant={isRecording ? "destructive" : "outline"}
             size="icon"
-            className="flex-shrink-0"
+            className="flex-shrink-0 h-9 w-9"
             onClick={onRecordClick}
             disabled={isSending}
             title={isRecording ? "Stop and send" : "Record voice note"}
@@ -413,10 +426,15 @@ export function ConversationMessagesPanel({
               <Mic className="h-4 w-4" />
             )}
           </Button>
-          <Input
+
+          {/* Textarea — grows up to 4 lines */}
+          <Textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="Type a message or record a voice note..."
+            placeholder="Type a message..."
+            rows={1}
+            className="resize-none min-h-[36px] max-h-[120px] py-2 flex-1 text-sm"
+            style={{ fieldSizing: "content" } as React.CSSProperties}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault()
@@ -425,8 +443,17 @@ export function ConversationMessagesPanel({
             }}
             disabled={isSending || isRecording}
           />
-          <Button onClick={() => void onSend()} disabled={!canSend}>
-            {isSending ? "Sending..." : "Send"}
+
+          {/* Send button */}
+          <Button
+            onClick={() => void onSend()}
+            disabled={!canSend}
+            className="flex-shrink-0 h-9 px-3 sm:px-4"
+          >
+            <span className="hidden sm:inline">{isSending ? "Sending..." : "Send"}</span>
+            <span className="sm:hidden">
+              {isSending ? "…" : "↑"}
+            </span>
           </Button>
         </div>
       </div>
