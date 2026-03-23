@@ -361,4 +361,42 @@ class BookingService:
             return []
 
 
+    def list_customer_bookings(
+        self,
+        whatsapp_id: str,
+        business_id: Optional[str] = None,
+        upcoming_only: bool = True,
+    ) -> List[Dict]:
+        """
+        List bookings for a customer identified by whatsapp_id.
+        Optionally scoped to a business and/or only future bookings.
+        """
+        try:
+            from .customer_service import customer_service as cs
+            customer = cs.get_customer_by_whatsapp_id(whatsapp_id)
+            if not customer:
+                return []
+
+            session: Session = get_db_session()
+            q = session.query(Booking).filter(
+                Booking.customer_id == customer["id"],
+                Booking.status.notin_(["cancelled"]),
+            )
+
+            if business_id:
+                q = q.filter(Booking.business_id == uuid.UUID(business_id))
+
+            if upcoming_only:
+                q = q.filter(Booking.start_at >= datetime.now(tz=timezone.utc))
+
+            bookings = q.order_by(Booking.start_at.asc()).all()
+            result = [b.to_dict() for b in bookings]
+            session.close()
+            return result
+
+        except Exception as e:
+            logger.error(f"Error listing bookings for whatsapp_id {whatsapp_id}: {e}")
+            return []
+
+
 booking_service = BookingService()
