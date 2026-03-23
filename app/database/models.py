@@ -447,6 +447,68 @@ class Order(Base):
         }
 
 
+class BusinessAvailability(Base):
+    """Defines open hours and slot config per business per day of week."""
+    __tablename__ = 'business_availability'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    day_of_week = Column(Integer, nullable=False)  # 0=Sunday, 6=Saturday
+    open_time = Column(String(5), nullable=False)   # "HH:MM"
+    close_time = Column(String(5), nullable=False)  # "HH:MM"
+    slot_duration_minutes = Column(Integer, nullable=False, default=60)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'day_of_week': self.day_of_week,
+            'open_time': self.open_time,
+            'close_time': self.close_time,
+            'slot_duration_minutes': self.slot_duration_minutes,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Booking(Base):
+    """Model for customer bookings."""
+    __tablename__ = 'bookings'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey('customers.id', ondelete='SET NULL'), nullable=True, index=True)
+    service_name = Column(String(255), nullable=True)
+    start_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    end_at = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String(20), nullable=False, default='confirmed')  # pending/confirmed/cancelled/no_show/completed
+    notes = Column(Text, nullable=True)
+    created_via = Column(String(20), default='whatsapp')  # whatsapp/admin/api
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    customer = relationship("Customer", backref="bookings")
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'customer_id': self.customer_id,
+            'service_name': self.service_name,
+            'start_at': self.start_at.isoformat() if self.start_at else None,
+            'end_at': self.end_at.isoformat() if self.end_at else None,
+            'status': self.status,
+            'notes': self.notes,
+            'created_via': self.created_via,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class OrderItem(Base):
     """Model for order line items."""
     __tablename__ = 'order_items'
