@@ -17,6 +17,7 @@ from .utils.whatsapp_utils import (
 )
 from .database.business_service import business_service
 from .database.conversation_service import conversation_service
+from .database.booking_service import booking_service
 from .services.message_deduplication import message_deduplication_service
 from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message
 
@@ -379,3 +380,126 @@ def admin_upload_media():
     return jsonify({"url": public_url}), 200
 
 
+
+
+# ============================================================================
+# BOOKINGS API
+# ============================================================================
+
+@webhook_blueprint.route("/admin/bookings", methods=["GET"])
+@admin_api_key_required
+def list_bookings():
+    """
+    GET /admin/bookings?business_id=<uuid>&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&status=confirmed
+    List bookings for a business, optionally filtered by date range and status.
+    """
+    business_id = request.args.get("business_id")
+    if not business_id:
+        return jsonify({"error": "business_id is required"}), 400
+
+    bookings = booking_service.list_bookings(
+        business_id=business_id,
+        date_from=request.args.get("date_from"),
+        date_to=request.args.get("date_to"),
+        status=request.args.get("status"),
+        limit=int(request.args.get("limit", 200)),
+    )
+    return jsonify({"bookings": bookings, "count": len(bookings)}), 200
+
+
+@webhook_blueprint.route("/admin/bookings/<booking_id>", methods=["GET"])
+@admin_api_key_required
+def get_booking(booking_id):
+    """GET /admin/bookings/<uuid> — fetch a single booking."""
+    booking = booking_service.get_booking(booking_id)
+    if not booking:
+        return jsonify({"error": "Booking not found"}), 404
+    return jsonify(booking), 200
+
+
+@webhook_blueprint.route("/admin/bookings", methods=["POST"])
+@admin_api_key_required
+def create_booking():
+    """
+    POST /admin/bookings
+    Body: { business_id, start_at, end_at, customer_id?, service_name?, status?, notes?, created_via? }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+
+    required = ["business_id", "start_at", "end_at"]
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
+
+    booking = booking_service.create_booking(data)
+    if not booking:
+        return jsonify({"error": "Failed to create booking"}), 500
+
+    return jsonify(booking), 201
+
+
+@webhook_blueprint.route("/admin/bookings/<booking_id>", methods=["PATCH"])
+@admin_api_key_required
+def update_booking(booking_id):
+    """
+    PATCH /admin/bookings/<uuid>
+    Body: any subset of { status, notes, service_name, start_at, end_at, customer_id }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+
+    booking = booking_service.update_booking(booking_id, data)
+    if not booking:
+        return jsonify({"error": "Booking not found"}), 404
+
+    return jsonify(booking), 200
+
+
+# ============================================================================
+# AVAILABILITY API
+# ============================================================================
+
+@webhook_blueprint.route("/admin/availability", methods=["GET"])
+@admin_api_key_required
+def get_availability():
+    """
+    GET /admin/availability?business_id=<uuid>
+    Get all availability rules for a business.
+
+    GET /admin/availability?business_id=<uuid>&date=YYYY-MM-DD
+    Get available slots for a specific date.
+    """
+    business_id = request.args.get("business_id")
+    if not business_id:
+        return jsonify({"error": "business_id is required"}), 400
+
+    target_date = request.args.get("date")
+    if target_date:
+        slots = booking_service.get_available_slots(business_id, target_date)
+        return jsonify({"date": target_date, "slots": slots}), 200
+
+    rules = booking_service.get_availability(business_id)
+    return jsonify({"availability": rules}), 200
+
+
+@webhook_blueprint.route("/admin/availability", methods=["PUT"])
+@admin_api_key_required
+def upsert_availability():
+    """
+    PUT /admin/availability?business_id=<uuid>
+    Body: { rules: [{ day_of_week, open_time, close_time, slot_duration_minutes, is_active }] }
+    Upserts availability rules for a business (one per day of week).
+    """
+    business_id = request.args.get("business_id")
+    if not business_id:
+        return jsonify({"error": "business_id is required"}), 400
+
+    data = request.get_json(silent=True)
+    if not data or "rules" not in data:
+        return jsonify({"error": "Body must contain 'rules' array"}), 400
+
+    rules = booking_service.upsert_availability(business_id, data["rules"])
+    return jsonify({"availability": rules, "count": len(rules)}), 200
