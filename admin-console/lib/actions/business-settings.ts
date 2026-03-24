@@ -141,7 +141,6 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
       services: settings?.services || [],
       payment_methods: settings?.payment_methods || [],
       promotions: settings?.promotions || [],
-      staff: settings?.staff || [],
       appointment_settings: settings?.appointment_settings || {
         max_concurrent: 2,
         min_advance_hours: 1,
@@ -213,7 +212,6 @@ export async function updateBusinessSettings(
       ...(settings.services !== undefined && { services: settings.services }),
       ...(settings.payment_methods !== undefined && { payment_methods: settings.payment_methods }),
       ...(settings.promotions !== undefined && { promotions: settings.promotions }),
-      ...(settings.staff !== undefined && { staff: settings.staff }),
       ...(settings.appointment_settings !== undefined && { appointment_settings: settings.appointment_settings }),
       ...(settings.ai_prompt !== undefined && { ai_prompt: settings.ai_prompt }),
       ...(settings.products_enabled !== undefined && { products_enabled: settings.products_enabled }),

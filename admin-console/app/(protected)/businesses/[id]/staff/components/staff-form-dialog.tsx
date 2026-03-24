@@ -61,11 +61,7 @@ export function StaffFormDialog({
       setUsersLoading(true)
       try {
         const result = await getBusinessUsers(businessId)
-        if (Array.isArray(result)) {
-          setUsers(result)
-        } else if (result.success && result.users) {
-          setUsers(result.users)
-        }
+        setUsers(result)
       } catch (error) {
         console.error("Failed to load users:", error)
       } finally {

@@ -338,7 +338,7 @@ export async function getBusinessUsers(businessId: string) {
   const session = await auth()
 
   if (!session?.user) {
-    return { success: false, users: [] }
+    return []
   }
 
   // Check access
@@ -347,7 +347,7 @@ export async function getBusinessUsers(businessId: string) {
     session.user.businesses?.some((b) => b.businessId === businessId)
 
   if (!hasAccess) {
-    return { success: false, users: [] }
+    return []
   }
 
   try {
@@ -358,16 +358,17 @@ export async function getBusinessUsers(businessId: string) {
       },
     })
 
-    return {
-      success: true,
-      users: userBusinesses.map((ub) => ({
-        id: ub.users.id,
-        email: ub.users.email,
-        name: ub.users.full_name,
-      })),
-    }
+    return userBusinesses.map((ub) => ({
+      id: ub.users.id,
+      email: ub.users.email,
+      full_name: ub.users.full_name,
+      name: ub.users.full_name,
+      role: ub.role,
+      is_active: ub.users.is_active,
+      created_at: ub.created_at,
+    }))
   } catch (error) {
     console.error("Error getting business users:", error)
-    return { success: false, users: [] }
+    return []
   }
 }
