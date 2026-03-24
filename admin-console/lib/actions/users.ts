@@ -338,7 +338,7 @@ export async function getBusinessUsers(businessId: string) {
   const session = await auth()
 
   if (!session?.user) {
-    return []
+    return { success: false, users: [] }
   }
 
   // Check access
@@ -347,22 +347,27 @@ export async function getBusinessUsers(businessId: string) {
     session.user.businesses?.some((b) => b.businessId === businessId)
 
   if (!hasAccess) {
-    return []
+    return { success: false, users: [] }
   }
 
-  const userBusinesses = await prisma.user_businesses.findMany({
-    where: { business_id: businessId },
-    include: {
-      users: true,
-    },
-  })
+  try {
+    const userBusinesses = await prisma.user_businesses.findMany({
+      where: { business_id: businessId },
+      include: {
+        users: true,
+      },
+    })
 
-  return userBusinesses.map((ub) => ({
-    id: ub.users.id,
-    email: ub.users.email,
-    full_name: ub.users.full_name,
-    role: ub.role,
-    is_active: ub.users.is_active,
-    created_at: ub.created_at,
-  }))
+    return {
+      success: true,
+      users: userBusinesses.map((ub) => ({
+        id: ub.users.id,
+        email: ub.users.email,
+        name: ub.users.full_name,
+      })),
+    }
+  } catch (error) {
+    console.error("Error getting business users:", error)
+    return { success: false, users: [] }
+  }
 }
