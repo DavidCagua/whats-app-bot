@@ -57,6 +57,69 @@ def _normalize_staff_id(raw: Optional[str]) -> Optional[str]:
     return s if s else None
 
 
+def _resolve_staff_id_by_hint(business_id: str, hint: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Map a customer's barber name fragment (e.g. "Gio", "Joel") to a single active staff UUID.
+
+    Returns:
+        (staff_id, None) on success
+        (None, error_message) if none or ambiguous
+    """
+    hint_norm = (hint or "").strip().lower()
+    if len(hint_norm) < 2:
+        return (
+            None,
+            "El nombre del profesional es demasiado corto; usa al menos 2 letras.",
+        )
+
+    staff_list = staff_service.get_staff_by_business(business_id, active_only=True)
+    if not staff_list:
+        return None, "No hay profesionales activos."
+
+    def norm_name(s: str) -> str:
+        return (s or "").strip().lower()
+
+    matches: list[dict] = []
+    for s in staff_list:
+        name = norm_name(s.get("name") or "")
+        if not name:
+            continue
+        parts = name.split()
+        first = parts[0] if parts else ""
+
+        if name == hint_norm:
+            matches.append(s)
+            continue
+        if first == hint_norm:
+            matches.append(s)
+            continue
+        if len(hint_norm) >= 2 and first.startswith(hint_norm):
+            matches.append(s)
+            continue
+        # Substring only for longer hints (avoids "el" matching "Joel")
+        if len(hint_norm) >= 3 and hint_norm in name:
+            matches.append(s)
+
+    by_id: dict[str, dict] = {}
+    for s in matches:
+        by_id[s["id"]] = s
+    uniq = list(by_id.values())
+
+    if len(uniq) == 1:
+        return uniq[0]["id"], None
+    if not uniq:
+        return (
+            None,
+            f"No encontré un profesional que coincida con «{hint.strip()}». "
+            "Usa list_booking_staff y pide al cliente el nombre exacto de la lista.",
+        )
+    names = ", ".join(x["name"] for x in uniq)
+    return (
+        None,
+        f"Varios profesionales coinciden con «{hint.strip()}»: {names}. Pide aclaración al cliente.",
+    )
+
+
 @tool
 def list_booking_staff(injected_business_context: dict = None) -> str:
     """
@@ -80,8 +143,10 @@ def list_booking_staff(injected_business_context: dict = None) -> str:
     for s in staff_rows:
         lines.append(f"• `{s['id']}` — {s['name']} ({s['role']})")
     lines.append(
-        "\nUsa el ID exacto con staff_preference=\"specific\" y staff_member_id, "
-        'o staff_preference=\"anyone\" para asignación automática.'
+        '\nPara un profesional concreto: staff_preference="specific" y además '
+        'staff_name_hint con el nombre que dijo el cliente (ej. "Gio", "Joel") '
+        '— el sistema resuelve al UUID correcto. Opcional: staff_member_id (UUID). '
+        'Para cualquiera disponible: staff_preference="anyone".'
     )
     return "\n".join(lines)
 
@@ -200,6 +265,7 @@ def schedule_appointment(
     description: str = "",
     staff_preference: str = "anyone",
     staff_member_id: str = "",
+    staff_name_hint: str = "",
     injected_business_context: dict = None,
 ) -> str:
     """
@@ -213,19 +279,21 @@ def schedule_appointment(
         customer_name: Customer full name (saved to DB)
         customer_age: Customer age (optional)
         description: Extra notes for the booking
-        staff_preference: "specific" (requires staff_member_id) or "anyone" (assign random free staff)
-        staff_member_id: UUID of staff when staff_preference is "specific"
+        staff_preference: "specific" or "anyone" (hint overrides to specific when set)
+        staff_member_id: UUID when using specific without hint (optional if staff_name_hint set)
+        staff_name_hint: Name the customer said (e.g. "Gio", "Joel", "con Gio") — resolved server-side to the correct staff UUID
 
     Returns:
         Confirmation message or error.
     """
     pref = (staff_preference or "anyone").strip().lower()
     sid_raw = _normalize_staff_id(staff_member_id)
+    name_hint = (staff_name_hint or "").strip()
 
     logger.warning(
         f"[CALENDAR] schedule_appointment: whatsapp_id={whatsapp_id}, "
         f"summary='{summary}', start='{start_time}', end='{end_time}', "
-        f"staff_preference={pref}, staff_member_id={sid_raw!r}"
+        f"staff_preference={pref}, staff_member_id={sid_raw!r}, staff_name_hint={name_hint!r}"
     )
 
     try:
@@ -243,10 +311,36 @@ def schedule_appointment(
         if pref not in ("specific", "anyone"):
             return '❌ staff_preference debe ser "specific" o "anyone".'
 
+        # Customer-chosen name beats wrong model UUID / "anyone" slip
+        if name_hint:
+            # Strip common Spanish filler so "dale con Gio" → "Gio"
+            lowered = name_hint.lower()
+            prefixes = ("dale ", "con ", "para ", "quiero ", "el ", "la ")
+            while True:
+                hit = False
+                for prefix in prefixes:
+                    if lowered.startswith(prefix):
+                        name_hint = name_hint[len(prefix) :].strip()
+                        lowered = name_hint.lower()
+                        hit = True
+                        break
+                if not hit:
+                    break
+            resolved_id, resolve_err = _resolve_staff_id_by_hint(business_id, name_hint)
+            if resolve_err:
+                return f"❌ {resolve_err}"
+            if sid_raw and sid_raw != resolved_id:
+                logger.warning(
+                    f"[CALENDAR] staff_member_id {sid_raw} ignored; using name hint -> {resolved_id}"
+                )
+            sid_raw = resolved_id
+            pref = "specific"
+
         if pref == "specific" and not sid_raw:
             return (
-                "❌ Para reservar con un profesional específico debes indicar "
-                'staff_member_id (UUID). Usa list_booking_staff para ver los IDs.'
+                "❌ Para un profesional específico usa staff_name_hint con el nombre que dijo el cliente "
+                '(ej. "Gio") o staff_member_id (UUID de list_booking_staff). '
+                "Nunca uses staff_preference anyone si el cliente ya eligió nombre."
             )
 
         if pref == "anyone" and len(staff_rows) == 1:

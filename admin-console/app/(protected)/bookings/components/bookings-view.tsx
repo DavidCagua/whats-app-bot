@@ -106,10 +106,11 @@ export function BookingsView({
     if (!availabilityBusinessId) setAvailabilityOpen(false)
   }, [availabilityBusinessId])
 
+  /** Match server /bookings page: local calendar week (same as setDate + setHours). */
   function getWeekEnd(start: Date): Date {
     const end = new Date(start)
-    end.setUTCDate(start.getUTCDate() + 6)
-    end.setUTCHours(23, 59, 59, 999)
+    end.setDate(start.getDate() + 6)
+    end.setHours(23, 59, 59, 999)
     return end
   }
 
