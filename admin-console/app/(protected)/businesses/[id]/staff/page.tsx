@@ -8,9 +8,9 @@ import { Plus } from "lucide-react"
 import { StaffForm } from "./components/staff-form"
 
 interface StaffPageProps {
-  params: {
+  params: Promise<{
     id: string
-  }
+  }>
 }
 
 export const metadata = {
@@ -18,19 +18,20 @@ export const metadata = {
 }
 
 export default async function StaffPage({ params }: StaffPageProps) {
+  const { id } = await params
   const session = await auth()
 
   if (!session?.user) {
     redirect("/login")
   }
 
-  if (!canAccessBusiness(session, params.id)) {
+  if (!canAccessBusiness(session, id)) {
     redirect("/")
   }
 
   // Verify business exists
   const business = await prisma.businesses.findUnique({
-    where: { id: params.id },
+    where: { id },
   })
 
   if (!business) {
@@ -39,7 +40,7 @@ export default async function StaffPage({ params }: StaffPageProps) {
 
   // Get all staff members
   const staffMembers = await prisma.staff_members.findMany({
-    where: { business_id: params.id },
+    where: { business_id: id },
     include: {
       users: {
         select: {
@@ -64,11 +65,11 @@ export default async function StaffPage({ params }: StaffPageProps) {
             Manage your team members and their roles
           </p>
         </div>
-        <StaffForm businessId={params.id} />
+        <StaffForm businessId={id} />
       </div>
 
       <StaffList
-        businessId={params.id}
+        businessId={id}
         staffMembers={staffMembers}
         activeCount={activeStaff.length}
         inactiveCount={inactiveStaff.length}

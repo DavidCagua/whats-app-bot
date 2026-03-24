@@ -130,14 +130,14 @@ export function StaffFormDialog({
       <div className="space-y-2">
         <Label htmlFor="user">Link to User (Optional)</Label>
         <Select
-          value={form.watch("user_id") || ""}
-          onValueChange={(value) => form.setValue("user_id", value || "")}
+          value={form.watch("user_id") || "none"}
+          onValueChange={(value) => form.setValue("user_id", value === "none" ? null : value)}
         >
           <SelectTrigger id="user">
             <SelectValue placeholder="No user linked" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="">No user</SelectItem>
+            <SelectItem value="none">No user</SelectItem>
             {usersLoading ? (
               <div className="px-2 py-1 text-sm text-muted-foreground">
                 Loading...
