@@ -179,20 +179,14 @@ export async function getBookings({
 export async function getAvailabilityRules(
   businessId: string
 ): Promise<AvailabilityRule[]> {
-  const rules = await prisma.business_availability.findMany({
-    where: { business_id: businessId },
-    orderBy: { day_of_week: "asc" },
-  })
-
-  return rules.map((r) => ({
-    id: r.id,
-    business_id: r.business_id,
-    day_of_week: r.day_of_week,
-    open_time: r.open_time,
-    close_time: r.close_time,
-    slot_duration_minutes: r.slot_duration_minutes,
-    is_active: r.is_active,
-    created_at: r.created_at,
-    updated_at: r.updated_at,
-  }))
+  const rules = await prisma.$queryRaw<AvailabilityRule[]>`
+    SELECT id::text, business_id::text, day_of_week,
+           to_char(open_time, 'HH24:MI') AS open_time,
+           to_char(close_time, 'HH24:MI') AS close_time,
+           slot_duration_minutes, is_active, created_at, updated_at
+    FROM business_availability
+    WHERE business_id = ${businessId}::uuid
+    ORDER BY day_of_week ASC
+  `
+  return rules
 }

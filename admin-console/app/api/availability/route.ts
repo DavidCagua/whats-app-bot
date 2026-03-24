@@ -23,10 +23,15 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const rules = await prisma.business_availability.findMany({
-      where: { business_id: businessId },
-      orderBy: { day_of_week: "asc" },
-    })
+    const rules = await prisma.$queryRaw`
+      SELECT id::text, business_id::text, day_of_week,
+             to_char(open_time, 'HH24:MI') AS open_time,
+             to_char(close_time, 'HH24:MI') AS close_time,
+             slot_duration_minutes, is_active, created_at, updated_at
+      FROM business_availability
+      WHERE business_id = ${businessId}::uuid
+      ORDER BY day_of_week ASC
+    `
     return NextResponse.json(rules)
   } catch (err) {
     console.error("Error fetching availability:", err)
@@ -86,8 +91,12 @@ export async function PUT(request: NextRequest) {
       `
     }
 
-    const results = await prisma.$queryRaw<unknown[]>`
-      SELECT * FROM business_availability
+    const results = await prisma.$queryRaw`
+      SELECT id::text, business_id::text, day_of_week,
+             to_char(open_time, 'HH24:MI') AS open_time,
+             to_char(close_time, 'HH24:MI') AS close_time,
+             slot_duration_minutes, is_active, created_at, updated_at
+      FROM business_availability
       WHERE business_id = ${businessId}::uuid
       ORDER BY day_of_week ASC
     `

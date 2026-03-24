@@ -50,14 +50,16 @@ interface BookingsCalendarProps {
 
 function isSameDay(a: Date, b: Date): boolean {
   return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
   )
 }
 
 function formatTime(date: Date): string {
-  return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })
+  const h = date.getUTCHours().toString().padStart(2, "0")
+  const m = date.getUTCMinutes().toString().padStart(2, "0")
+  return `${h}:${m}`
 }
 
 function formatHour(h: number): string {
@@ -82,11 +84,11 @@ export function BookingsCalendar({
   const [localBusiness, setLocalBusiness] = useState(businessFilter)
   const [localStatus, setLocalStatus] = useState(statusFilter)
 
-  // Build week days
+  // Build week days using UTC so day labels match stored UTC booking times
   const days: Date[] = []
   for (let i = 0; i < 7; i++) {
     const d = new Date(weekStart)
-    d.setDate(weekStart.getDate() + i)
+    d.setUTCDate(weekStart.getUTCDate() + i)
     days.push(d)
   }
 
@@ -94,22 +96,22 @@ export function BookingsCalendar({
 
   function goToPrevWeek() {
     const prev = new Date(weekStart)
-    prev.setDate(weekStart.getDate() - 7)
+    prev.setUTCDate(weekStart.getUTCDate() - 7)
     onWeekChange(prev)
   }
 
   function goToNextWeek() {
     const next = new Date(weekStart)
-    next.setDate(weekStart.getDate() + 7)
+    next.setUTCDate(weekStart.getUTCDate() + 7)
     onWeekChange(next)
   }
 
   function goToToday() {
     const t = new Date()
-    const day = t.getDay()
+    const day = t.getUTCDay()
     const start = new Date(t)
-    start.setDate(t.getDate() - day)
-    start.setHours(0, 0, 0, 0)
+    start.setUTCDate(t.getUTCDate() - day)
+    start.setUTCHours(0, 0, 0, 0)
     onWeekChange(start)
   }
 
@@ -131,7 +133,7 @@ export function BookingsCalendar({
     const start = new Date(booking.start_at)
     const dayIdx = days.findIndex((d) => isSameDay(d, start))
     if (dayIdx < 0) continue
-    const hour = start.getHours()
+    const hour = start.getUTCHours()
     if (hour < HOUR_START || hour >= HOUR_END) continue
     const key = `${dayIdx}-${hour}`
     const existing = bookingsByDayHour.get(key) || []
@@ -143,7 +145,9 @@ export function BookingsCalendar({
 
   // Format week range label
   const weekEnd = days[6]
-  const weekLabel = `${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`
+  const fmtUTC = (d: Date, opts: Intl.DateTimeFormatOptions) =>
+    d.toLocaleDateString("en-US", { ...opts, timeZone: "UTC" })
+  const weekLabel = `${fmtUTC(weekStart, { month: "short", day: "numeric" })} – ${fmtUTC(weekEnd, { month: "short", day: "numeric", year: "numeric" })}`
 
   return (
     <div className="space-y-4">
@@ -218,7 +222,7 @@ export function BookingsCalendar({
                   key={i}
                   className={`p-2 text-center border-l ${isToday ? "bg-primary/10" : ""}`}
                 >
-                  <p className="text-xs text-muted-foreground">{DAY_NAMES[day.getDay()]}</p>
+                  <p className="text-xs text-muted-foreground">{DAY_NAMES[day.getUTCDay()]}</p>
                   <p
                     className={`text-sm font-semibold ${
                       isToday
@@ -226,7 +230,7 @@ export function BookingsCalendar({
                         : ""
                     }`}
                   >
-                    {day.getDate()}
+                    {day.getUTCDate()}
                   </p>
                 </div>
               )
