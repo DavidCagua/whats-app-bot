@@ -19,7 +19,7 @@ from .database.business_service import business_service
 from .database.conversation_service import conversation_service
 from .database.booking_service import booking_service
 from .services.message_deduplication import message_deduplication_service
-from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message
+from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message, send_typing_indicator
 
 webhook_blueprint = Blueprint("webhook", __name__)
 
@@ -170,6 +170,13 @@ def handle_twilio_message():
                 {"Content-Type": "text/xml"},
             )
         message_deduplication_service.mark_as_processed(message_sid)
+        
+        # [NEW] Send typing indicator immediately to show user agent is processing
+        send_typing_indicator(
+            message_sid=message_sid,
+            twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID"),
+            twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN")
+        )
 
     # Look up business by receiving number (To)
     to_number = form_data.get("To", "")

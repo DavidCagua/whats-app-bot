@@ -6,6 +6,9 @@ process_whatsapp_message can be reused without modification.
 """
 
 import re
+import logging
+import requests
+from typing import Optional
 
 
 def _extract_wa_id(form_data: dict) -> str:
@@ -113,3 +116,66 @@ def normalize_twilio_to_meta(form_data: dict) -> dict:
             }
         ],
     }
+
+
+def send_typing_indicator(
+    message_sid: str,
+    twilio_account_sid: str,
+    twilio_auth_token: str,
+    timeout: int = 5
+) -> bool:
+    """
+    Send WhatsApp typing indicator via Twilio API.
+    
+    This signals to the user that a response is being prepared, improving UX
+    by reducing perceived wait time during agent processing.
+    
+    Args:
+        message_sid: The MessageSid from incoming Twilio webhook (e.g., "SMxxxxxx").
+                    Must be a valid Twilio Message SID (starts with "SM").
+        twilio_account_sid: Your Twilio Account SID (from TWILIO_ACCOUNT_SID env var).
+        twilio_auth_token: Your Twilio Auth Token (from TWILIO_AUTH_TOKEN env var).
+        timeout: HTTP request timeout in seconds (default: 5). Prevents webhook hang.
+    
+    Returns:
+        True if typing indicator sent successfully (HTTP 201), False otherwise.
+        Note: Failures are logged but don't block message processing.
+    
+    Behavior:
+        - Typing indicator auto-disappears after 25 seconds OR when reply is delivered
+        - This is a fire-and-forget call (non-blocking, doesn't delay webhook response)
+        - Zero additional cost on Twilio bill (not a billable API call)
+    """
+    if not message_sid or not message_sid.startswith("SM"):
+        logging.warning(f"[TYPING] Invalid message_sid format: {message_sid}")
+        return False
+    
+    try:
+        endpoint = "https://messaging.twilio.com/v2/Indicators/Typing.json"
+        
+        response = requests.post(
+            endpoint,
+            auth=(twilio_account_sid, twilio_auth_token),
+            data={
+                "messageId": message_sid,
+                "channel": "whatsapp"
+            },
+            timeout=timeout
+        )
+        
+        if response.status_code == 201:
+            logging.warning(f"[TYPING] ✅ Typing indicator sent for message {message_sid}")
+            return True
+        else:
+            logging.error(
+                f"[TYPING] ❌ Failed to send typing indicator: "
+                f"{response.status_code} - {response.text}"
+            )
+            return False
+            
+    except requests.exceptions.Timeout:
+        logging.error(f"[TYPING] ⏱️ Timeout sending typing indicator (timeout={timeout}s)")
+        return False
+    except Exception as e:
+        logging.error(f"[TYPING] ❌ Error sending typing indicator: {e}")
+        return False
