@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth"
 import { redirect } from "next/navigation"
 import { getBookingsAccess, getBookings, getAvailabilityRules } from "@/lib/bookings-queries"
-import { BookingsHeader } from "./components/bookings-header"
 import { BookingsView } from "./components/bookings-view"
 
 type SearchParams = {
@@ -27,7 +26,6 @@ export default async function BookingsPage({
   if (access.businessIds !== "all" && access.businessIds.length === 0) {
     return (
       <div className="space-y-6">
-        <BookingsHeader bookings={[]} />
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <p className="text-muted-foreground">
             No business access configured. Contact your administrator.
@@ -73,8 +71,6 @@ export default async function BookingsPage({
 
   return (
     <div className="space-y-6">
-      <BookingsHeader bookings={bookings} />
-
       <BookingsView
         bookings={bookings}
         access={access}
