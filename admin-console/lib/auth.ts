@@ -66,7 +66,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         const businesses: UserBusiness[] = user.user_businesses.map((ub) => ({
           businessId: ub.business_id,
           businessName: ub.businesses.name,
-          role: ub.role || "staff",
+          role: ub.role || "member",
         }))
 
         // Return user object with businesses

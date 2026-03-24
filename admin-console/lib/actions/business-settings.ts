@@ -30,10 +30,6 @@ type BusinessSettingsData = {
   }>
   payment_methods?: string[]
   promotions?: string[]
-  staff?: Array<{
-    name: string
-    specialties: string[]
-  }>
   appointment_settings?: {
     max_concurrent: number
     min_advance_hours: number
@@ -80,12 +76,6 @@ export type BusinessSettings = {
   
   // Promotions
   promotions: string[]
-  
-  // Staff
-  staff: Array<{
-    name: string
-    specialties: string[]
-  }>
   
   // Appointment Settings
   appointment_settings: {

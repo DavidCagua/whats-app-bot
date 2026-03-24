@@ -88,7 +88,7 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
                 <TableCell>{member.email}</TableCell>
                 <TableCell>
                   <Badge variant={member.role === "admin" ? "default" : "secondary"}>
-                    {member.role || "staff"}
+                    {member.role || "member"}
                   </Badge>
                 </TableCell>
                 <TableCell>

@@ -179,8 +179,8 @@ export async function assignUserToBusiness(
 
   // Business admins cannot assign super_admin role
   if (!isSuperAdmin(session) && role === "admin") {
-    // Business admins can only assign staff role
-    role = "staff"
+    // Business admins can only assign member role
+    role = "member"
   }
 
   try {

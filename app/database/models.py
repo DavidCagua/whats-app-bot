@@ -135,7 +135,7 @@ class UserBusiness(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
-    role = Column(String(50), default='staff')  # 'admin' for business owners/admins, 'staff' for employees
+    role = Column(String(50), default='member')  # 'admin' for business owners/admins, 'member' for employees
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -458,6 +458,7 @@ class BusinessAvailability(Base):
     close_time = Column(String(5), nullable=False)  # "HH:MM"
     slot_duration_minutes = Column(Integer, nullable=False, default=60)
     is_active = Column(Boolean, default=True)
+    staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='CASCADE'), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -470,6 +471,7 @@ class BusinessAvailability(Base):
             'close_time': self.close_time,
             'slot_duration_minutes': self.slot_duration_minutes,
             'is_active': self.is_active,
+            'staff_member_id': str(self.staff_member_id) if self.staff_member_id else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -488,6 +490,7 @@ class Booking(Base):
     status = Column(String(20), nullable=False, default='confirmed')  # pending/confirmed/cancelled/no_show/completed
     notes = Column(Text, nullable=True)
     created_via = Column(String(20), default='whatsapp')  # whatsapp/admin/api
+    staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='SET NULL'), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -504,6 +507,7 @@ class Booking(Base):
             'status': self.status,
             'notes': self.notes,
             'created_via': self.created_via,
+            'staff_member_id': str(self.staff_member_id) if self.staff_member_id else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -533,6 +537,40 @@ class OrderItem(Base):
             'unit_price': float(self.unit_price) if self.unit_price else 0,
             'line_total': float(self.line_total) if self.line_total else 0,
             'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class StaffMember(Base):
+    """Model for staff members who provide services in a business."""
+    __tablename__ = 'staff_members'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    role = Column(String(100), nullable=False)  # e.g., 'barber', 'hairdresser', 'stylist'
+    is_active = Column(Boolean, default=True, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationships
+    business = relationship("Business", backref="staff_members")
+    user = relationship("User", backref="staff_members")
+
+    def __repr__(self):
+        return f"<StaffMember(id={self.id}, name='{self.name}', business_id={self.business_id}, role='{self.role}')>"
+
+    def to_dict(self):
+        """Convert to dictionary for API responses."""
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'name': self.name,
+            'role': self.role,
+            'is_active': self.is_active,
+            'user_id': str(self.user_id) if self.user_id else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
 
 

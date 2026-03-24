@@ -45,7 +45,7 @@ export function InviteUserButton({ businessId, businessName }: InviteUserButtonP
       email: "",
       full_name: "",
       password: "",
-      role: "staff",
+      role: "member",
     },
   })
 
@@ -135,7 +135,7 @@ export function InviteUserButton({ businessId, businessName }: InviteUserButtonP
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="admin">Admin (can edit settings)</SelectItem>
-                <SelectItem value="staff">Staff (view only)</SelectItem>
+                <SelectItem value="member">Member (view only)</SelectItem>
               </SelectContent>
             </Select>
           </div>

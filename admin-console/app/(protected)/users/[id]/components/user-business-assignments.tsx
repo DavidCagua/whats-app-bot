@@ -29,7 +29,7 @@ export function UserBusinessAssignments({
 }: UserBusinessAssignmentsProps) {
   const [isAdding, setIsAdding] = useState(false)
   const [selectedBusiness, setSelectedBusiness] = useState("")
-  const [selectedRole, setSelectedRole] = useState("staff")
+  const [selectedRole, setSelectedRole] = useState("member")
   const [removingId, setRemovingId] = useState<string | null>(null)
 
   // Filter out businesses already assigned
@@ -49,7 +49,7 @@ export function UserBusinessAssignments({
       if (result.success) {
         toast.success("Business assigned successfully")
         setSelectedBusiness("")
-        setSelectedRole("staff")
+        setSelectedRole("member")
       } else {
         toast.error(result.error || "Failed to assign business")
       }
@@ -143,7 +143,7 @@ export function UserBusinessAssignments({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="admin">Admin</SelectItem>
-                  <SelectItem value="staff">Staff</SelectItem>
+                  <SelectItem value="member">Member</SelectItem>
                 </SelectContent>
               </Select>
 

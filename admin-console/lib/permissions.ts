@@ -6,7 +6,7 @@ import { Session } from "next-auth"
  * Role hierarchy:
  * - super_admin (users.role): OmnIA team - full system access to all businesses
  * - admin (user_businesses.role): Business owner/admin - can edit their business
- * - staff (user_businesses.role): Business employee - view-only access
+ * - member (user_businesses.role): Business employee - view-only access
  */
 
 export function isSuperAdmin(session: Session | null): boolean {

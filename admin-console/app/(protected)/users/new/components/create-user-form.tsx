@@ -43,7 +43,7 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
   const [isLoading, setIsLoading] = useState(false)
   const [businessAssignments, setBusinessAssignments] = useState<BusinessAssignment[]>([])
   const [selectedBusiness, setSelectedBusiness] = useState("")
-  const [selectedBusinessRole, setSelectedBusinessRole] = useState("staff")
+  const [selectedBusinessRole, setSelectedBusinessRole] = useState("member")
 
   const form = useForm<CreateUserFormData>({
     resolver: zodResolver(createUserSchema),
@@ -78,7 +78,7 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
       },
     ])
     setSelectedBusiness("")
-    setSelectedBusinessRole("staff")
+    setSelectedBusinessRole("member")
   }
 
   const removeBusinessAssignment = (businessId: string) => {
@@ -282,7 +282,7 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="admin">Admin</SelectItem>
-                          <SelectItem value="staff">Staff</SelectItem>
+                          <SelectItem value="member">Member</SelectItem>
                         </SelectContent>
                       </Select>
 

@@ -82,7 +82,7 @@ export function UsersTable({ data }: UsersTableProps) {
                         <Badge key={business.id} variant="outline" className="text-xs">
                           {business.name}
                           <span className="ml-1 text-muted-foreground">
-                            ({business.role || "staff"})
+                            ({business.role || "member"})
                           </span>
                         </Badge>
                       ))}

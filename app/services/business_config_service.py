@@ -6,6 +6,7 @@ Generic service for any business type (barbershops, salons, restaurants, etc.)
 
 import logging
 from typing import Optional, Dict, List, Any
+from app.services.staff_service import staff_service
 
 class BusinessConfigService:
     """Service for loading business-specific configuration from database."""
@@ -128,12 +129,27 @@ class BusinessConfigService:
         return text
 
     def get_staff_list(self, business_context: Optional[Dict] = None) -> List[Dict]:
-        """Get list of staff members (barbers, stylists, chefs, etc.)."""
-        info = self.get_business_info(business_context)
-        return info.get('staff', [])
+        """Get list of staff members (barbers, stylists, chefs, etc.) from the staff_members table."""
+        if not business_context:
+            return []
+        
+        business_id = business_context.get('business_id')
+        if not business_id:
+            return []
+        
+        # Use staff_service to get staff from database
+        staff_list = staff_service.get_staff_by_business(business_id, active_only=True)
+        return [
+            {
+                'name': s['name'],
+                'role': s['role'],
+                'specialties': [s['role']]  # Map role to specialties for compatibility
+            }
+            for s in staff_list
+        ]
 
     def get_staff_text(self, business_context: Optional[Dict] = None) -> str:
-        """Get formatted text of staff members."""
+        """Get formatted text of staff members from the staff_members table."""
         staff = self.get_staff_list(business_context)
         if not staff:
             return ""

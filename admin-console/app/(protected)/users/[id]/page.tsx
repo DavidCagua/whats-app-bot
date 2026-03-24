@@ -48,7 +48,7 @@ export default async function UserPage({ params }: UserPageProps) {
   const userBusinesses = user.user_businesses.map((ub) => ({
     id: ub.business_id,
     name: ub.businesses.name,
-    role: ub.role || "staff",
+    role: ub.role || "member",
   }))
 
   const availableBusinesses = allBusinesses.map((b) => ({

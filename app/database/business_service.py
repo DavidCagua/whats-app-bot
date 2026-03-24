@@ -401,7 +401,7 @@ class BusinessService:
     # ========================================================================
 
     def add_user_to_business(self, user_id: str, business_id: str,
-                           role: str = "staff") -> Optional[Dict]:
+                           role: str = "member") -> Optional[Dict]:
         """Add a user to a business with a specific role."""
         try:
             session: Session = get_db_session()

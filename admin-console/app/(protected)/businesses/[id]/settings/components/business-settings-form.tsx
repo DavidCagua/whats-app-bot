@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { Plus, X, Save, Clock, MapPin, Users, CreditCard, Gift, Calendar, MessageSquare, Package } from "lucide-react"
+import { Plus, X, Save, Clock, MapPin, CreditCard, Gift, Calendar, MessageSquare, Package } from "lucide-react"
 import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
 
@@ -41,10 +41,6 @@ const businessSettingsSchema = z.object({
   })),
   payment_methods: z.array(z.string()),
   promotions: z.array(z.string()),
-  staff: z.array(z.object({
-    name: z.string().min(1, "Staff name is required"),
-    specialties: z.array(z.string()),
-  })),
   appointment_settings: z.object({
     max_concurrent: z.number().min(1, "Must allow at least 1 concurrent appointment"),
     min_advance_hours: z.number().min(0, "Cannot be negative"),
@@ -122,30 +118,6 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
   const removePromotion = (index: number) => {
     const currentPromotions = form.getValues("promotions")
     form.setValue("promotions", currentPromotions.filter((_, i) => i !== index))
-  }
-
-  const addStaff = () => {
-    const currentStaff = form.getValues("staff")
-    form.setValue("staff", [...currentStaff, { name: "", specialties: [] }])
-  }
-
-  const removeStaff = (index: number) => {
-    const currentStaff = form.getValues("staff")
-    form.setValue("staff", currentStaff.filter((_, i) => i !== index))
-  }
-
-  const addStaffSpecialty = (staffIndex: number) => {
-    const currentStaff = form.getValues("staff")
-    const updatedStaff = [...currentStaff]
-    updatedStaff[staffIndex].specialties.push("")
-    form.setValue("staff", updatedStaff)
-  }
-
-  const removeStaffSpecialty = (staffIndex: number, specialtyIndex: number) => {
-    const currentStaff = form.getValues("staff")
-    const updatedStaff = [...currentStaff]
-    updatedStaff[staffIndex].specialties = updatedStaff[staffIndex].specialties.filter((_, i) => i !== specialtyIndex)
-    form.setValue("staff", updatedStaff)
   }
 
   return (
@@ -518,84 +490,6 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             <Button type="button" variant="outline" onClick={addPromotion}>
               <Plus className="mr-2 h-4 w-4" />
               Add Promotion
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Staff */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Users className="h-5 w-5" />
-            Staff
-          </CardTitle>
-          <CardDescription>
-            Add your team members and their specialties
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {form.watch("staff").map((staff, index) => (
-              <div key={index} className="p-4 border rounded-lg space-y-4">
-                <div className="flex gap-4 items-center">
-                  <div className="flex-1">
-                    <Label>Staff Name</Label>
-                    <Input
-                      {...form.register(`staff.${index}.name`)}
-                      placeholder="e.g., Luis Gómez"
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onClick={() => removeStaff(index)}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-                <div className="space-y-2">
-                  <Label>Specialties</Label>
-                  <div className="space-y-2">
-                    {staff.specialties.map((specialty, specialtyIndex) => (
-                      <div key={specialtyIndex} className="flex gap-2 items-center">
-                        <Input
-                          value={specialty}
-                          onChange={(e) => {
-                            const currentStaff = form.getValues("staff")
-                            const updatedStaff = [...currentStaff]
-                            updatedStaff[index].specialties[specialtyIndex] = e.target.value
-                            form.setValue("staff", updatedStaff)
-                          }}
-                          placeholder="e.g., Cortes clásicos, Fade"
-                        />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="icon"
-                          onClick={() => removeStaffSpecialty(index, specialtyIndex)}
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    ))}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => addStaffSpecialty(index)}
-                    >
-                      <Plus className="mr-2 h-4 w-4" />
-                      Add Specialty
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ))}
-            <Button type="button" variant="outline" onClick={addStaff}>
-              <Plus className="mr-2 h-4 w-4" />
-              Add Staff Member
             </Button>
           </div>
         </CardContent>

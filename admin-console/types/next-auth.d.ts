@@ -3,7 +3,7 @@ import { DefaultSession } from "next-auth"
 export type UserBusiness = {
   businessId: string
   businessName: string
-  role: string // 'admin' or 'staff'
+  role: string // 'admin' or 'member'
 }
 
 declare module "next-auth" {

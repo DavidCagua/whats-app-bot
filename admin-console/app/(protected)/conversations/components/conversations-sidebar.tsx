@@ -182,7 +182,7 @@ export function ConversationsSidebar({
                 <SelectItem value="all">All time</SelectItem>
                 <SelectItem value="today">Today</SelectItem>
                 <SelectItem value="week">This week</SelectItem>
-                {role !== "staff" && <SelectItem value="month">This month</SelectItem>}
+                {role !== "member" && <SelectItem value="month">This month</SelectItem>}
               </SelectContent>
             </Select>
 
