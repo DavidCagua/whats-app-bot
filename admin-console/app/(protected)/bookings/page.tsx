@@ -2,12 +2,12 @@ import { auth } from "@/lib/auth"
 import { redirect } from "next/navigation"
 import { getBookingsAccess, getBookings, getAvailabilityRules } from "@/lib/bookings-queries"
 import { BookingsView } from "./components/bookings-view"
+import { prisma } from "@/lib/prisma"
 
 type SearchParams = {
   business?: string
   dateFrom?: string
   dateTo?: string
-  status?: string
 }
 
 export default async function BookingsPage({
@@ -37,7 +37,6 @@ export default async function BookingsPage({
 
   const params = await searchParams
   const businessFilter = params.business
-  const statusFilter = params.status
 
   // Default to current week
   const now = new Date()
@@ -57,16 +56,22 @@ export default async function BookingsPage({
     businessFilter ||
     (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id)
 
-  const [bookings, availabilityRules] = await Promise.all([
+  const [bookings, availabilityRules, initialStaff] = await Promise.all([
     getBookings({
       businessIds: access.businessIds,
       businessFilter,
       dateFrom,
       dateTo,
-      status: statusFilter,
       limit: 500,
     }),
     primaryBusinessId ? getAvailabilityRules(primaryBusinessId) : Promise.resolve([]),
+    primaryBusinessId
+      ? prisma.staff_members.findMany({
+          where: { business_id: primaryBusinessId, is_active: true },
+          select: { id: true, name: true, role: true },
+          orderBy: { name: "asc" },
+        })
+      : Promise.resolve([]),
   ])
 
   return (
@@ -79,9 +84,9 @@ export default async function BookingsPage({
           business: businessFilter,
           dateFrom: params.dateFrom,
           dateTo: params.dateTo,
-          status: statusFilter,
         }}
         initialWeekStart={weekStart.toISOString()}
+        initialStaff={initialStaff}
       />
     </div>
   )

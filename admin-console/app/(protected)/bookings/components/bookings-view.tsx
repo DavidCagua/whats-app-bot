@@ -1,18 +1,26 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Booking, BookingsAccess, AvailabilityRule } from "@/lib/bookings-queries"
-import { BookingsCalendar } from "./bookings-calendar"
+import { rescheduleBooking } from "@/lib/actions/bookings"
+import { BookingsCalendar, type StaffMember } from "./bookings-calendar"
 import { BookingModal } from "./booking-modal"
 import { AvailabilitySettings } from "./availability-settings"
 import { Button } from "@/components/ui/button"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { Settings } from "lucide-react"
 
 interface InitialFilters {
   business?: string
   dateFrom?: string
   dateTo?: string
-  status?: string
 }
 
 interface BookingsViewProps {
@@ -21,6 +29,7 @@ interface BookingsViewProps {
   availabilityRules: AvailabilityRule[]
   initialFilters: InitialFilters
   initialWeekStart: string
+  initialStaff: StaffMember[]
 }
 
 export type ModalState =
@@ -34,39 +43,73 @@ export function BookingsView({
   availabilityRules: initialRules,
   initialFilters,
   initialWeekStart,
+  initialStaff,
 }: BookingsViewProps) {
   const [bookings, setBookings] = useState<Booking[]>(initialBookings)
   const [availabilityRules, setAvailabilityRules] = useState<AvailabilityRule[]>(initialRules)
+  const [staffMembers, setStaffMembers] = useState<StaffMember[]>(initialStaff)
   const [modalState, setModalState] = useState<ModalState>({ mode: "closed" })
-  const [showAvailability, setShowAvailability] = useState(false)
+  const [availabilityOpen, setAvailabilityOpen] = useState(false)
+  const isMobile = useIsMobile()
   const [businessFilter, setBusinessFilter] = useState(initialFilters.business || "")
-  const [statusFilter, setStatusFilter] = useState(initialFilters.status || "")
+  const [staffFilter, setStaffFilter] = useState("")
   const [weekStart, setWeekStart] = useState(() => new Date(initialWeekStart))
 
-  // Reload bookings from API when filters change
+  // Reload bookings from API when filters/week change
   async function loadBookings(params: {
     business?: string
     dateFrom: Date
     dateTo: Date
-    status?: string
+    staff?: string
   }) {
     const url = new URL("/api/bookings", window.location.origin)
     if (params.business) url.searchParams.set("business", params.business)
-    if (params.status) url.searchParams.set("status", params.status)
+    if (params.staff) url.searchParams.set("staff", params.staff)
     url.searchParams.set("dateFrom", params.dateFrom.toISOString())
     url.searchParams.set("dateTo", params.dateTo.toISOString())
 
     const res = await fetch(url.toString())
     if (res.ok) {
       const data = await res.json()
-      setBookings(data)
+      setBookings(data.map((b: Booking) => ({
+        ...b,
+        start_at: new Date(b.start_at),
+        end_at: new Date(b.end_at),
+        created_at: b.created_at ? new Date(b.created_at) : null,
+      })))
     }
   }
 
+  // Reload staff when business filter changes
+  async function loadStaff(businessId: string) {
+    if (!businessId) {
+      setStaffMembers([])
+      return
+    }
+    const res = await fetch(`/api/staff?business_id=${businessId}`)
+    if (res.ok) {
+      const data = await res.json()
+      setStaffMembers(data)
+    }
+  }
+
+  useEffect(() => {
+    if (businessFilter) loadStaff(businessFilter)
+  }, [businessFilter])
+
+  const availabilityBusinessId =
+    (access.canFilterByBusiness
+      ? businessFilter
+      : (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id)) || ""
+
+  useEffect(() => {
+    if (!availabilityBusinessId) setAvailabilityOpen(false)
+  }, [availabilityBusinessId])
+
   function getWeekEnd(start: Date): Date {
     const end = new Date(start)
-    end.setDate(start.getDate() + 6)
-    end.setHours(23, 59, 59, 999)
+    end.setUTCDate(start.getUTCDate() + 6)
+    end.setUTCHours(23, 59, 59, 999)
     return end
   }
 
@@ -76,18 +119,18 @@ export function BookingsView({
       business: businessFilter || undefined,
       dateFrom: newStart,
       dateTo: getWeekEnd(newStart),
-      status: statusFilter || undefined,
+      staff: staffFilter || undefined,
     })
   }
 
-  function handleFilterChange(business: string, status: string) {
+  function handleFilterChange(business: string, staff: string) {
     setBusinessFilter(business)
-    setStatusFilter(status)
+    setStaffFilter(staff)
     loadBookings({
       business: business || undefined,
       dateFrom: weekStart,
       dateTo: getWeekEnd(weekStart),
-      status: status || undefined,
+      staff: staff || undefined,
     })
   }
 
@@ -109,47 +152,88 @@ export function BookingsView({
     setModalState({ mode: "closed" })
   }
 
-  // Pick business for availability settings
-  const availabilityBusinessId =
-    businessFilter ||
-    (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id) ||
-    ""
+  async function handleBookingReschedule(
+    id: string,
+    newStart: string,
+    newEnd: string,
+    staffMemberId?: string | null
+  ) {
+    // Optimistic update
+    setBookings((prev) =>
+      prev.map((b) =>
+        b.id === id
+          ? { ...b, start_at: new Date(newStart), end_at: new Date(newEnd) }
+          : b
+      )
+    )
+    const result = await rescheduleBooking(id, newStart, newEnd, staffMemberId)
+    if (result.success) {
+      setBookings((prev) =>
+        prev.map((b) => (b.id === id ? result.booking : b))
+      )
+    } else {
+      // Revert on failure by reloading
+      loadBookings({
+        business: businessFilter || undefined,
+        dateFrom: weekStart,
+        dateTo: getWeekEnd(weekStart),
+        staff: staffFilter || undefined,
+      })
+    }
+  }
 
   return (
     <div className="space-y-4">
-      {/* Availability toggle (admin only) */}
       {access.canManageAvailability && availabilityBusinessId && (
         <div className="flex justify-end">
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setShowAvailability((v) => !v)}
+            onClick={() => setAvailabilityOpen(true)}
           >
             <Settings className="h-4 w-4 mr-2" />
-            {showAvailability ? "Hide" : "Show"} Availability Settings
+            Availability
           </Button>
         </div>
       )}
 
-      {showAvailability && access.canManageAvailability && availabilityBusinessId && (
-        <AvailabilitySettings
-          businessId={availabilityBusinessId}
-          initialRules={availabilityRules}
-          onRulesUpdated={setAvailabilityRules}
-        />
+      {access.canManageAvailability && (
+        <Sheet open={availabilityOpen} onOpenChange={setAvailabilityOpen}>
+          <SheetContent
+            side={isMobile ? "bottom" : "right"}
+            className="flex min-h-0 w-full flex-col gap-0 overflow-hidden p-0 max-sm:max-h-[90dvh] max-sm:rounded-t-xl sm:h-full sm:max-h-[100dvh] sm:max-w-2xl"
+          >
+            <SheetHeader className="shrink-0 space-y-1 border-b px-4 pb-3 pt-6 text-left pr-12">
+              <SheetTitle>Business hours &amp; availability</SheetTitle>
+              <SheetDescription>
+                Open hours and slot length for this business. The calendar stays visible behind this panel.
+              </SheetDescription>
+            </SheetHeader>
+            {availabilityBusinessId && (
+              <AvailabilitySettings
+                embedded
+                businessId={availabilityBusinessId}
+                initialRules={availabilityRules}
+                onRulesUpdated={setAvailabilityRules}
+              />
+            )}
+          </SheetContent>
+        </Sheet>
       )}
 
       <BookingsCalendar
         bookings={bookings}
         weekStart={weekStart}
         businesses={access.businesses}
+        staffMembers={staffMembers}
         canFilterByBusiness={access.canFilterByBusiness}
         businessFilter={businessFilter}
-        statusFilter={statusFilter}
+        staffFilter={staffFilter}
         onWeekChange={handleWeekChange}
         onFilterChange={handleFilterChange}
         onCellClick={(date) => setModalState({ mode: "create", date })}
         onBookingClick={(booking) => setModalState({ mode: "edit", booking })}
+        onBookingReschedule={handleBookingReschedule}
       />
 
       {modalState.mode !== "closed" && (

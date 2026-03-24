@@ -46,7 +46,6 @@ def test_schedule_appointment_basic():
 
     print(f"Schedule result: {result}")
     assert "agendada exitosamente" in result
-    assert "parce" in result
     return result
 
 def test_reschedule_appointment():

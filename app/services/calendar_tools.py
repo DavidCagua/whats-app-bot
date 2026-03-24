@@ -13,6 +13,7 @@ from langchain.tools import tool
 
 from ..database.booking_service import booking_service
 from ..database.customer_service import customer_service
+from .staff_service import staff_service
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,49 @@ def _get_slot_duration(business_context: Optional[dict], date_str: str) -> int:
     return 60
 
 
+def _normalize_staff_id(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s if s else None
+
+
 @tool
-def get_available_slots(date: str = "", time_range: str = "all",
-                        injected_business_context: dict = None) -> str:
+def list_booking_staff(injected_business_context: dict = None) -> str:
+    """
+    List active staff for this business (id, name, role) for booking and availability tools.
+
+    Returns:
+        Formatted list with staff UUIDs to use with schedule_appointment and get_available_slots.
+    """
+    business_id = _get_business_id(injected_business_context)
+    if not business_id:
+        return "❌ No se pudo determinar el negocio."
+
+    staff_rows = staff_service.get_staff_by_business(business_id, active_only=True)
+    if not staff_rows:
+        return (
+            "❌ Este negocio no tiene profesionales activos en el sistema; "
+            "no se pueden agendar citas por WhatsApp hasta que se configure el equipo."
+        )
+
+    lines = ["👥 Profesionales disponibles:\n"]
+    for s in staff_rows:
+        lines.append(f"• `{s['id']}` — {s['name']} ({s['role']})")
+    lines.append(
+        "\nUsa el ID exacto con staff_preference=\"specific\" y staff_member_id, "
+        'o staff_preference=\"anyone\" para asignación automática.'
+    )
+    return "\n".join(lines)
+
+
+@tool
+def get_available_slots(
+    date: str = "",
+    time_range: str = "all",
+    staff_member_id: str = "",
+    injected_business_context: dict = None,
+) -> str:
     """
     Get available time slots for appointments on a given date.
 
@@ -59,11 +100,17 @@ def get_available_slots(date: str = "", time_range: str = "all",
         date: Date in YYYY-MM-DD format (default: tomorrow)
         time_range: "morning" (before 12PM), "afternoon" (12PM-5PM),
                     "evening" (after 5PM), or "all" (recommended)
+        staff_member_id: If provided, availability for that staff only.
+            If empty, aggregate mode (slot free if at least one staff is free; shows who).
 
     Returns:
         String listing available time slots for the requested date.
     """
-    logger.warning(f"[CALENDAR] get_available_slots called: date='{date}', time_range='{time_range}'")
+    sid = _normalize_staff_id(staff_member_id)
+    logger.warning(
+        f"[CALENDAR] get_available_slots called: date='{date}', time_range='{time_range}', "
+        f"staff_member_id={sid!r}"
+    )
 
     try:
         business_id = _get_business_id(injected_business_context)
@@ -74,7 +121,14 @@ def get_available_slots(date: str = "", time_range: str = "all",
         if not date:
             date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        slots = booking_service.get_available_slots(business_id, date)
+        staff_rows = staff_service.get_staff_by_business(business_id, active_only=True)
+        if not staff_rows:
+            return (
+                "❌ No hay profesionales activos; no se puede consultar disponibilidad. "
+                "Contacta al negocio."
+            )
+
+        slots = booking_service.get_available_slots(business_id, date, staff_member_id=sid)
 
         if slots is None:
             return "❌ Error consultando disponibilidad. Por favor intenta de nuevo."
@@ -108,12 +162,24 @@ def get_available_slots(date: str = "", time_range: str = "all",
                 "¿Te gustaría probar otro horario o día?"
             )
 
-        slot_labels = [f"{s['start']} - {s['end']}" for s in available]
-        slots_text = "\n".join(f"  • {label}" for label in slot_labels)
+        id_to_name = {r["id"]: r["name"] for r in staff_rows}
+        slot_lines = []
+        for s in available:
+            label = f"{s['start']} - {s['end']}"
+            if sid:
+                slot_lines.append(f"  • {label}")
+            else:
+                fids = s.get("free_staff_ids") or []
+                names = [id_to_name.get(fid, fid[:8] + "…") for fid in fids]
+                who = ", ".join(names) if names else "(nadie libre)"
+                slot_lines.append(f"  • {label} — disponible con: {who}")
 
-        logger.warning(f"[CALENDAR] get_available_slots: {len(available)} slots available for {date}")
+        slots_text = "\n".join(slot_lines)
+        mode = f"profesional `{sid}`" if sid else "cualquier profesional disponible"
+
+        logger.warning(f"[CALENDAR] get_available_slots: {len(available)} slots for {date} ({mode})")
         return (
-            f"📅 Horarios disponibles para *{date}*:\n\n"
+            f"📅 Horarios disponibles para *{date}* ({mode}):\n\n"
             f"{slots_text}\n\n"
             "¿Cuál te gustaría reservar?"
         )
@@ -124,9 +190,18 @@ def get_available_slots(date: str = "", time_range: str = "all",
 
 
 @tool
-def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_time: str,
-                         customer_name: str = "", customer_age: str = "",
-                         description: str = "", injected_business_context: dict = None) -> str:
+def schedule_appointment(
+    whatsapp_id: str,
+    summary: str,
+    start_time: str,
+    end_time: str,
+    customer_name: str = "",
+    customer_age: str = "",
+    description: str = "",
+    staff_preference: str = "anyone",
+    staff_member_id: str = "",
+    injected_business_context: dict = None,
+) -> str:
     """
     Schedule a new appointment and save customer information.
 
@@ -138,13 +213,19 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
         customer_name: Customer full name (saved to DB)
         customer_age: Customer age (optional)
         description: Extra notes for the booking
+        staff_preference: "specific" (requires staff_member_id) or "anyone" (assign random free staff)
+        staff_member_id: UUID of staff when staff_preference is "specific"
 
     Returns:
         Confirmation message or error.
     """
+    pref = (staff_preference or "anyone").strip().lower()
+    sid_raw = _normalize_staff_id(staff_member_id)
+
     logger.warning(
         f"[CALENDAR] schedule_appointment: whatsapp_id={whatsapp_id}, "
-        f"summary='{summary}', start='{start_time}', end='{end_time}'"
+        f"summary='{summary}', start='{start_time}', end='{end_time}', "
+        f"staff_preference={pref}, staff_member_id={sid_raw!r}"
     )
 
     try:
@@ -152,31 +233,83 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
         if not business_id:
             return "❌ No se pudo determinar el negocio. Intenta de nuevo."
 
+        staff_rows = staff_service.get_staff_by_business(business_id, active_only=True)
+        if not staff_rows:
+            return (
+                "❌ No hay profesionales activos; no se puede agendar por WhatsApp. "
+                "Contacta al negocio."
+            )
+
+        if pref not in ("specific", "anyone"):
+            return '❌ staff_preference debe ser "specific" o "anyone".'
+
+        if pref == "specific" and not sid_raw:
+            return (
+                "❌ Para reservar con un profesional específico debes indicar "
+                'staff_member_id (UUID). Usa list_booking_staff para ver los IDs.'
+            )
+
+        if pref == "anyone" and len(staff_rows) == 1:
+            sid_raw = staff_rows[0]["id"]
+            pref = "specific"
+
         # Parse & normalize times
         start_dt = _parse_dt(start_time)
         end_dt = _parse_dt(end_time)
         if not start_dt or not end_dt:
             return "❌ Formato de fecha/hora inválido. Usa YYYY-MM-DDTHH:MM:SS."
 
-        # Validate within business hours using availability rules
+        if end_dt <= start_dt:
+            return "❌ La hora de fin debe ser después de la hora de inicio."
+
+        # Attach UTC if naive for DB consistency
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+
         date_str = start_dt.strftime("%Y-%m-%d")
-        slots = booking_service.get_available_slots(business_id, date_str)
+        slots = booking_service.get_available_slots(
+            business_id,
+            date_str,
+            staff_member_id=sid_raw if pref == "specific" else None,
+        )
 
         if slots is not None and len(slots) > 0:
-            # Check if the requested start time falls in an available slot
             requested_start_hhmm = start_dt.strftime("%H:%M")
             matched_slot = next(
                 (s for s in slots if s["start"] == requested_start_hhmm), None
             )
-            if matched_slot and not matched_slot["available"]:
+            if matched_slot and not matched_slot.get("available"):
                 return (
-                    f"❌ El horario {requested_start_hhmm} ya está ocupado para {date_str}. "
+                    f"❌ El horario {requested_start_hhmm} no está disponible para {date_str}. "
                     "¿Quieres que te muestre los horarios disponibles?"
                 )
         elif slots is not None and len(slots) == 0:
             logger.warning(
                 f"[CALENDAR] No availability rules for {date_str}, proceeding anyway"
             )
+
+        chosen_staff_id: Optional[str] = None
+        if pref == "specific":
+            assert sid_raw
+            if not booking_service.is_interval_free_for_staff(
+                business_id, start_dt, end_dt, sid_raw
+            ):
+                return (
+                    "❌ Ese profesional no está libre en el horario solicitado. "
+                    "Pide horarios con get_available_slots y su staff_member_id."
+                )
+            chosen_staff_id = sid_raw
+        else:
+            chosen_staff_id = booking_service.pick_random_free_staff_for_interval(
+                business_id, start_dt, end_dt
+            )
+            if not chosen_staff_id:
+                return (
+                    "❌ No hay ningún profesional libre en ese horario. "
+                    "¿Te muestro otros horarios con get_available_slots?"
+                )
 
         # Upsert customer
         customer = None
@@ -196,7 +329,11 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
 
         customer_id = customer["id"] if customer else None
 
-        # Create booking
+        staff_name = ""
+        st = staff_service.get_staff_member(chosen_staff_id)
+        if st:
+            staff_name = st.get("name") or ""
+
         notes = description or None
         booking = booking_service.create_booking({
             "business_id": business_id,
@@ -207,6 +344,7 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
             "status": "confirmed",
             "notes": notes,
             "created_via": "whatsapp",
+            "staff_member_id": chosen_staff_id,
         })
 
         if not booking:
@@ -214,10 +352,12 @@ def schedule_appointment(whatsapp_id: str, summary: str, start_time: str, end_ti
 
         display_date = start_dt.strftime("%d/%m/%Y")
         display_time = start_dt.strftime("%I:%M %p")
-        logger.warning(f"[CALENDAR] Booking created: {booking['id']}")
+        prof_line = f"👤 Profesional: *{staff_name}*\n" if staff_name else ""
+        logger.warning(f"[CALENDAR] Booking created: {booking['id']} staff={chosen_staff_id}")
         return (
             f"✅ ¡Cita agendada exitosamente!\n\n"
             f"📋 *{summary}*\n"
+            f"{prof_line}"
             f"📅 {display_date} a las {display_time}\n\n"
             "Si necesitas cancelar o reagendar, solo dímelo. ¡Hasta pronto!"
         )
@@ -398,6 +538,7 @@ def _select_booking(bookings: list, selector: str) -> Optional[dict]:
 
 # List of all calendar tools (unchanged interface for booking_agent.py)
 calendar_tools = [
+    list_booking_staff,
     get_available_slots,
     schedule_appointment,
     reschedule_appointment,

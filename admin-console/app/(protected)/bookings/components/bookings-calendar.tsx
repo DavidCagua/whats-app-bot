@@ -1,9 +1,14 @@
 "use client"
 
-import { useState } from "react"
-import { ChevronLeft, ChevronRight, CalendarDays } from "lucide-react"
+import { useMemo, useState } from "react"
+import { Calendar, dateFnsLocalizer, Views, type View } from "react-big-calendar"
+import withDragAndDrop from "react-big-calendar/lib/addons/dragAndDrop"
+import { DndProvider } from "react-dnd"
+import { HTML5Backend } from "react-dnd-html5-backend"
+import { format, parse, startOfWeek, getDay } from "date-fns"
+import { enUS } from "date-fns/locale/en-US"
+import { ChevronLeft, ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import {
   Select,
   SelectContent,
@@ -11,312 +16,338 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Booking } from "@/lib/bookings-queries"
+import type { Booking } from "@/lib/bookings-queries"
+import {
+  bookingToEvent,
+  fromDisplayDate,
+  getStaffHex,
+  getStaffEventTextClass,
+  type CalendarEvent,
+} from "./calendar-utils"
 
-const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-const DAY_NAMES_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-const HOUR_START = 7
-const HOUR_END = 21 // exclusive — slots 7:00..20:00
+// Localizer — must be at module level
+const localizer = dateFnsLocalizer({
+  format,
+  parse,
+  startOfWeek,
+  getDay,
+  locales: { "en-US": enUS },
+})
 
-const STATUS_STYLES: Record<string, string> = {
-  confirmed: "bg-green-100 border-green-400 text-green-800",
-  pending: "bg-yellow-100 border-yellow-400 text-yellow-800",
-  cancelled: "bg-gray-100 border-gray-300 text-gray-400 line-through",
-  no_show: "bg-red-100 border-red-400 text-red-800",
-  completed: "bg-blue-100 border-blue-400 text-blue-800",
-}
+const DnDCalendar = withDragAndDrop<CalendarEvent>(Calendar)
 
-const STATUS_OPTIONS = [
-  { value: "", label: "All statuses" },
-  { value: "confirmed", label: "Confirmed" },
-  { value: "pending", label: "Pending" },
-  { value: "completed", label: "Completed" },
-  { value: "cancelled", label: "Cancelled" },
-  { value: "no_show", label: "No Show" },
-]
+// Visible hour range
+const MIN_TIME = new Date(0, 0, 0, 7, 0)
+const MAX_TIME = new Date(0, 0, 0, 21, 0)
+
+export type StaffMember = { id: string; name: string; role: string }
 
 interface BookingsCalendarProps {
   bookings: Booking[]
   weekStart: Date
   businesses: Array<{ id: string; name: string }>
+  staffMembers: StaffMember[]
   canFilterByBusiness: boolean
   businessFilter: string
-  statusFilter: string
+  staffFilter: string
   onWeekChange: (newStart: Date) => void
-  onFilterChange: (business: string, status: string) => void
+  onFilterChange: (business: string, staff: string) => void
   onCellClick: (date: Date) => void
   onBookingClick: (booking: Booking) => void
+  onBookingReschedule: (id: string, newStart: string, newEnd: string, staffMemberId?: string | null) => Promise<void>
 }
 
-function isSameDay(a: Date, b: Date): boolean {
+// Custom event block rendered inside each calendar slot
+function BookingEventBlock({ event }: { event: CalendarEvent }) {
+  const booking = event.booking
+  const textClass = getStaffEventTextClass(booking.staff_member_id)
   return (
-    a.getUTCFullYear() === b.getUTCFullYear() &&
-    a.getUTCMonth() === b.getUTCMonth() &&
-    a.getUTCDate() === b.getUTCDate()
+    <div className={`h-full px-1 py-0.5 rounded text-xs overflow-hidden ${textClass}`}>
+      <p className="font-semibold truncate leading-tight">{booking.service_name || "Booking"}</p>
+      {booking.customer?.name && (
+        <p className="truncate opacity-80">{booking.customer.name}</p>
+      )}
+      {booking.staff_member?.name && (
+        <p className="truncate opacity-60">{booking.staff_member.name}</p>
+      )}
+    </div>
   )
-}
-
-function formatTime(date: Date): string {
-  const h = date.getUTCHours().toString().padStart(2, "0")
-  const m = date.getUTCMinutes().toString().padStart(2, "0")
-  return `${h}:${m}`
-}
-
-function formatHour(h: number): string {
-  if (h === 0) return "12 AM"
-  if (h < 12) return `${h} AM`
-  if (h === 12) return "12 PM"
-  return `${h - 12} PM`
 }
 
 export function BookingsCalendar({
   bookings,
   weekStart,
   businesses,
+  staffMembers,
   canFilterByBusiness,
   businessFilter,
-  statusFilter,
+  staffFilter,
   onWeekChange,
   onFilterChange,
   onCellClick,
   onBookingClick,
+  onBookingReschedule,
 }: BookingsCalendarProps) {
-  const [localBusiness, setLocalBusiness] = useState(businessFilter)
-  const [localStatus, setLocalStatus] = useState(statusFilter)
+  const events = useMemo(() => bookings.map(bookingToEvent), [bookings])
+  const shouldRenderCalendar = !canFilterByBusiness || Boolean(businessFilter)
+  const [currentView, setCurrentView] = useState<View>(Views.WEEK)
 
-  // Build week days using UTC so day labels match stored UTC booking times
-  const days: Date[] = []
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(weekStart)
-    d.setUTCDate(weekStart.getUTCDate() + i)
-    days.push(d)
-  }
+  const hasUnassignedBooking = useMemo(
+    () => bookings.some((b) => !b.staff_member_id),
+    [bookings]
+  )
 
-  const today = new Date()
+  // Resource mode: show staff columns when multiple staff exist
+  const useResources = staffMembers.length > 1
+  const resources = useResources
+    ? [
+        { resourceId: "unassigned", resourceTitle: "Unassigned" },
+        ...staffMembers.map((s) => ({ resourceId: s.id, resourceTitle: s.name })),
+      ]
+    : undefined
 
-  function goToPrevWeek() {
+  // Week label
+  const weekEnd = new Date(weekStart)
+  weekEnd.setUTCDate(weekStart.getUTCDate() + 6)
+  const fmtUTC = (d: Date, opts: Intl.DateTimeFormatOptions) =>
+    d.toLocaleDateString("en-US", { ...opts, timeZone: "UTC" })
+  const weekLabel = `${fmtUTC(weekStart, { month: "short", day: "numeric" })} – ${fmtUTC(weekEnd, { month: "short", day: "numeric", year: "numeric" })}`
+  const monthLabel = weekStart.toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  })
+  const dayLabel = weekStart.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  })
+  const periodLabel =
+    currentView === Views.MONTH
+      ? monthLabel
+      : currentView === Views.DAY
+        ? dayLabel
+        : weekLabel
+
+  function goToPrevPeriod() {
     const prev = new Date(weekStart)
-    prev.setUTCDate(weekStart.getUTCDate() - 7)
+    if (currentView === Views.MONTH) {
+      prev.setUTCMonth(prev.getUTCMonth() - 1)
+    } else if (currentView === Views.DAY) {
+      prev.setUTCDate(prev.getUTCDate() - 1)
+    } else {
+      prev.setUTCDate(prev.getUTCDate() - 7)
+    }
     onWeekChange(prev)
   }
 
-  function goToNextWeek() {
+  function goToNextPeriod() {
     const next = new Date(weekStart)
-    next.setUTCDate(weekStart.getUTCDate() + 7)
+    if (currentView === Views.MONTH) {
+      next.setUTCMonth(next.getUTCMonth() + 1)
+    } else if (currentView === Views.DAY) {
+      next.setUTCDate(next.getUTCDate() + 1)
+    } else {
+      next.setUTCDate(next.getUTCDate() + 7)
+    }
     onWeekChange(next)
   }
 
   function goToToday() {
     const t = new Date()
-    const day = t.getUTCDay()
-    const start = new Date(t)
-    start.setUTCDate(t.getUTCDate() - day)
-    start.setUTCHours(0, 0, 0, 0)
-    onWeekChange(start)
+    if (currentView === Views.WEEK) {
+      const start = new Date(t)
+      start.setUTCDate(t.getUTCDate() - t.getUTCDay())
+      start.setUTCHours(0, 0, 0, 0)
+      onWeekChange(start)
+      return
+    }
+    t.setUTCHours(0, 0, 0, 0)
+    onWeekChange(t)
   }
-
-  function handleBusinessChange(val: string) {
-    const v = val === "__all__" ? "" : val
-    setLocalBusiness(v)
-    onFilterChange(v, localStatus)
-  }
-
-  function handleStatusChange(val: string) {
-    const v = val === "__all__" ? "" : val
-    setLocalStatus(v)
-    onFilterChange(localBusiness, v)
-  }
-
-  // Map bookings to days/hours
-  const bookingsByDayHour: Map<string, Booking[]> = new Map()
-  for (const booking of bookings) {
-    const start = new Date(booking.start_at)
-    const dayIdx = days.findIndex((d) => isSameDay(d, start))
-    if (dayIdx < 0) continue
-    const hour = start.getUTCHours()
-    if (hour < HOUR_START || hour >= HOUR_END) continue
-    const key = `${dayIdx}-${hour}`
-    const existing = bookingsByDayHour.get(key) || []
-    existing.push(booking)
-    bookingsByDayHour.set(key, existing)
-  }
-
-  const hours = Array.from({ length: HOUR_END - HOUR_START }, (_, i) => HOUR_START + i)
-
-  // Format week range label
-  const weekEnd = days[6]
-  const fmtUTC = (d: Date, opts: Intl.DateTimeFormatOptions) =>
-    d.toLocaleDateString("en-US", { ...opts, timeZone: "UTC" })
-  const weekLabel = `${fmtUTC(weekStart, { month: "short", day: "numeric" })} – ${fmtUTC(weekEnd, { month: "short", day: "numeric", year: "numeric" })}`
 
   return (
-    <div className="space-y-4">
-      {/* Controls bar */}
-      <div className="flex flex-wrap items-center gap-3">
-        {/* Navigation */}
-        <div className="flex items-center gap-1">
-          <Button variant="outline" size="icon" onClick={goToPrevWeek}>
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <Button variant="outline" size="sm" onClick={goToToday}>
-            Today
-          </Button>
-          <Button variant="outline" size="icon" onClick={goToNextWeek}>
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <CalendarDays className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium">{weekLabel}</span>
-        </div>
-
-        <div className="ml-auto flex items-center gap-2">
-          {canFilterByBusiness && businesses.length > 0 && (
-            <Select
-              value={localBusiness || "__all__"}
-              onValueChange={handleBusinessChange}
-            >
-              <SelectTrigger className="w-44 h-8 text-xs">
-                <SelectValue placeholder="All businesses" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__">All businesses</SelectItem>
-                {businesses.map((b) => (
-                  <SelectItem key={b.id} value={b.id}>
-                    {b.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
-
-          <Select
-            value={localStatus || "__all__"}
-            onValueChange={handleStatusChange}
-          >
-            <SelectTrigger className="w-36 h-8 text-xs">
-              <SelectValue placeholder="All statuses" />
-            </SelectTrigger>
-            <SelectContent>
-              {STATUS_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value || "__all__"} value={opt.value || "__all__"}>
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      {/* Calendar grid */}
-      <div className="rounded-lg border overflow-auto">
-        <div className="min-w-[700px]">
-          {/* Header row: days */}
-          <div className="grid grid-cols-[56px_repeat(7,1fr)] border-b bg-muted/50">
-            <div className="p-2 text-xs text-muted-foreground" />
-            {days.map((day, i) => {
-              const isToday = isSameDay(day, today)
-              return (
-                <div
-                  key={i}
-                  className={`p-2 text-center border-l ${isToday ? "bg-primary/10" : ""}`}
-                >
-                  <p className="text-xs text-muted-foreground">{DAY_NAMES[day.getUTCDay()]}</p>
-                  <p
-                    className={`text-sm font-semibold ${
-                      isToday
-                        ? "bg-primary text-primary-foreground rounded-full w-6 h-6 flex items-center justify-center mx-auto"
-                        : ""
-                    }`}
-                  >
-                    {day.getUTCDate()}
-                  </p>
-                </div>
-              )
-            })}
+    <DndProvider backend={HTML5Backend}>
+      <div className="space-y-3">
+        {/* Toolbar */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1">
+            <Button variant="outline" size="icon" onClick={goToPrevPeriod}>
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" size="sm" onClick={goToToday}>
+              Today
+            </Button>
+            <Button variant="outline" size="icon" onClick={goToNextPeriod}>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
           </div>
 
-          {/* Hour rows */}
-          {hours.map((hour) => (
-            <div
-              key={hour}
-              className="grid grid-cols-[56px_repeat(7,1fr)] border-b last:border-0"
-              style={{ minHeight: "64px" }}
+          <span className="text-sm font-medium">{periodLabel}</span>
+
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant={currentView === Views.MONTH ? "default" : "outline"}
+              onClick={() => setCurrentView(Views.MONTH)}
             >
-              {/* Time label */}
-              <div className="p-1 text-right pr-2 pt-1">
-                <span className="text-xs text-muted-foreground">{formatHour(hour)}</span>
-              </div>
+              Month
+            </Button>
+            <Button
+              size="sm"
+              variant={currentView === Views.WEEK ? "default" : "outline"}
+              onClick={() => setCurrentView(Views.WEEK)}
+            >
+              Week
+            </Button>
+            <Button
+              size="sm"
+              variant={currentView === Views.DAY ? "default" : "outline"}
+              onClick={() => setCurrentView(Views.DAY)}
+            >
+              Day
+            </Button>
+          </div>
 
-              {/* Day cells */}
-              {days.map((day, dayIdx) => {
-                const isToday = isSameDay(day, today)
-                const cellBookings = bookingsByDayHour.get(`${dayIdx}-${hour}`) || []
-
-                const handleCellClick = () => {
-                  const d = new Date(day)
-                  d.setHours(hour, 0, 0, 0)
-                  onCellClick(d)
+          <div className="ml-auto flex items-center gap-2">
+            {canFilterByBusiness && businesses.length > 0 && (
+              <Select
+                value={businessFilter || "__all__"}
+                onValueChange={(v) =>
+                  onFilterChange(v === "__all__" ? "" : v, staffFilter)
                 }
+              >
+                <SelectTrigger className="w-44 h-8 text-xs">
+                  <SelectValue placeholder="All businesses" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All businesses</SelectItem>
+                  {businesses.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
 
-                return (
-                  <div
-                    key={dayIdx}
-                    className={`border-l p-1 cursor-pointer hover:bg-muted/30 transition-colors ${
-                      isToday ? "bg-primary/5" : ""
-                    }`}
-                    onClick={handleCellClick}
-                  >
-                    {cellBookings.map((booking) => (
-                      <div
-                        key={booking.id}
-                        className={`rounded border text-xs p-1 mb-1 cursor-pointer hover:opacity-80 transition-opacity ${
-                          STATUS_STYLES[booking.status] || "bg-gray-100 border-gray-300"
-                        }`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onBookingClick(booking)
-                        }}
-                      >
-                        <div className="font-medium truncate">
-                          {booking.service_name || "Booking"}
-                        </div>
-                        <div className="text-[10px] opacity-75 truncate">
-                          {formatTime(new Date(booking.start_at))} –{" "}
-                          {formatTime(new Date(booking.end_at))}
-                        </div>
-                        {booking.customer && (
-                          <div className="text-[10px] opacity-75 truncate">
-                            {booking.customer.name}
-                          </div>
-                        )}
-                        <Badge
-                          variant="outline"
-                          className="text-[9px] px-1 py-0 h-4 mt-0.5"
-                        >
-                          {booking.status}
-                        </Badge>
-                      </div>
-                    ))}
-                  </div>
-                )
-              })}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Legend */}
-      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-        {Object.entries(STATUS_STYLES).map(([status, cls]) => (
-          <div key={status} className="flex items-center gap-1">
-            <div className={`w-3 h-3 rounded border ${cls}`} />
-            <span className="capitalize">{status.replace("_", " ")}</span>
+            {staffMembers.length > 0 && (
+              <Select
+                value={staffFilter || "__all__"}
+                onValueChange={(v) =>
+                  onFilterChange(businessFilter, v === "__all__" ? "" : v)
+                }
+              >
+                <SelectTrigger className="w-40 h-8 text-xs">
+                  <SelectValue placeholder="All staff" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All staff</SelectItem>
+                  {staffMembers.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           </div>
-        ))}
-        <span className="ml-2 italic">Click empty cell to create • Click booking to edit</span>
+        </div>
+
+        {shouldRenderCalendar ? (
+          <>
+            {/* Calendar */}
+            <div className="rounded-lg border overflow-hidden rbc-wrapper">
+              <DnDCalendar
+                localizer={localizer}
+                events={events}
+                defaultView={Views.WEEK}
+                views={[Views.MONTH, Views.WEEK, Views.DAY]}
+                view={currentView}
+                onView={(view) => setCurrentView(view)}
+                toolbar={false}
+                date={weekStart}
+                onNavigate={() => {}}
+                min={MIN_TIME}
+                max={MAX_TIME}
+                step={30}
+                timeslots={2}
+                style={{ height: 680 }}
+                resources={resources}
+                resourceIdAccessor={(r: object) => (r as { resourceId: string }).resourceId}
+                resourceTitleAccessor={(r: object) => (r as { resourceTitle: string }).resourceTitle}
+                eventPropGetter={(event) => ({
+                  style: {
+                    backgroundColor: getStaffHex(event.booking.staff_member_id),
+                    border: "none",
+                    borderRadius: "4px",
+                    padding: 0,
+                  },
+                })}
+                components={{
+                  event: BookingEventBlock,
+                }}
+                selectable
+                onSelectSlot={({ start }) => {
+                  onCellClick(fromDisplayDate(start as Date))
+                }}
+                onSelectEvent={(event) => {
+                  onBookingClick(event.booking)
+                }}
+                onEventDrop={({ event, start, end }) => {
+                  void onBookingReschedule(
+                    event.id,
+                    fromDisplayDate(start as Date).toISOString(),
+                    fromDisplayDate(end as Date).toISOString(),
+                    event.booking.staff_member_id
+                  )
+                }}
+                onEventResize={({ event, start, end }) => {
+                  void onBookingReschedule(
+                    event.id,
+                    fromDisplayDate(start as Date).toISOString(),
+                    fromDisplayDate(end as Date).toISOString(),
+                    event.booking.staff_member_id
+                  )
+                }}
+                resizable
+                popup
+              />
+            </div>
+
+            {/* Staff color legend */}
+            {(staffMembers.length > 0 || hasUnassignedBooking) && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Staff</span>
+                {staffMembers.map((s) => (
+                  <div key={s.id} className="flex items-center gap-1.5">
+                    <span
+                      className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/10"
+                      style={{ backgroundColor: getStaffHex(s.id) }}
+                    />
+                    <span>{s.name}</span>
+                  </div>
+                ))}
+                {hasUnassignedBooking && (
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/10"
+                      style={{ backgroundColor: getStaffHex(null) }}
+                    />
+                    <span>Unassigned</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="rounded-lg border p-8 text-center text-sm text-muted-foreground">
+            Select a business to view the calendar.
+          </div>
+        )}
       </div>
-    </div>
+    </DndProvider>
   )
 }

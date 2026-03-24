@@ -4,6 +4,7 @@ Handles creating, listing, updating bookings and managing availability slots.
 """
 
 import logging
+import random
 import uuid
 from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Optional, Any
@@ -11,13 +12,45 @@ from typing import Dict, List, Optional, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 
-from .models import Booking, BusinessAvailability, Customer, get_db_session
+from .models import Booking, BusinessAvailability, Customer, StaffMember, get_db_session
 
 logger = logging.getLogger(__name__)
 
 
 class BookingService:
     """Service for managing bookings and business availability."""
+
+    @staticmethod
+    def _staff_free_for_bookings(
+        bookings: List[Booking],
+        interval_start: datetime,
+        interval_end: datetime,
+        staff_uuid: uuid.UUID,
+    ) -> bool:
+        """
+        True if staff_uuid has no blocking overlap on [interval_start, interval_end).
+        Bookings with staff_member_id NULL (legacy) block every staff for that interval.
+        """
+        for b in bookings:
+            if interval_end <= b.start_at or interval_start >= b.end_at:
+                continue
+            if b.staff_member_id is None or b.staff_member_id == staff_uuid:
+                return False
+        return True
+
+    def _validate_staff_member(
+        self, session: Session, business_id: str, staff_member_id: str
+    ) -> bool:
+        row = (
+            session.query(StaffMember)
+            .filter(
+                StaffMember.id == uuid.UUID(staff_member_id),
+                StaffMember.business_id == uuid.UUID(business_id),
+                StaffMember.is_active == True,
+            )
+            .first()
+        )
+        return row is not None
 
     # ========================================================================
     # BOOKINGS
@@ -122,10 +155,20 @@ class BookingService:
         Create a new booking.
 
         Required fields: business_id, start_at, end_at
-        Optional: customer_id, service_name, status, notes, created_via
+        Optional: customer_id, service_name, status, notes, created_via, staff_member_id
         """
         try:
             session: Session = get_db_session()
+
+            staff_mid = data.get("staff_member_id")
+            if staff_mid:
+                if not self._validate_staff_member(session, data["business_id"], str(staff_mid)):
+                    session.close()
+                    logger.warning(
+                        "Invalid or inactive staff_member_id for business %s",
+                        data["business_id"],
+                    )
+                    return None
 
             booking = Booking(
                 business_id=uuid.UUID(data["business_id"]),
@@ -136,6 +179,7 @@ class BookingService:
                 status=data.get("status", "confirmed"),
                 notes=data.get("notes"),
                 created_via=data.get("created_via", "admin"),
+                staff_member_id=uuid.UUID(str(staff_mid)) if staff_mid else None,
             )
 
             session.add(booking)
@@ -165,7 +209,15 @@ class BookingService:
         Partially update a booking (status, notes, service_name, start_at, end_at).
         Returns updated booking dict or None if not found.
         """
-        ALLOWED_FIELDS = {"status", "notes", "service_name", "start_at", "end_at", "customer_id"}
+        ALLOWED_FIELDS = {
+            "status",
+            "notes",
+            "service_name",
+            "start_at",
+            "end_at",
+            "customer_id",
+            "staff_member_id",
+        }
         try:
             session: Session = get_db_session()
 
@@ -177,11 +229,24 @@ class BookingService:
                 session.close()
                 return None
 
+            if "staff_member_id" in data and data["staff_member_id"] is not None:
+                sid = str(data["staff_member_id"])
+                if not self._validate_staff_member(session, str(booking.business_id), sid):
+                    session.close()
+                    logger.warning("Invalid staff_member_id on update_booking")
+                    return None
+
             for field in ALLOWED_FIELDS:
                 if field in data:
                     value = data[field]
                     if field in ("start_at", "end_at") and isinstance(value, str):
                         value = datetime.fromisoformat(value)
+                    if field == "staff_member_id":
+                        if value is None:
+                            setattr(booking, field, None)
+                        else:
+                            setattr(booking, field, uuid.UUID(str(value)))
+                        continue
                     setattr(booking, field, value)
 
             booking.updated_at = datetime.utcnow()
@@ -224,16 +289,25 @@ class BookingService:
             logger.error(f"Error getting availability for {business_id}: {e}")
             return []
 
-    def get_available_slots(self, business_id: str, date_str: str) -> List[Dict]:
+    def get_available_slots(
+        self,
+        business_id: str,
+        date_str: str,
+        staff_member_id: Optional[str] = None,
+    ) -> List[Dict]:
         """
-        Return available time slots for a business on a given date.
+        Return time slots for a business on a given date.
 
         Args:
             business_id: Business UUID
             date_str: "YYYY-MM-DD"
+            staff_member_id: If set, "available" is for that staff only.
+                If None, aggregate mode: available if at least one active staff is free;
+                each slot may include "free_staff_ids".
 
         Returns:
-            List of {"start": "HH:MM", "end": "HH:MM", "available": bool}
+            List of dicts with start, end, start_at, end_at, available,
+            and optionally free_staff_ids (list of UUID strings).
         """
         try:
             target_date = date.fromisoformat(date_str)
@@ -288,22 +362,42 @@ class BookingService:
                 )
             ).all()
 
-            booked_ranges = [(b.start_at, b.end_at) for b in existing]
+            from app.services.staff_service import staff_service
+
+            staff_rows = staff_service.get_staff_by_business(business_id, active_only=True)
+            staff_ids = [s["id"] for s in staff_rows]
 
             slots = []
             while slot_start + timedelta(minutes=slot_mins) <= close_dt:
                 slot_end = slot_start + timedelta(minutes=slot_mins)
-                occupied = any(
-                    not (slot_end <= bs or slot_start >= be)
-                    for bs, be in booked_ranges
-                )
-                slots.append({
-                    "start": slot_start.strftime("%H:%M"),
-                    "end": slot_end.strftime("%H:%M"),
-                    "start_at": slot_start.isoformat(),
-                    "end_at": slot_end.isoformat(),
-                    "available": not occupied,
-                })
+                if staff_member_id:
+                    su = uuid.UUID(staff_member_id)
+                    avail = self._staff_free_for_bookings(
+                        existing, slot_start, slot_end, su
+                    )
+                    slots.append({
+                        "start": slot_start.strftime("%H:%M"),
+                        "end": slot_end.strftime("%H:%M"),
+                        "start_at": slot_start.isoformat(),
+                        "end_at": slot_end.isoformat(),
+                        "available": avail,
+                    })
+                else:
+                    free_staff_ids = [
+                        sid
+                        for sid in staff_ids
+                        if self._staff_free_for_bookings(
+                            existing, slot_start, slot_end, uuid.UUID(sid)
+                        )
+                    ]
+                    slots.append({
+                        "start": slot_start.strftime("%H:%M"),
+                        "end": slot_end.strftime("%H:%M"),
+                        "start_at": slot_start.isoformat(),
+                        "end_at": slot_end.isoformat(),
+                        "available": len(free_staff_ids) > 0,
+                        "free_staff_ids": free_staff_ids,
+                    })
                 slot_start = slot_end
 
             session.close()
@@ -365,6 +459,71 @@ class BookingService:
                 session.close()
             return []
 
+    def is_interval_free_for_staff(
+        self,
+        business_id: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        staff_member_id: str,
+    ) -> bool:
+        """True if the staff member has no blocking overlap (incl. legacy NULL-staff bookings)."""
+        try:
+            session: Session = get_db_session()
+            if not self._validate_staff_member(session, business_id, staff_member_id):
+                session.close()
+                return False
+            bookings = session.query(Booking).filter(
+                and_(
+                    Booking.business_id == uuid.UUID(business_id),
+                    Booking.status.notin_(["cancelled"]),
+                    Booking.start_at < end_dt,
+                    Booking.end_at > start_dt,
+                )
+            ).all()
+            session.close()
+            return self._staff_free_for_bookings(
+                bookings, start_dt, end_dt, uuid.UUID(staff_member_id)
+            )
+        except Exception as e:
+            logger.error(f"is_interval_free_for_staff error: {e}")
+            return False
+
+    def pick_random_free_staff_for_interval(
+        self,
+        business_id: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> Optional[str]:
+        """Uniform random choice among active staff free for [start_dt, end_dt). None if none."""
+        try:
+            from app.services.staff_service import staff_service
+
+            staff_rows = staff_service.get_staff_by_business(business_id, active_only=True)
+            if not staff_rows:
+                return None
+            session: Session = get_db_session()
+            bookings = session.query(Booking).filter(
+                and_(
+                    Booking.business_id == uuid.UUID(business_id),
+                    Booking.status.notin_(["cancelled"]),
+                    Booking.start_at < end_dt,
+                    Booking.end_at > start_dt,
+                )
+            ).all()
+            session.close()
+            candidates = [
+                s["id"]
+                for s in staff_rows
+                if self._staff_free_for_bookings(
+                    bookings, start_dt, end_dt, uuid.UUID(s["id"])
+                )
+            ]
+            if not candidates:
+                return None
+            return random.choice(candidates)
+        except Exception as e:
+            logger.error(f"pick_random_free_staff_for_interval error: {e}")
+            return None
 
     def list_customer_bookings(
         self,

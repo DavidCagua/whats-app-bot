@@ -224,9 +224,12 @@ class StaffService:
             if not staff_list:
                 return ""
 
-            lines = ["Staff Members:"]
+            lines = [
+                "👥 **EQUIPO (usa el ID exacto en las herramientas de reserva)**",
+                "",
+            ]
             for staff in staff_list:
-                lines.append(f"- {staff['name']} ({staff['role']})")
+                lines.append(f"• ID `{staff['id']}` — {staff['name']} ({staff['role']})")
 
             return "\n".join(lines)
 

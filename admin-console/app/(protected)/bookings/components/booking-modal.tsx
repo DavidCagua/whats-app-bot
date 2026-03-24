@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Booking } from "@/lib/bookings-queries"
+import { createBooking, updateBooking, cancelBooking } from "@/lib/actions/bookings"
 import {
   Dialog,
   DialogContent,
@@ -95,30 +96,12 @@ export function BookingModal({
         customer_name: customerName || undefined,
       }
 
-      const url = mode === "create" ? "/api/bookings" : `/api/bookings/${booking!.id}`
-      const method = mode === "create" ? "POST" : "PATCH"
+      const result = mode === "create"
+        ? await createBooking(payload)
+        : await updateBooking(booking!.id, payload)
 
-      const res = await fetch(url, {
-        method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-
-      if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.error || "Failed to save booking")
-      }
-
-      const saved = await res.json()
-      // Normalize dates
-      onSaved({
-        ...saved,
-        start_at: new Date(saved.start_at),
-        end_at: new Date(saved.end_at),
-        created_at: saved.created_at ? new Date(saved.created_at) : null,
-        customer: saved.customers || saved.customer || null,
-        business: saved.businesses || saved.business || { name: "" },
-      })
+      if (!result.success) throw new Error(result.error)
+      onSaved(result.booking)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error")
     } finally {
@@ -135,15 +118,8 @@ export function BookingModal({
     setDeleting(true)
     setError(null)
     try {
-      const res = await fetch(`/api/bookings/${booking.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "cancelled" }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.error || "Failed to cancel booking")
-      }
+      const result = await cancelBooking(booking.id)
+      if (!result.success) throw new Error(result.error)
       onDeleted(booking.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error")

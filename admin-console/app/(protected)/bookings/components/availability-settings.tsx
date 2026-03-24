@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { AvailabilityRule } from "@/lib/bookings-queries"
+import { saveAvailability } from "@/lib/actions/availability"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -37,12 +38,15 @@ interface AvailabilitySettingsProps {
   businessId: string
   initialRules: AvailabilityRule[]
   onRulesUpdated: (rules: AvailabilityRule[]) => void
+  /** Panel / drawer layout: no outer Card, sticky save footer */
+  embedded?: boolean
 }
 
 export function AvailabilitySettings({
   businessId,
   initialRules,
   onRulesUpdated,
+  embedded = false,
 }: AvailabilitySettingsProps) {
   const [rules, setRules] = useState<DayRule[]>(() => buildDefaultRules(initialRules))
   const [saving, setSaving] = useState(false)
@@ -67,17 +71,9 @@ export function AvailabilitySettings({
     setError(null)
     setSuccess(false)
     try {
-      const res = await fetch(`/api/availability?business_id=${businessId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(rules),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.error || "Failed to save availability")
-      }
-      const updated = await res.json()
-      onRulesUpdated(updated)
+      const result = await saveAvailability(businessId, rules)
+      if (!result.success) throw new Error(result.error)
+      onRulesUpdated(result.rules)
       setSuccess(true)
       setTimeout(() => setSuccess(false), 3000)
     } catch (err) {
@@ -87,112 +83,132 @@ export function AvailabilitySettings({
     }
   }
 
+  const rulesEditor = (
+    <>
+      <div className="hidden sm:grid grid-cols-[120px_64px_100px_100px_120px] gap-2 text-xs text-muted-foreground font-medium">
+        <span>Day</span>
+        <span>Active</span>
+        <span>Opens</span>
+        <span>Closes</span>
+        <span>Slot (min)</span>
+      </div>
+
+      <Separator className="hidden sm:block" />
+
+      {rules.map((rule) => (
+        <div
+          key={rule.day_of_week}
+          className={`grid sm:grid-cols-[120px_64px_100px_100px_120px] grid-cols-2 gap-2 items-center py-1 ${
+            !rule.is_active ? "opacity-50" : ""
+          }`}
+        >
+          <Label className="font-medium col-span-2 sm:col-span-1">
+            {DAY_NAMES[rule.day_of_week]}
+          </Label>
+
+          <div className="flex items-center gap-2 sm:col-span-1">
+            <Switch
+              checked={rule.is_active}
+              onCheckedChange={(checked) =>
+                updateRule(rule.day_of_week, { is_active: checked })
+              }
+            />
+            <span className="text-xs sm:hidden text-muted-foreground">
+              {rule.is_active ? "Active" : "Closed"}
+            </span>
+          </div>
+
+          <div className="space-y-0.5 sm:space-y-0">
+            <Label className="text-xs sm:hidden text-muted-foreground">Opens</Label>
+            <Input
+              type="time"
+              value={rule.open_time}
+              disabled={!rule.is_active}
+              onChange={(e) => updateRule(rule.day_of_week, { open_time: e.target.value })}
+              className="h-8 text-sm"
+            />
+          </div>
+
+          <div className="space-y-0.5 sm:space-y-0">
+            <Label className="text-xs sm:hidden text-muted-foreground">Closes</Label>
+            <Input
+              type="time"
+              value={rule.close_time}
+              disabled={!rule.is_active}
+              onChange={(e) => updateRule(rule.day_of_week, { close_time: e.target.value })}
+              className="h-8 text-sm"
+            />
+          </div>
+
+          <div className="space-y-0.5 sm:space-y-0">
+            <Label className="text-xs sm:hidden text-muted-foreground">Slot duration (min)</Label>
+            <Input
+              type="number"
+              min={15}
+              max={240}
+              step={15}
+              value={rule.slot_duration_minutes}
+              disabled={!rule.is_active}
+              onChange={(e) =>
+                updateRule(rule.day_of_week, {
+                  slot_duration_minutes: parseInt(e.target.value, 10) || 60,
+                })
+              }
+              className="h-8 text-sm"
+            />
+          </div>
+        </div>
+      ))}
+    </>
+  )
+
+  const saveRow = (
+    <div className="flex flex-wrap items-center gap-3">
+      <Button onClick={handleSave} disabled={saving} size="sm">
+        {saving ? (
+          <>
+            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            Saving…
+          </>
+        ) : (
+          <>
+            <Save className="h-4 w-4 mr-2" />
+            Save Hours
+          </>
+        )}
+      </Button>
+
+      {success && (
+        <span className="text-sm text-green-600">✓ Saved successfully</span>
+      )}
+      {error && (
+        <span className="text-sm text-destructive">{error}</span>
+      )}
+    </div>
+  )
+
+  if (embedded) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 pb-2 pt-1">
+          {rulesEditor}
+        </div>
+        <div className="shrink-0 border-t bg-background p-4">
+          {saveRow}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">Business Hours &amp; Availability</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Header row */}
-        <div className="hidden sm:grid grid-cols-[120px_64px_100px_100px_120px] gap-2 text-xs text-muted-foreground font-medium">
-          <span>Day</span>
-          <span>Active</span>
-          <span>Opens</span>
-          <span>Closes</span>
-          <span>Slot (min)</span>
-        </div>
-
-        <Separator className="hidden sm:block" />
-
-        {rules.map((rule) => (
-          <div
-            key={rule.day_of_week}
-            className={`grid sm:grid-cols-[120px_64px_100px_100px_120px] grid-cols-2 gap-2 items-center py-1 ${
-              !rule.is_active ? "opacity-50" : ""
-            }`}
-          >
-            <Label className="font-medium col-span-2 sm:col-span-1">
-              {DAY_NAMES[rule.day_of_week]}
-            </Label>
-
-            <div className="flex items-center gap-2 sm:col-span-1">
-              <Switch
-                checked={rule.is_active}
-                onCheckedChange={(checked) =>
-                  updateRule(rule.day_of_week, { is_active: checked })
-                }
-              />
-              <span className="text-xs sm:hidden text-muted-foreground">
-                {rule.is_active ? "Active" : "Closed"}
-              </span>
-            </div>
-
-            <div className="space-y-0.5 sm:space-y-0">
-              <Label className="text-xs sm:hidden text-muted-foreground">Opens</Label>
-              <Input
-                type="time"
-                value={rule.open_time}
-                disabled={!rule.is_active}
-                onChange={(e) => updateRule(rule.day_of_week, { open_time: e.target.value })}
-                className="h-8 text-sm"
-              />
-            </div>
-
-            <div className="space-y-0.5 sm:space-y-0">
-              <Label className="text-xs sm:hidden text-muted-foreground">Closes</Label>
-              <Input
-                type="time"
-                value={rule.close_time}
-                disabled={!rule.is_active}
-                onChange={(e) => updateRule(rule.day_of_week, { close_time: e.target.value })}
-                className="h-8 text-sm"
-              />
-            </div>
-
-            <div className="space-y-0.5 sm:space-y-0">
-              <Label className="text-xs sm:hidden text-muted-foreground">Slot duration (min)</Label>
-              <Input
-                type="number"
-                min={15}
-                max={240}
-                step={15}
-                value={rule.slot_duration_minutes}
-                disabled={!rule.is_active}
-                onChange={(e) =>
-                  updateRule(rule.day_of_week, {
-                    slot_duration_minutes: parseInt(e.target.value, 10) || 60,
-                  })
-                }
-                className="h-8 text-sm"
-              />
-            </div>
-          </div>
-        ))}
-
+        {rulesEditor}
         <Separator />
-
-        <div className="flex items-center gap-3">
-          <Button onClick={handleSave} disabled={saving} size="sm">
-            {saving ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Saving…
-              </>
-            ) : (
-              <>
-                <Save className="h-4 w-4 mr-2" />
-                Save Hours
-              </>
-            )}
-          </Button>
-
-          {success && (
-            <span className="text-sm text-green-600">✓ Saved successfully</span>
-          )}
-          {error && (
-            <span className="text-sm text-destructive">{error}</span>
-          )}
-        </div>
+        {saveRow}
       </CardContent>
     </Card>
   )

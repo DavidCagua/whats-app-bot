@@ -23,18 +23,14 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const rules = await prisma.$queryRaw`
-      SELECT id::text, business_id::text, day_of_week,
-             to_char(open_time, 'HH24:MI') AS open_time,
-             to_char(close_time, 'HH24:MI') AS close_time,
-             slot_duration_minutes, is_active, created_at, updated_at
-      FROM business_availability
-      WHERE business_id = ${businessId}::uuid
-      ORDER BY day_of_week ASC
-    `
-    return NextResponse.json(rules)
+    const staff = await prisma.staff_members.findMany({
+      where: { business_id: businessId, is_active: true },
+      select: { id: true, name: true, role: true },
+      orderBy: { name: "asc" },
+    })
+    return NextResponse.json(staff)
   } catch (err) {
-    console.error("Error fetching availability:", err)
-    return NextResponse.json({ error: "Failed to fetch availability" }, { status: 500 })
+    console.error("Error fetching staff:", err)
+    return NextResponse.json({ error: "Failed to fetch staff" }, { status: 500 })
   }
 }

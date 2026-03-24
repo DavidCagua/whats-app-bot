@@ -7,7 +7,10 @@ All context (business, customer, runtime) is auto-generated and appended.
 
 import logging
 from typing import Optional, Dict
+
 from .business_config_service import business_config_service
+from .staff_service import staff_service
+from ..database.booking_service import booking_service
 
 
 class PromptBuilder:
@@ -65,7 +68,7 @@ class PromptBuilder:
                 current_year=current_year
             )
 
-            # Build business info section (services, hours, location, etc.)
+            # Build business info section (services, location, etc.; staff/hours from DB tables)
             business_info_section = self._build_business_info_section(business_context)
 
             # Assemble final prompt: Admin prompt + Context + Business info
@@ -141,8 +144,8 @@ class PromptBuilder:
 
     def _build_business_info_section(self, business_context: Optional[Dict]) -> str:
         """
-        Build business information section (services, hours, staff, etc.).
-        Auto-generated from database settings.
+        Build business information section (services, location, etc.).
+        Staff and business hours come from staff_members + business_availability (not settings JSON).
         """
         sections = []
 
@@ -151,15 +154,18 @@ class PromptBuilder:
         if services:
             sections.append(services)
 
-        # Business hours
-        hours = business_config_service.get_hours_text(business_context)
-        if hours:
-            sections.append(hours)
-
-        # Staff
-        staff = business_config_service.get_staff_text(business_context)
-        if staff:
-            sections.append(staff)
+        business_id = (
+            str(business_context.get("business_id"))
+            if business_context and business_context.get("business_id")
+            else None
+        )
+        if business_id:
+            hours = self._build_hours_from_availability(business_id)
+            if hours:
+                sections.append(hours)
+            staff = staff_service.get_staff_text_for_prompt(business_id)
+            if staff:
+                sections.append(staff)
 
         # Location
         location = business_config_service.get_location_info(business_context)
@@ -178,6 +184,42 @@ class PromptBuilder:
 
         return "\n\n".join(sections)
 
+    def _build_hours_from_availability(self, business_id: str) -> str:
+        """Format business_availability rows for the system prompt (Sunday=0 … Saturday=6)."""
+        rules = booking_service.get_availability(business_id)
+        if not rules:
+            return (
+                "🕐 **HORARIOS DE ATENCIÓN**\n\n"
+                "No hay horarios cargados en el sistema para este negocio."
+            )
+
+        day_names = [
+            "Domingo",
+            "Lunes",
+            "Martes",
+            "Miércoles",
+            "Jueves",
+            "Viernes",
+            "Sábado",
+        ]
+        lines = [
+            "🕐 **HORARIOS DE ATENCIÓN** (configuración del sistema / business_availability)",
+            "",
+        ]
+        for r in sorted(rules, key=lambda x: x.get("day_of_week", 0)):
+            dow = r.get("day_of_week", 0)
+            day_label = day_names[dow] if 0 <= dow <= 6 else f"Día {dow}"
+            if not r.get("is_active", True):
+                lines.append(f"• {day_label}: Cerrado")
+                continue
+            ot = r.get("open_time", "")
+            ct = r.get("close_time", "")
+            slot = r.get("slot_duration_minutes", 60)
+            lines.append(
+                f"• {day_label}: {ot} – {ct} (slots de {slot} min)"
+            )
+        return "\n".join(lines)
+
     def _get_default_prompt(self) -> str:
         """Default prompt when none is configured (no variables)."""
         return """Eres un asistente virtual amigable para el negocio.
@@ -191,10 +233,13 @@ Tu función es ayudar a los clientes con:
 Usa un tono profesional y amigable.
 
 REGLAS IMPORTANTES:
-- Verifica disponibilidad antes de confirmar citas
-- Siempre confirma con fecha, hora exacta, servicio y nombre del cliente
+- Verifica disponibilidad con las herramientas antes de confirmar citas (puedes filtrar por profesional o ver cupos para "cualquiera").
+- Pregunta si el cliente prefiere un profesional concreto (usa su ID de la lista) o "cualquiera" / el primero disponible.
+- Si elige un profesional: usa staff_preference="specific" y staff_member_id con el UUID exacto.
+- Si elige cualquiera: usa staff_preference="anyone" (el sistema asigna al azar entre los que estén libres).
+- Si solo hay un profesional activo, puedes asignar sin preguntar.
+- Siempre confirma con fecha, hora exacta, servicio, nombre del cliente y nombre del profesional asignado.
 - Recolecta información del cliente de forma natural: nombre, edad, servicio deseado
-- Formato de confirmación: "✅ Tu cita está agendada para el [fecha] a las [hora] para [servicio], [nombre]"
 """
 
     def _get_fallback_prompt(self, name: str, wa_id: str, current_date: str, current_year: int) -> str:

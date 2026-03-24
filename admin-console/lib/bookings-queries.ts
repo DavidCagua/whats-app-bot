@@ -13,6 +13,8 @@ export type Booking = {
   notes: string | null
   created_via: string | null
   created_at: Date | null
+  staff_member_id: string | null
+  staff_member: { id: string; name: string; role: string } | null
   customer: { name: string; whatsapp_id: string } | null
   business: { name: string }
 }
@@ -150,6 +152,9 @@ export async function getBookings({
       businesses: {
         select: { name: true },
       },
+      staff_members: {
+        select: { id: true, name: true, role: true },
+      },
     },
     orderBy: { start_at: "asc" },
     take: limit,
@@ -166,6 +171,10 @@ export async function getBookings({
     notes: b.notes,
     created_via: b.created_via,
     created_at: b.created_at,
+    staff_member_id: b.staff_member_id,
+    staff_member: b.staff_members
+      ? { id: b.staff_members.id, name: b.staff_members.name, role: b.staff_members.role }
+      : null,
     customer: b.customers
       ? { name: b.customers.name, whatsapp_id: b.customers.whatsapp_id }
       : null,
