@@ -64,39 +64,33 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Body must be an array" }, { status: 400 })
     }
 
-    const results = await Promise.all(
-      body.map((rule: {
-        day_of_week: number
-        open_time: string
-        close_time: string
-        slot_duration_minutes?: number
-        is_active?: boolean
-      }) =>
-        prisma.business_availability.upsert({
-          where: {
-            business_id_day_of_week: {
-              business_id: businessId,
-              day_of_week: rule.day_of_week,
-            },
-          },
-          update: {
-            open_time: rule.open_time,
-            close_time: rule.close_time,
-            slot_duration_minutes: rule.slot_duration_minutes ?? 60,
-            is_active: rule.is_active ?? true,
-            updated_at: new Date(),
-          },
-          create: {
-            business_id: businessId,
-            day_of_week: rule.day_of_week,
-            open_time: rule.open_time,
-            close_time: rule.close_time,
-            slot_duration_minutes: rule.slot_duration_minutes ?? 60,
-            is_active: rule.is_active ?? true,
-          },
-        })
-      )
-    )
+    await prisma.$executeRaw`
+      DELETE FROM business_availability WHERE business_id = ${businessId}::uuid
+    `
+
+    for (const rule of body as Array<{
+      day_of_week: number
+      open_time: string
+      close_time: string
+      slot_duration_minutes?: number
+      is_active?: boolean
+    }>) {
+      const slotDuration = rule.slot_duration_minutes ?? 60
+      const isActive = rule.is_active ?? true
+      await prisma.$executeRaw`
+        INSERT INTO business_availability
+          (id, business_id, day_of_week, open_time, close_time, slot_duration_minutes, is_active, created_at, updated_at)
+        VALUES
+          (gen_random_uuid(), ${businessId}::uuid, ${rule.day_of_week}::smallint,
+           ${rule.open_time}::time, ${rule.close_time}::time, ${slotDuration}::integer, ${isActive}, now(), now())
+      `
+    }
+
+    const results = await prisma.$queryRaw<unknown[]>`
+      SELECT * FROM business_availability
+      WHERE business_id = ${businessId}::uuid
+      ORDER BY day_of_week ASC
+    `
 
     return NextResponse.json(results)
   } catch (err) {

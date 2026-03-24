@@ -255,9 +255,14 @@ class BookingService:
                 session.close()
                 return []  # Business is closed this day
 
-            # Build all slots
-            open_h, open_m = map(int, avail.open_time.split(":"))
-            close_h, close_m = map(int, avail.close_time.split(":"))
+            # Build all slots (open_time/close_time may be datetime.time or "HH:MM" string)
+            import datetime as _dt
+            def _parse_time(t):
+                if isinstance(t, _dt.time):
+                    return t.hour, t.minute
+                return map(int, str(t).split(":"))
+            open_h, open_m = _parse_time(avail.open_time)
+            close_h, close_m = _parse_time(avail.close_time)
             slot_mins = avail.slot_duration_minutes
 
             slot_start = datetime(
