@@ -30,6 +30,8 @@ interface BookingsViewProps {
   initialFilters: InitialFilters
   initialWeekStart: string
   initialStaff: StaffMember[]
+  /** When set, all loads are scoped to this business (workspace route). */
+  fixedBusinessId?: string
 }
 
 export type ModalState =
@@ -44,6 +46,7 @@ export function BookingsView({
   initialFilters,
   initialWeekStart,
   initialStaff,
+  fixedBusinessId,
 }: BookingsViewProps) {
   const [bookings, setBookings] = useState<Booking[]>(initialBookings)
   const [availabilityRules, setAvailabilityRules] = useState<AvailabilityRule[]>(initialRules)
@@ -51,9 +54,14 @@ export function BookingsView({
   const [modalState, setModalState] = useState<ModalState>({ mode: "closed" })
   const [availabilityOpen, setAvailabilityOpen] = useState(false)
   const isMobile = useIsMobile()
-  const [businessFilter, setBusinessFilter] = useState(initialFilters.business || "")
+  const [businessFilter, setBusinessFilter] = useState(
+    fixedBusinessId || initialFilters.business || ""
+  )
   const [staffFilter, setStaffFilter] = useState("")
   const [weekStart, setWeekStart] = useState(() => new Date(initialWeekStart))
+
+  const effectiveBusinessId =
+    fixedBusinessId || businessFilter || undefined
 
   // Reload bookings from API when filters/week change
   async function loadBookings(params: {
@@ -63,7 +71,8 @@ export function BookingsView({
     staff?: string
   }) {
     const url = new URL("/api/bookings", window.location.origin)
-    if (params.business) url.searchParams.set("business", params.business)
+    const biz = fixedBusinessId || params.business
+    if (biz) url.searchParams.set("business", biz)
     if (params.staff) url.searchParams.set("staff", params.staff)
     url.searchParams.set("dateFrom", params.dateFrom.toISOString())
     url.searchParams.set("dateTo", params.dateTo.toISOString())
@@ -94,13 +103,16 @@ export function BookingsView({
   }
 
   useEffect(() => {
-    if (businessFilter) loadStaff(businessFilter)
-  }, [businessFilter])
+    const id = fixedBusinessId || businessFilter
+    if (id) loadStaff(id)
+  }, [businessFilter, fixedBusinessId])
 
   const availabilityBusinessId =
+    fixedBusinessId ||
     (access.canFilterByBusiness
       ? businessFilter
-      : (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id)) || ""
+      : (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id)) ||
+    ""
 
   useEffect(() => {
     if (!availabilityBusinessId) setAvailabilityOpen(false)
@@ -117,7 +129,7 @@ export function BookingsView({
   function handleWeekChange(newStart: Date) {
     setWeekStart(newStart)
     loadBookings({
-      business: businessFilter || undefined,
+      business: effectiveBusinessId,
       dateFrom: newStart,
       dateTo: getWeekEnd(newStart),
       staff: staffFilter || undefined,
@@ -125,10 +137,10 @@ export function BookingsView({
   }
 
   function handleFilterChange(business: string, staff: string) {
-    setBusinessFilter(business)
+    if (!fixedBusinessId) setBusinessFilter(business)
     setStaffFilter(staff)
     loadBookings({
-      business: business || undefined,
+      business: (fixedBusinessId || business) || undefined,
       dateFrom: weekStart,
       dateTo: getWeekEnd(weekStart),
       staff: staff || undefined,
@@ -175,7 +187,7 @@ export function BookingsView({
     } else {
       // Revert on failure by reloading
       loadBookings({
-        business: businessFilter || undefined,
+        business: effectiveBusinessId,
         dateFrom: weekStart,
         dateTo: getWeekEnd(weekStart),
         staff: staffFilter || undefined,
@@ -244,6 +256,7 @@ export function BookingsView({
           initialDate={modalState.mode === "create" ? modalState.date : undefined}
           businesses={access.businesses}
           defaultBusinessId={
+            fixedBusinessId ||
             businessFilter ||
             (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id) ||
             ""

@@ -60,9 +60,9 @@ export default async function StaffPage({ params }: StaffPageProps) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Staff Members</h1>
-          <p className="text-muted-foreground mt-2">
-            Manage your team members and their roles
+          <h1 className="text-2xl font-bold tracking-tight">Staff</h1>
+          <p className="text-muted-foreground mt-1">
+            People on the calendar (barbers, stylists, etc.)
           </p>
         </div>
         <StaffForm businessId={id} />

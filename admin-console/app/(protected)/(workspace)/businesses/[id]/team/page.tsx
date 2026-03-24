@@ -7,9 +7,7 @@ import { TeamTable } from "./components/team-table"
 import { InviteUserButton } from "./components/invite-user-button"
 
 interface BusinessTeamPageProps {
-  params: {
-    id: string
-  }
+  params: Promise<{ id: string }>
 }
 
 export default async function BusinessTeamPage({ params }: BusinessTeamPageProps) {
@@ -35,9 +33,9 @@ export default async function BusinessTeamPage({ params }: BusinessTeamPageProps
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Team</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Access</h1>
           <p className="text-muted-foreground">
-            Manage team members for {business.name}
+            Who can sign in to this console for {business.name}
           </p>
         </div>
         {canInvite && (

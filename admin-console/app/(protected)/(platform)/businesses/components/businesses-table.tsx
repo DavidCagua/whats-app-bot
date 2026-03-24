@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Settings, Users } from "lucide-react";
+import { MessageSquare, Settings, UserCog } from "lucide-react";
 import Link from "next/link";
 import { format } from "date-fns";
 import {
@@ -124,15 +124,33 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                             asChild
                             variant="outline"
                             size="icon"
-                            aria-label="Team"
+                            aria-label="Inbox"
                           >
-                            <Link href={`/businesses/${business.id}/team`}>
-                              <Users className="h-4 w-4" />
+                            <Link href={`/businesses/${business.id}/inbox`}>
+                              <MessageSquare className="h-4 w-4" />
                             </Link>
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>Team</p>
+                          <p>Inbox</p>
+                        </TooltipContent>
+                      </Tooltip>
+
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            asChild
+                            variant="outline"
+                            size="icon"
+                            aria-label="Access"
+                          >
+                            <Link href={`/businesses/${business.id}/team`}>
+                              <UserCog className="h-4 w-4" />
+                            </Link>
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Access</p>
                         </TooltipContent>
                       </Tooltip>
 

@@ -25,6 +25,8 @@ type ConversationsSidebarProps = {
   whatsappNumbers: Array<{ id: string; phone_number: string; business_id: string }>
   canFilterByBusiness: boolean
   showBusinessColumn: boolean
+  /** Base path for inbox URL updates (e.g. `/businesses/{id}/inbox`). */
+  inboxBasePath: string
   initialFilters: {
     business?: string
     search?: string
@@ -41,6 +43,7 @@ export function ConversationsSidebar({
   businesses,
   canFilterByBusiness,
   showBusinessColumn,
+  inboxBasePath,
   initialFilters,
   onConversationSelect,
 }: ConversationsSidebarProps) {
@@ -95,7 +98,7 @@ export function ConversationsSidebar({
     }
 
     startTransition(() => {
-      router.push(`/conversations?${params.toString()}`)
+      router.push(`${inboxBasePath}?${params.toString()}`)
     })
   }
 
@@ -111,7 +114,7 @@ export function ConversationsSidebar({
     params.delete("dateTo")
 
     startTransition(() => {
-      router.push(`/conversations?${params.toString()}`)
+      router.push(`${inboxBasePath}?${params.toString()}`)
     })
   }
 
@@ -126,7 +129,7 @@ export function ConversationsSidebar({
     params.set("conversation", `${whatsappId}:${businessId}`)
 
     startTransition(() => {
-      router.push(`/conversations?${params.toString()}`)
+      router.push(`${inboxBasePath}?${params.toString()}`)
     })
 
     onConversationSelect?.()

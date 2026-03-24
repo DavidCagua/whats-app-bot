@@ -19,6 +19,9 @@ type ConversationsLayoutProps = {
   whatsappNumbers: Array<{ id: string; phone_number: string; business_id: string }>
   canFilterByBusiness: boolean
   showBusinessColumn: boolean
+  /** When set, list polling always scopes API calls to this business. */
+  scopedBusinessId?: string
+  inboxBasePath: string
   initialFilters: {
     business?: string
     search?: string
@@ -35,6 +38,8 @@ export function ConversationsLayout({
   whatsappNumbers,
   canFilterByBusiness,
   showBusinessColumn,
+  scopedBusinessId,
+  inboxBasePath,
   initialFilters,
 }: ConversationsLayoutProps) {
   const searchParams = useSearchParams()
@@ -84,7 +89,7 @@ export function ConversationsLayout({
 
   const fetchList = useCallback(async () => {
     const params = new URLSearchParams()
-    const business = searchParams.get("business")
+    const business = scopedBusinessId ?? searchParams.get("business")
     const search = searchParams.get("search")
     const dateFrom = searchParams.get("dateFrom")
     const dateTo = searchParams.get("dateTo")
@@ -103,7 +108,7 @@ export function ConversationsLayout({
     } catch {
       // keep previous list on error
     }
-  }, [searchParams])
+  }, [searchParams, scopedBusinessId])
 
   // Thread polling: every 2–3s when a conversation is selected
   useEffect(() => {
@@ -131,8 +136,8 @@ export function ConversationsLayout({
   }
 
   return (
-    // Full viewport height minus the top bar (h-16) and padding (p-6 = 24px top + 24px bottom)
-    <div className="h-[calc(100vh-64px-48px)] flex gap-4">
+    // Workspace: top bar h-14 + main padding p-6 (24px * 2)
+    <div className="h-[calc(100vh-56px-48px)] flex gap-4 min-h-[420px]">
 
       {/* Sidebar — full width on mobile, fixed width on md+, hidden on mobile when in chat view */}
       <div
@@ -151,6 +156,7 @@ export function ConversationsLayout({
           whatsappNumbers={whatsappNumbers}
           canFilterByBusiness={canFilterByBusiness}
           showBusinessColumn={showBusinessColumn}
+          inboxBasePath={inboxBasePath}
           initialFilters={initialFilters}
           onConversationSelect={handleConversationSelect}
         />

@@ -50,6 +50,10 @@ const BOOKING_INCLUDE = {
   staff_members: { select: { id: true, name: true, role: true } },
 } as const
 
+function revalidateBusinessBookingsPath(businessId: string) {
+  revalidatePath(`/businesses/${businessId}/bookings`)
+}
+
 async function resolveCustomerId(
   whatsappId: string,
   name?: string
@@ -118,7 +122,7 @@ export async function createBooking(data: {
       include: BOOKING_INCLUDE,
     })
 
-    revalidatePath("/bookings")
+    revalidateBusinessBookingsPath(data.business_id)
     return { success: true, booking: mapBooking(booking) }
   } catch (err) {
     console.error("Error creating booking:", err)
@@ -178,7 +182,7 @@ export async function updateBooking(
       include: BOOKING_INCLUDE,
     })
 
-    revalidatePath("/bookings")
+    revalidateBusinessBookingsPath(booking.business_id)
     return { success: true, booking: mapBooking(booking) }
   } catch (err) {
     console.error("Error updating booking:", err)
@@ -209,7 +213,7 @@ export async function cancelBooking(
       data: { status: "cancelled", updated_at: new Date() },
     })
 
-    revalidatePath("/bookings")
+    revalidateBusinessBookingsPath(existing.business_id)
     return { success: true }
   } catch (err) {
     console.error("Error cancelling booking:", err)
