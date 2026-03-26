@@ -120,24 +120,12 @@ export function BookingsCalendar({
     return Array.from(byId.entries())
   }, [staffMembers, calendarBookings])
 
-  // Week label (local week end matches grid + loadBookings range)
+  // Week label — use local timezone to match react-big-calendar's date interpretation
   const weekEnd = new Date(weekStart)
   weekEnd.setDate(weekStart.getDate() + 6)
-  const fmtUTC = (d: Date, opts: Intl.DateTimeFormatOptions) =>
-    d.toLocaleDateString("en-US", { ...opts, timeZone: "UTC" })
-  const weekLabel = `${fmtUTC(weekStart, { month: "short", day: "numeric" })} – ${fmtUTC(weekEnd, { month: "short", day: "numeric", year: "numeric" })}`
-  const monthLabel = weekStart.toLocaleDateString("en-US", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  })
-  const dayLabel = weekStart.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  })
+  const weekLabel = `${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`
+  const monthLabel = weekStart.toLocaleDateString("en-US", { month: "long", year: "numeric" })
+  const dayLabel = weekStart.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" })
   const periodLabel =
     currentView === Views.MONTH
       ? monthLabel

@@ -64,7 +64,10 @@ export function BookingsView({
     fixedBusinessId || initialFilters.business || ""
   )
   const [staffFilter, setStaffFilter] = useState("")
-  const [weekStart, setWeekStart] = useState(() => new Date(initialWeekStart))
+  const [weekStart, setWeekStart] = useState(() => {
+    const [y, mo, d] = initialWeekStart.slice(0, 10).split("-").map(Number)
+    return new Date(y, mo - 1, d) // local midnight — keeps react-big-calendar and labels in sync
+  })
 
   const effectiveBusinessId =
     fixedBusinessId || businessFilter || undefined
