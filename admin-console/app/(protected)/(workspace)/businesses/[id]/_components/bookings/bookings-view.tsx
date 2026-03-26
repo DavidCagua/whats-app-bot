@@ -1,9 +1,15 @@
 "use client"
 
 import { useState, useRef } from "react"
+import dynamic from "next/dynamic"
 import { Booking, BookingsAccess, AvailabilityRule } from "@/lib/bookings-queries"
 import { rescheduleBooking } from "@/lib/actions/bookings"
-import { BookingsCalendar, type StaffMember } from "./bookings-calendar"
+import type { StaffMember } from "./bookings-calendar"
+
+const BookingsCalendar = dynamic(
+  () => import("./bookings-calendar").then((m) => m.BookingsCalendar),
+  { ssr: false }
+)
 import { BookingModal } from "./booking-modal"
 import { AvailabilitySettings } from "./availability-settings"
 import { Button } from "@/components/ui/button"
