@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useRef } from "react"
 import { Booking, BookingsAccess, AvailabilityRule } from "@/lib/bookings-queries"
 import { rescheduleBooking } from "@/lib/actions/bookings"
 import { BookingsCalendar, type StaffMember } from "./bookings-calendar"
@@ -50,7 +50,7 @@ export function BookingsView({
 }: BookingsViewProps) {
   const [bookings, setBookings] = useState<Booking[]>(initialBookings)
   const [availabilityRules, setAvailabilityRules] = useState<AvailabilityRule[]>(initialRules)
-  const [staffMembers, setStaffMembers] = useState<StaffMember[]>(initialStaff)
+  const staffMembers = initialStaff
   const [modalState, setModalState] = useState<ModalState>({ mode: "closed" })
   const [availabilityOpen, setAvailabilityOpen] = useState(false)
   const isMobile = useIsMobile()
@@ -63,6 +63,8 @@ export function BookingsView({
   const effectiveBusinessId =
     fixedBusinessId || businessFilter || undefined
 
+  const loadAbortRef = useRef<AbortController | null>(null)
+
   // Reload bookings from API when filters/week change
   async function loadBookings(params: {
     business?: string
@@ -70,6 +72,10 @@ export function BookingsView({
     dateTo: Date
     staff?: string
   }) {
+    loadAbortRef.current?.abort()
+    const controller = new AbortController()
+    loadAbortRef.current = controller
+
     const url = new URL("/api/bookings", window.location.origin)
     const biz = fixedBusinessId || params.business
     if (biz) url.searchParams.set("business", biz)
@@ -77,46 +83,23 @@ export function BookingsView({
     url.searchParams.set("dateFrom", params.dateFrom.toISOString())
     url.searchParams.set("dateTo", params.dateTo.toISOString())
 
-    const res = await fetch(url.toString())
-    if (res.ok) {
-      const data = await res.json()
-      setBookings(data.map((b: Booking) => ({
-        ...b,
-        start_at: new Date(b.start_at),
-        end_at: new Date(b.end_at),
-        created_at: b.created_at ? new Date(b.created_at) : null,
-      })))
+    try {
+      const res = await fetch(url.toString(), { signal: controller.signal })
+      if (res.ok) {
+        const data = await res.json()
+        setBookings(data.map((b: Booking) => ({
+          ...b,
+          start_at: new Date(b.start_at),
+          end_at: new Date(b.end_at),
+          created_at: b.created_at ? new Date(b.created_at) : null,
+        })))
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return
     }
   }
 
-  // Reload staff when business filter changes
-  async function loadStaff(businessId: string) {
-    if (!businessId) {
-      setStaffMembers([])
-      return
-    }
-    const res = await fetch(`/api/staff?business_id=${businessId}`)
-    if (res.ok) {
-      const data = await res.json()
-      setStaffMembers(data)
-    }
-  }
-
-  useEffect(() => {
-    const id = fixedBusinessId || businessFilter
-    if (id) loadStaff(id)
-  }, [businessFilter, fixedBusinessId])
-
-  const availabilityBusinessId =
-    fixedBusinessId ||
-    (access.canFilterByBusiness
-      ? businessFilter
-      : (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id)) ||
-    ""
-
-  useEffect(() => {
-    if (!availabilityBusinessId) setAvailabilityOpen(false)
-  }, [availabilityBusinessId])
+  const availabilityBusinessId = fixedBusinessId || access.businesses[0]?.id || ""
 
   /** Match server /bookings page: local calendar week (same as setDate + setHours). */
   function getWeekEnd(start: Date): Date {
@@ -255,12 +238,7 @@ export function BookingsView({
           booking={modalState.mode === "edit" ? modalState.booking : undefined}
           initialDate={modalState.mode === "create" ? modalState.date : undefined}
           businesses={access.businesses}
-          defaultBusinessId={
-            fixedBusinessId ||
-            businessFilter ||
-            (access.businessIds !== "all" ? access.businessIds[0] : access.businesses[0]?.id) ||
-            ""
-          }
+          defaultBusinessId={fixedBusinessId || access.businesses[0]?.id || ""}
           onClose={() => setModalState({ mode: "closed" })}
           onSaved={handleBookingSaved}
           onDeleted={handleBookingDeleted}

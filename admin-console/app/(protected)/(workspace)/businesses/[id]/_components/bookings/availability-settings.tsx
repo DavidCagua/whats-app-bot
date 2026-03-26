@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { AvailabilityRule } from "@/lib/bookings-queries"
 import { saveAvailability } from "@/lib/actions/availability"
 import { Button } from "@/components/ui/button"
@@ -52,13 +52,6 @@ export function AvailabilitySettings({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
-
-  useEffect(() => {
-    fetch(`/api/availability?business_id=${businessId}`)
-      .then((res) => res.ok ? res.json() : [])
-      .then((data) => setRules(buildDefaultRules(data)))
-      .catch(() => setRules(buildDefaultRules([])))
-  }, [businessId])
 
   function updateRule(dayOfWeek: number, patch: Partial<DayRule>) {
     setRules((prev) =>
