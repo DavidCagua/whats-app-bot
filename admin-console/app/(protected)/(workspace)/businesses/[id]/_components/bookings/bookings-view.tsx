@@ -248,6 +248,7 @@ export function BookingsView({
           initialDate={modalState.mode === "create" ? modalState.date : undefined}
           businesses={access.businesses}
           defaultBusinessId={fixedBusinessId || access.businesses[0]?.id || ""}
+          staffMembers={staffMembers}
           onClose={() => setModalState({ mode: "closed" })}
           onSaved={handleBookingSaved}
           onDeleted={handleBookingDeleted}

@@ -42,6 +42,7 @@ interface BookingModalProps {
   initialDate?: Date
   businesses: Array<{ id: string; name: string }>
   defaultBusinessId: string
+  staffMembers: Array<{ id: string; name: string }>
   onClose: () => void
   onSaved: (booking: Booking) => void
   onDeleted: (id: string) => void
@@ -53,6 +54,7 @@ export function BookingModal({
   initialDate,
   businesses,
   defaultBusinessId,
+  staffMembers,
   onClose,
   onSaved,
   onDeleted,
@@ -74,6 +76,7 @@ export function BookingModal({
   )
   const [startAt, setStartAt] = useState(toDatetimeLocal(defaultStart))
   const [endAt, setEndAt] = useState(toDatetimeLocal(defaultEnd))
+  const [staffMemberId, setStaffMemberId] = useState(booking?.staff_member_id || "")
   const [status, setStatus] = useState(booking?.status || "confirmed")
   const [notes, setNotes] = useState(booking?.notes || "")
   const [saving, setSaving] = useState(false)
@@ -92,6 +95,7 @@ export function BookingModal({
         end_at: new Date(endAt).toISOString(),
         status,
         notes: notes || null,
+        staff_member_id: staffMemberId || null,
         customer_whatsapp_id: customerWhatsappId || undefined,
         customer_name: customerName || undefined,
       }
@@ -157,14 +161,37 @@ export function BookingModal({
             </div>
           )}
 
-          {/* Service */}
-          <div className="space-y-1">
-            <Label>Service</Label>
-            <Input
-              placeholder="e.g. Haircut, Consultation..."
-              value={serviceName}
-              onChange={(e) => setServiceName(e.target.value)}
-            />
+          {/* Service + Staff */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label>Service</Label>
+              <Input
+                placeholder="e.g. Haircut, Consultation..."
+                value={serviceName}
+                onChange={(e) => setServiceName(e.target.value)}
+              />
+            </div>
+            {staffMembers.length > 0 && (
+              <div className="space-y-1">
+                <Label>Staff</Label>
+                <Select
+                  value={staffMemberId || "__none__"}
+                  onValueChange={(v) => setStaffMemberId(v === "__none__" ? "" : v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Unassigned" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Unassigned</SelectItem>
+                    {staffMembers.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
 
           <Separator />
