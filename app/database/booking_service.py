@@ -52,6 +52,73 @@ class BookingService:
         )
         return row is not None
 
+    @staticmethod
+    def _to_utc(dt: datetime) -> datetime:
+        """Normalize datetimes to UTC for consistent availability checks."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def is_within_business_hours(
+        self,
+        business_id: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> bool:
+        """
+        Validate interval is inside active business availability for the day.
+        Uses business_availability as source of truth.
+        """
+        try:
+            start_utc = self._to_utc(start_dt)
+            end_utc = self._to_utc(end_dt)
+
+            if end_utc <= start_utc:
+                return False
+
+            # Keep current model simple: bookings cannot span multiple UTC dates.
+            if start_utc.date() != end_utc.date():
+                return False
+
+            target_date = start_utc.date()
+            day_of_week_db = (target_date.weekday() + 1) % 7  # Mon=1 … Sun=0
+
+            session: Session = get_db_session()
+            rule = session.query(BusinessAvailability).filter(
+                and_(
+                    BusinessAvailability.business_id == uuid.UUID(business_id),
+                    BusinessAvailability.day_of_week == day_of_week_db,
+                    BusinessAvailability.is_active == True,
+                )
+            ).first()
+
+            if not rule:
+                session.close()
+                return False
+
+            import datetime as _dt
+            def _parse_time(t):
+                if isinstance(t, _dt.time):
+                    return t.hour, t.minute
+                return map(int, str(t).split(":"))
+
+            open_h, open_m = _parse_time(rule.open_time)
+            close_h, close_m = _parse_time(rule.close_time)
+            open_dt = datetime(
+                target_date.year, target_date.month, target_date.day,
+                open_h, open_m, tzinfo=timezone.utc
+            )
+            close_dt = datetime(
+                target_date.year, target_date.month, target_date.day,
+                close_h, close_m, tzinfo=timezone.utc
+            )
+            session.close()
+
+            return start_utc >= open_dt and end_utc <= close_dt
+        except Exception as e:
+            logger.error(f"is_within_business_hours error: {e}")
+            return False
+
     # ========================================================================
     # BOOKINGS
     # ========================================================================
@@ -170,12 +237,22 @@ class BookingService:
                     )
                     return None
 
+            start_at = datetime.fromisoformat(data["start_at"])
+            end_at = datetime.fromisoformat(data["end_at"])
+            if not self.is_within_business_hours(data["business_id"], start_at, end_at):
+                session.close()
+                logger.warning(
+                    "Booking outside business hours for business %s",
+                    data["business_id"],
+                )
+                return None
+
             booking = Booking(
                 business_id=uuid.UUID(data["business_id"]),
                 customer_id=data.get("customer_id"),
                 service_name=data.get("service_name"),
-                start_at=datetime.fromisoformat(data["start_at"]),
-                end_at=datetime.fromisoformat(data["end_at"]),
+                start_at=start_at,
+                end_at=end_at,
                 status=data.get("status", "confirmed"),
                 notes=data.get("notes"),
                 created_via=data.get("created_via", "admin"),
@@ -234,6 +311,18 @@ class BookingService:
                 if not self._validate_staff_member(session, str(booking.business_id), sid):
                     session.close()
                     logger.warning("Invalid staff_member_id on update_booking")
+                    return None
+
+            if "start_at" in data or "end_at" in data:
+                new_start = booking.start_at
+                new_end = booking.end_at
+                if "start_at" in data and data["start_at"] is not None:
+                    new_start = datetime.fromisoformat(data["start_at"]) if isinstance(data["start_at"], str) else data["start_at"]
+                if "end_at" in data and data["end_at"] is not None:
+                    new_end = datetime.fromisoformat(data["end_at"]) if isinstance(data["end_at"], str) else data["end_at"]
+                if not self.is_within_business_hours(str(booking.business_id), new_start, new_end):
+                    session.close()
+                    logger.warning("update_booking rejected: outside business hours")
                     return None
 
             for field in ALLOWED_FIELDS:

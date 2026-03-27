@@ -131,15 +131,6 @@ VALUES (
         "state": "Nariño",
         "country": "Colombia",
         "timezone": "America/Bogota",
-        "business_hours": {
-            "monday": {"open": "09:00", "close": "19:00"},
-            "tuesday": {"open": "09:00", "close": "19:00"},
-            "wednesday": {"open": "09:00", "close": "19:00"},
-            "thursday": {"open": "09:00", "close": "19:00"},
-            "friday": {"open": "09:00", "close": "19:00"},
-            "saturday": {"open": "09:00", "close": "18:00"},
-            "sunday": {"open": "closed", "close": "closed"}
-        },
         "services": [
             {"name": "Corte de cabello", "price": 20000, "duration": 60},
             {"name": "Barba", "price": 10000, "duration": 30},

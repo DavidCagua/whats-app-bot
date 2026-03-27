@@ -89,6 +89,39 @@ async function resolveCustomerId(
   return customer.id
 }
 
+function parseTimeToMinutes(value: string): number | null {
+  const [h, m] = value.split(":").map(Number)
+  if (Number.isNaN(h) || Number.isNaN(m)) return null
+  return h * 60 + m
+}
+
+async function isWithinBusinessAvailability(
+  businessId: string,
+  startAt: Date,
+  endAt: Date
+): Promise<boolean> {
+  if (!(endAt > startAt)) return false
+  if (startAt.toISOString().slice(0, 10) !== endAt.toISOString().slice(0, 10)) return false
+
+  const dayOfWeek = startAt.getUTCDay() // Sunday=0 ... Saturday=6
+  const rule = await prisma.business_availability.findFirst({
+    where: {
+      business_id: businessId,
+      day_of_week: dayOfWeek,
+      is_active: true,
+    },
+  })
+  if (!rule) return false
+
+  const startMins = startAt.getUTCHours() * 60 + startAt.getUTCMinutes()
+  const endMins = endAt.getUTCHours() * 60 + endAt.getUTCMinutes()
+  const openMins = parseTimeToMinutes(rule.open_time)
+  const closeMins = parseTimeToMinutes(rule.close_time)
+  if (openMins === null || closeMins === null) return false
+
+  return startMins >= openMins && endMins <= closeMins
+}
+
 export async function createBooking(data: {
   business_id: string
   service_id?: string | null
@@ -117,13 +150,20 @@ export async function createBooking(data: {
       customer_id = await resolveCustomerId(data.customer_whatsapp_id, data.customer_name)
     }
 
+    const startAt = new Date(data.start_at)
+    const endAt = new Date(data.end_at)
+    const withinHours = await isWithinBusinessAvailability(data.business_id, startAt, endAt)
+    if (!withinHours) {
+      return { success: false, error: "Outside business availability hours" }
+    }
+
     const booking = await prisma.bookings.create({
       data: {
         business_id: data.business_id,
         customer_id,
         service_id: data.service_id || null,
-        start_at: new Date(data.start_at),
-        end_at: new Date(data.end_at),
+        start_at: startAt,
+        end_at: endAt,
         status: data.status || "confirmed",
         notes: data.notes || null,
         staff_member_id: data.staff_member_id || null,
@@ -185,6 +225,13 @@ export async function updateBooking(
     if (data.notes !== undefined) updateData.notes = data.notes
     if (data.staff_member_id !== undefined) updateData.staff_member_id = data.staff_member_id
     if (customer_id !== undefined) updateData.customer_id = customer_id
+
+    const nextStart = data.start_at !== undefined ? new Date(data.start_at) : existing.start_at
+    const nextEnd = data.end_at !== undefined ? new Date(data.end_at) : existing.end_at
+    const withinHours = await isWithinBusinessAvailability(existing.business_id, nextStart, nextEnd)
+    if (!withinHours) {
+      return { success: false, error: "Outside business availability hours" }
+    }
 
     const booking = await prisma.bookings.update({
       where: { id },

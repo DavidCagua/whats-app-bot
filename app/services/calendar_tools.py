@@ -368,19 +368,19 @@ def schedule_appointment(
             staff_member_id=sid_raw if pref == "specific" else None,
         )
 
+        requested_start_hhmm = start_dt.strftime("%H:%M")
+        matched_slot = None
         if slots is not None and len(slots) > 0:
-            requested_start_hhmm = start_dt.strftime("%H:%M")
-            matched_slot = next(
-                (s for s in slots if s["start"] == requested_start_hhmm), None
-            )
+            matched_slot = next((s for s in slots if s["start"] == requested_start_hhmm), None)
             if matched_slot and not matched_slot.get("available"):
                 return (
                     f"❌ El horario {requested_start_hhmm} no está disponible para {date_str}. "
                     "¿Quieres que te muestre los horarios disponibles?"
                 )
-        elif slots is not None and len(slots) == 0:
-            logger.warning(
-                f"[CALENDAR] No availability rules for {date_str}, proceeding anyway"
+        if not matched_slot:
+            return (
+                f"❌ El horario {requested_start_hhmm} está fuera del horario de atención para {date_str}. "
+                "¿Quieres que te muestre los horarios disponibles?"
             )
 
         chosen_staff_id: Optional[str] = None
@@ -504,6 +504,19 @@ def reschedule_appointment(whatsapp_id: str, new_start_time: str, new_end_time: 
         end_dt = _parse_dt(new_end_time)
         if not start_dt or not end_dt:
             return "❌ Formato de fecha/hora inválido. Usa YYYY-MM-DDTHH:MM:SS."
+        if end_dt <= start_dt:
+            return "❌ La hora de fin debe ser después de la hora de inicio."
+
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+
+        if not booking_service.is_within_business_hours(business_id, start_dt, end_dt):
+            return (
+                "❌ El nuevo horario está fuera del horario de atención del negocio. "
+                "Pide horarios con get_available_slots antes de reagendar."
+            )
 
         updated = booking_service.update_booking(target["id"], {
             "start_at": start_dt.isoformat(),

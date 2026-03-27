@@ -39,7 +39,6 @@ class BusinessConfigService:
             'state': settings.get('state', ''),
             'country': settings.get('country', 'Colombia'),
             'timezone': settings.get('timezone', 'America/Bogota'),
-            'business_hours': settings.get('business_hours', {}),
             'payment_methods': settings.get('payment_methods', []),
             'promotions': settings.get('promotions', []),
             'staff': settings.get('staff', []),  # Generic: staff members (barbers, stylists, chefs, etc.)
@@ -87,37 +86,6 @@ class BusinessConfigService:
                 text += f"• {name}: ${price:,} COP ({duration} min)\n"
             else:
                 text += f"• {name}: ${price:,} COP\n"
-        return text
-
-    def get_hours_text(self, business_context: Optional[Dict] = None) -> str:
-        """Get formatted text of business hours."""
-        info = self.get_business_info(business_context)
-        hours = info.get('business_hours', {})
-
-        if not hours:
-            return "Horarios de atención (consultar)"
-
-        text = "🕐 **HORARIOS DE ATENCIÓN**\n\n"
-        day_names = {
-            'monday': 'Lunes',
-            'tuesday': 'Martes',
-            'wednesday': 'Miércoles',
-            'thursday': 'Jueves',
-            'friday': 'Viernes',
-            'saturday': 'Sábado',
-            'sunday': 'Domingo'
-        }
-
-        for day_key, day_name in day_names.items():
-            day_hours = hours.get(day_key, {})
-            if day_hours.get('open') == 'closed':
-                text += f"• {day_name}: Cerrado\n"
-            else:
-                open_time = day_hours.get('open', '')
-                close_time = day_hours.get('close', '')
-                if open_time and close_time:
-                    text += f"• {day_name}: {open_time} - {close_time}\n"
-
         return text
 
     def get_payment_methods_text(self, business_context: Optional[Dict] = None) -> str:
@@ -242,7 +210,6 @@ class BusinessConfigService:
             'state': '',
             'country': 'Colombia',
             'timezone': 'America/Bogota',
-            'business_hours': {},
             'payment_methods': ['Efectivo', 'Tarjeta'],
             'promotions': [],
             'staff': [],

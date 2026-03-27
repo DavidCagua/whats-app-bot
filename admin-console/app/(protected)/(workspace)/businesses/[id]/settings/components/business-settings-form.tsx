@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { Plus, X, Save, Clock, MapPin, CreditCard, Gift, Calendar, MessageSquare, Package } from "lucide-react"
+import { Plus, X, Save, MapPin, CreditCard, Gift, Calendar, MessageSquare, Package } from "lucide-react"
 import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
 
@@ -25,15 +25,6 @@ const businessSettingsSchema = z.object({
   country: z.string().min(1, "El país es requerido"),
   timezone: z.string().min(1, "La zona horaria es requerida"),
   language: z.string().min(1, "El idioma es requerido"),
-  business_hours: z.object({
-    monday: z.object({ open: z.string(), close: z.string() }),
-    tuesday: z.object({ open: z.string(), close: z.string() }),
-    wednesday: z.object({ open: z.string(), close: z.string() }),
-    thursday: z.object({ open: z.string(), close: z.string() }),
-    friday: z.object({ open: z.string(), close: z.string() }),
-    saturday: z.object({ open: z.string(), close: z.string() }),
-    sunday: z.object({ open: z.string(), close: z.string() }),
-  }),
   payment_methods: z.array(z.string()),
   promotions: z.array(z.string()),
   appointment_settings: z.object({
@@ -280,71 +271,6 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
                 Enlace al menú completo. El asistente lo incluirá en el saludo inicial.
               </p>
             </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Business Hours */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Clock className="h-5 w-5" />
-            Horario de atención
-          </CardTitle>
-          <CardDescription>
-            Configura el horario de operación de tu negocio para cada día de la semana
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {Object.entries(form.watch("business_hours")).map(([day, hours]) => (
-              <div key={day} className="space-y-2">
-                <Label className="capitalize">{day}</Label>
-                <div className="flex gap-2">
-                  <Input
-                    type="time"
-                    value={hours.open}
-                    onChange={(e) => {
-                      const currentHours = form.getValues("business_hours")
-                      form.setValue("business_hours", {
-                        ...currentHours,
-                        [day]: { ...hours, open: e.target.value }
-                      })
-                    }}
-                    disabled={hours.open === "closed"}
-                  />
-                  <Input
-                    type="time"
-                    value={hours.close}
-                    onChange={(e) => {
-                      const currentHours = form.getValues("business_hours")
-                      form.setValue("business_hours", {
-                        ...currentHours,
-                        [day]: { ...hours, close: e.target.value }
-                      })
-                    }}
-                    disabled={hours.close === "closed"}
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    const currentHours = form.getValues("business_hours")
-                    const isClosed = hours.open === "closed"
-                    form.setValue("business_hours", {
-                      ...currentHours,
-                      [day]: isClosed 
-                        ? { open: "09:00", close: "19:00" }
-                        : { open: "closed", close: "closed" }
-                    })
-                  }}
-                >
-                  {hours.open === "closed" ? "Abrir" : "Cerrado"}
-                </Button>
-              </div>
-            ))}
           </div>
         </CardContent>
       </Card>

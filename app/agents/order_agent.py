@@ -25,6 +25,7 @@ from ..orchestration.order_flow import (
     INTENT_UPDATE_CART_ITEM,
 )
 from ..database.conversation_service import conversation_service
+from ..database.booking_service import booking_service
 from ..services.tracing import tracer
 
 
@@ -83,7 +84,7 @@ def _format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
     city = (settings.get("city") or "").strip()
     state = (settings.get("state") or "").strip()
     country = (settings.get("country") or "").strip()
-    hours = settings.get("business_hours") or {}
+    business_id = business_context.get("business_id")
     parts = []
     if address:
         parts.append(f"Dirección: {address}")
@@ -93,19 +94,32 @@ def _format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
             parts.append(f"Ciudad/país: {loc}")
     if phone:
         parts.append(f"Teléfono: {phone}")
-    if hours and isinstance(hours, dict):
-        day_names = {"monday": "Lunes", "tuesday": "Martes", "wednesday": "Miércoles", "thursday": "Jueves", "friday": "Viernes", "saturday": "Sábado", "sunday": "Domingo"}
-        hour_lines = []
-        for day_key, day_label in day_names.items():
-            day_h = hours.get(day_key) or {}
-            if isinstance(day_h, dict):
-                o, c = day_h.get("open", ""), day_h.get("close", "")
-                if o and c and o != "closed" and c != "closed":
-                    hour_lines.append(f"  {day_label}: {o} - {c}")
-                elif o == "closed" or c == "closed":
-                    hour_lines.append(f"  {day_label}: cerrado")
-        if hour_lines:
-            parts.append("Horarios:\n" + "\n".join(hour_lines))
+    if business_id:
+        try:
+            rules = booking_service.get_availability(str(business_id))
+            if rules:
+                day_names = {
+                    0: "Domingo",
+                    1: "Lunes",
+                    2: "Martes",
+                    3: "Miércoles",
+                    4: "Jueves",
+                    5: "Viernes",
+                    6: "Sábado",
+                }
+                hour_lines = []
+                for rule in sorted(rules, key=lambda x: x.get("day_of_week", 0)):
+                    day_label = day_names.get(rule.get("day_of_week", -1), "Día")
+                    if not rule.get("is_active", True):
+                        hour_lines.append(f"  {day_label}: cerrado")
+                        continue
+                    hour_lines.append(
+                        f"  {day_label}: {rule.get('open_time', '')} - {rule.get('close_time', '')}"
+                    )
+                if hour_lines:
+                    parts.append("Horarios:\n" + "\n".join(hour_lines))
+        except Exception:
+            pass
     # One clear line for location questions: address if set, else city/state/country
     location_parts = []
     if address:

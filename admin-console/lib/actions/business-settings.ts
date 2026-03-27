@@ -14,15 +14,6 @@ type BusinessSettingsData = {
   country?: string
   timezone?: string
   language?: string
-  business_hours?: {
-    monday: { open: string; close: string }
-    tuesday: { open: string; close: string }
-    wednesday: { open: string; close: string }
-    thursday: { open: string; close: string }
-    friday: { open: string; close: string }
-    saturday: { open: string; close: string }
-    sunday: { open: string; close: string }
-  }
   payment_methods?: string[]
   promotions?: string[]
   appointment_settings?: {
@@ -47,17 +38,6 @@ export type BusinessSettings = {
   country: string
   timezone: string
   language: string
-  
-  // Business Hours
-  business_hours: {
-    monday: { open: string; close: string }
-    tuesday: { open: string; close: string }
-    wednesday: { open: string; close: string }
-    thursday: { open: string; close: string }
-    friday: { open: string; close: string }
-    saturday: { open: string; close: string }
-    sunday: { open: string; close: string }
-  }
   
   // Payment Methods
   payment_methods: string[]
@@ -117,15 +97,6 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
       country: settings?.country || "",
       timezone: settings?.timezone || "America/Bogota",
       language: settings?.language || "es-CO",
-      business_hours: settings?.business_hours || {
-        monday: { open: "09:00", close: "19:00" },
-        tuesday: { open: "09:00", close: "19:00" },
-        wednesday: { open: "09:00", close: "19:00" },
-        thursday: { open: "09:00", close: "19:00" },
-        friday: { open: "09:00", close: "19:00" },
-        saturday: { open: "09:00", close: "18:00" },
-        sunday: { open: "closed", close: "closed" },
-      },
       payment_methods: settings?.payment_methods || [],
       promotions: settings?.promotions || [],
       appointment_settings: settings?.appointment_settings || {
@@ -195,7 +166,6 @@ export async function updateBusinessSettings(
       ...(settings.country !== undefined && { country: settings.country }),
       ...(settings.timezone !== undefined && { timezone: settings.timezone }),
       ...(settings.language !== undefined && { language: settings.language }),
-      ...(settings.business_hours !== undefined && { business_hours: settings.business_hours }),
       ...(settings.payment_methods !== undefined && { payment_methods: settings.payment_methods }),
       ...(settings.promotions !== undefined && { promotions: settings.promotions }),
       ...(settings.appointment_settings !== undefined && { appointment_settings: settings.appointment_settings }),
