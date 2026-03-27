@@ -109,7 +109,7 @@ export function BookingModal({
       if (!result.success) throw new Error(result.error)
       onSaved(result.booking)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error")
+      setError(err instanceof Error ? err.message : "Error desconocido")
     } finally {
       setSaving(false)
     }
@@ -128,7 +128,7 @@ export function BookingModal({
       if (!result.success) throw new Error(result.error)
       onDeleted(booking.id)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error")
+      setError(err instanceof Error ? err.message : "Error desconocido")
     } finally {
       setDeleting(false)
     }

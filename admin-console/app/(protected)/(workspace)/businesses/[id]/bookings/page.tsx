@@ -36,7 +36,7 @@ export default async function BusinessBookingsPage({
     return (
       <div className="space-y-6">
         <p className="text-center text-muted-foreground py-12">
-          No business access configured. Contact your administrator.
+          No hay acceso configurado para ningún negocio. Contacta a tu administrador.
         </p>
       </div>
     )
@@ -92,9 +92,9 @@ export default async function BusinessBookingsPage({
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Bookings</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Reservas</h1>
         <p className="text-sm text-muted-foreground">
-          Calendar and availability for this business
+          Calendario y disponibilidad para este negocio
         </p>
       </div>
 

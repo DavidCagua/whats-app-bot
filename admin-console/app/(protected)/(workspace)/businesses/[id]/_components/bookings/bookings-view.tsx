@@ -199,7 +199,7 @@ export function BookingsView({
             onClick={() => setAvailabilityOpen(true)}
           >
             <Settings className="h-4 w-4 mr-2" />
-            Availability
+            Disponibilidad
           </Button>
         </div>
       )}
@@ -211,9 +211,9 @@ export function BookingsView({
             className="flex min-h-0 w-full flex-col gap-0 overflow-hidden p-0 max-sm:max-h-[90dvh] max-sm:rounded-t-xl sm:h-full sm:max-h-[100dvh] sm:max-w-2xl"
           >
             <SheetHeader className="shrink-0 space-y-1 border-b px-4 pb-3 pt-6 text-left pr-12">
-              <SheetTitle>Business hours &amp; availability</SheetTitle>
+              <SheetTitle>Horario y disponibilidad</SheetTitle>
               <SheetDescription>
-                Open hours and slot length for this business. The calendar stays visible behind this panel.
+                Horarios de atencion y duracion de turnos para este negocio. El calendario se mantiene visible detras de este panel.
               </SheetDescription>
             </SheetHeader>
             {availabilityBusinessId && (

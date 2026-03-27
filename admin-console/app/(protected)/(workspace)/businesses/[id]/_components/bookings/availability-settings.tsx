@@ -70,7 +70,7 @@ export function AvailabilitySettings({
       setSuccess(true)
       setTimeout(() => setSuccess(false), 3000)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error")
+      setError(err instanceof Error ? err.message : "Error desconocido")
     } finally {
       setSaving(false)
     }

@@ -6,7 +6,7 @@ import withDragAndDrop from "react-big-calendar/lib/addons/dragAndDrop"
 import { DndProvider } from "react-dnd"
 import { HTML5Backend } from "react-dnd-html5-backend"
 import { format, parse, startOfWeek, getDay } from "date-fns"
-import { enUS } from "date-fns/locale/en-US"
+import { es } from "date-fns/locale/es"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -31,7 +31,7 @@ const localizer = dateFnsLocalizer({
   parse,
   startOfWeek,
   getDay,
-  locales: { "en-US": enUS },
+  locales: { es },
 })
 
 const DnDCalendar = withDragAndDrop<CalendarEvent>(Calendar)
@@ -63,7 +63,7 @@ function BookingEventBlock({ event }: { event: CalendarEvent }) {
   const textClass = getStaffEventTextClass(booking.staff_member_id)
   return (
     <div className={`h-full px-1 py-0.5 rounded text-xs overflow-hidden ${textClass}`}>
-      <p className="font-semibold truncate leading-tight">{booking.service?.name || "Booking"}</p>
+      <p className="font-semibold truncate leading-tight">{booking.service?.name || "Reserva"}</p>
       {booking.customer?.name && (
         <p className="truncate opacity-80">{booking.customer.name}</p>
       )}
@@ -123,9 +123,9 @@ export function BookingsCalendar({
   // Week label — use local timezone to match react-big-calendar's date interpretation
   const weekEnd = new Date(weekStart)
   weekEnd.setDate(weekStart.getDate() + 6)
-  const weekLabel = `${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`
-  const monthLabel = weekStart.toLocaleDateString("en-US", { month: "long", year: "numeric" })
-  const dayLabel = weekStart.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" })
+  const weekLabel = `${weekStart.toLocaleDateString("es-CO", { month: "short", day: "numeric" })} – ${weekEnd.toLocaleDateString("es-CO", { month: "short", day: "numeric", year: "numeric" })}`
+  const monthLabel = weekStart.toLocaleDateString("es-CO", { month: "long", year: "numeric" })
+  const dayLabel = weekStart.toLocaleDateString("es-CO", { weekday: "short", month: "short", day: "numeric", year: "numeric" })
   const periodLabel =
     currentView === Views.MONTH
       ? monthLabel
@@ -187,7 +187,7 @@ export function BookingsCalendar({
               <ChevronLeft className="h-4 w-4" />
             </Button>
             <Button variant="outline" size="sm" onClick={goToToday}>
-              Today
+              Hoy
             </Button>
             <Button variant="outline" size="icon" onClick={goToNextPeriod}>
               <ChevronRight className="h-4 w-4" />
@@ -202,21 +202,21 @@ export function BookingsCalendar({
               variant={currentView === Views.MONTH ? "default" : "outline"}
               onClick={() => setCurrentView(Views.MONTH)}
             >
-              Month
+              Mes
             </Button>
             <Button
               size="sm"
               variant={currentView === Views.WEEK ? "default" : "outline"}
               onClick={() => setCurrentView(Views.WEEK)}
             >
-              Week
+              Semana
             </Button>
             <Button
               size="sm"
               variant={currentView === Views.DAY ? "default" : "outline"}
               onClick={() => setCurrentView(Views.DAY)}
             >
-              Day
+              Dia
             </Button>
           </div>
 
@@ -229,10 +229,10 @@ export function BookingsCalendar({
                 }
               >
                 <SelectTrigger className="w-44 h-8 text-xs">
-                  <SelectValue placeholder="All businesses" />
+                  <SelectValue placeholder="Todos los negocios" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__all__">All businesses</SelectItem>
+                  <SelectItem value="__all__">Todos los negocios</SelectItem>
                   {businesses.map((b) => (
                     <SelectItem key={b.id} value={b.id}>
                       {b.name}
@@ -250,10 +250,10 @@ export function BookingsCalendar({
                 }
               >
                 <SelectTrigger className="w-40 h-8 text-xs">
-                  <SelectValue placeholder="All staff" />
+                  <SelectValue placeholder="Todo el personal" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__all__">All staff</SelectItem>
+                  <SelectItem value="__all__">Todo el personal</SelectItem>
                   {staffMembers.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
                       {s.name}
@@ -326,7 +326,7 @@ export function BookingsCalendar({
             {/* Staff color legend */}
             {(legendStaffEntries.length > 0 || hasUnassignedBooking) && (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">Staff</span>
+                <span className="font-medium text-foreground">Personal</span>
                 {legendStaffEntries.map(([id, name]) => (
                   <div key={id} className="flex items-center gap-1.5">
                     <span
@@ -342,7 +342,7 @@ export function BookingsCalendar({
                       className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/10"
                       style={{ backgroundColor: getStaffHex(null) }}
                     />
-                    <span>Unassigned</span>
+                    <span>Sin asignar</span>
                   </div>
                 )}
               </div>
@@ -350,7 +350,7 @@ export function BookingsCalendar({
           </>
         ) : (
           <div className="rounded-lg border p-8 text-center text-sm text-muted-foreground">
-            Select a business to view the calendar.
+            Selecciona un negocio para ver el calendario.
           </div>
         )}
       </div>
