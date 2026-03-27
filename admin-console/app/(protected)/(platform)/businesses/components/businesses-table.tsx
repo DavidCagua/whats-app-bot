@@ -44,12 +44,12 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>WhatsApp Numbers</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
+              <TableHead>Nombre</TableHead>
+              <TableHead>Tipo</TableHead>
+              <TableHead>Números de WhatsApp</TableHead>
+              <TableHead>Estado</TableHead>
+              <TableHead>Creado</TableHead>
+              <TableHead className="text-right">Acciones</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -59,7 +59,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                   colSpan={6}
                   className="text-center text-muted-foreground"
                 >
-                  No businesses found. Create your first one to get started.
+                  No se encontraron negocios. Crea el primero para empezar.
                 </TableCell>
               </TableRow>
             ) : (
@@ -80,7 +80,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                     <div className="flex flex-col gap-1">
                       {business.whatsapp_numbers.length === 0 ? (
                         <span className="text-sm text-muted-foreground">
-                          No numbers
+                          Sin números
                         </span>
                       ) : (
                         business.whatsapp_numbers.map((number) => (
@@ -96,7 +96,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                                 variant="secondary"
                                 className="h-5 text-xs"
                               >
-                                Active
+                                Activo
                               </Badge>
                             )}
                           </div>
@@ -106,9 +106,9 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                   </TableCell>
                   <TableCell>
                     {business.is_active ? (
-                      <Badge variant="default">Active</Badge>
+                      <Badge variant="default">Activo</Badge>
                     ) : (
-                      <Badge variant="secondary">Inactive</Badge>
+                      <Badge variant="secondary">Inactivo</Badge>
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
@@ -124,7 +124,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                             asChild
                             variant="outline"
                             size="icon"
-                            aria-label="Inbox"
+                            aria-label="Bandeja de entrada"
                           >
                             <Link href={`/businesses/${business.id}/inbox`}>
                               <MessageSquare className="h-4 w-4" />
@@ -132,7 +132,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>Inbox</p>
+                          <p>Bandeja de entrada</p>
                         </TooltipContent>
                       </Tooltip>
 
@@ -142,7 +142,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                             asChild
                             variant="outline"
                             size="icon"
-                            aria-label="Access"
+                            aria-label="Acceso"
                           >
                             <Link href={`/businesses/${business.id}/team`}>
                               <UserCog className="h-4 w-4" />
@@ -150,7 +150,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>Access</p>
+                          <p>Acceso</p>
                         </TooltipContent>
                       </Tooltip>
 
@@ -160,7 +160,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                             asChild
                             variant="outline"
                             size="icon"
-                            aria-label="Settings"
+                            aria-label="Configuración"
                           >
                             <Link href={`/businesses/${business.id}/settings`}>
                               <Settings className="h-4 w-4" />
@@ -168,7 +168,7 @@ export function BusinessesTable({ data }: BusinessesTableProps) {
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>Settings</p>
+                          <p>Configuración</p>
                         </TooltipContent>
                       </Tooltip>
                     </div>

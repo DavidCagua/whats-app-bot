@@ -6,7 +6,13 @@ export type Booking = {
   id: string
   business_id: string
   customer_id: number | null
-  service_name: string | null
+  service_id: string | null
+  service: {
+    id: string
+    name: string
+    price: number
+    duration_minutes: number
+  } | null
   start_at: Date
   end_at: Date
   status: string
@@ -155,6 +161,9 @@ export async function getBookings({
       staff_members: {
         select: { id: true, name: true, role: true },
       },
+      services: {
+        select: { id: true, name: true, price: true, duration_minutes: true },
+      },
     },
     orderBy: { start_at: "asc" },
     take: limit,
@@ -164,7 +173,15 @@ export async function getBookings({
     id: b.id,
     business_id: b.business_id,
     customer_id: b.customer_id,
-    service_name: b.service_name,
+    service_id: b.service_id,
+    service: b.services
+      ? {
+          id: b.services.id,
+          name: b.services.name,
+          price: Number(b.services.price.toString()),
+          duration_minutes: b.services.duration_minutes,
+        }
+      : null,
     start_at: b.start_at,
     end_at: b.end_at,
     status: b.status,

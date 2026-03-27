@@ -45,10 +45,10 @@ export default function DataDeletionPage() {
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li>Send an email to <a href="mailto:felipe0160@gmail.com" className="text-blue-600 hover:underline">felipe0160@gmail.com</a> with the subject &quot;Account / business data deletion request&quot;.</li>
               <li>Include the email address associated with your admin account and, if applicable, the business name.</li>
-              <li>Specify whether you want to delete only certain data (e.g. Google Calendar connection) or your full account and business data.</li>
+              <li>Specify whether you want to delete only certain data or your full account and business data.</li>
             </ul>
             <p className="text-gray-700 leading-relaxed mt-4">
-              We will delete your account, business configuration, encrypted calendar credentials, and any associated conversation and appointment data as requested.
+              We will delete your account, business configuration, and any associated conversation and appointment data as requested.
             </p>
           </section>
 
@@ -59,7 +59,6 @@ export default function DataDeletionPage() {
               <li>Conversation history linked to your phone number or business</li>
               <li>Stored appointment data</li>
               <li>Account credentials and business settings (for admin accounts)</li>
-              <li>Google Calendar connection and stored tokens (for business accounts)</li>
             </ul>
             <p className="text-gray-700 leading-relaxed mt-4">
               We process deletion requests within 30 days. You will receive a confirmation email once the deletion is complete. Some data may be retained where required by law or for legitimate operational purposes (e.g. backup retention for a limited period).

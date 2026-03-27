@@ -14,7 +14,7 @@ interface StaffPageProps {
 }
 
 export const metadata = {
-  title: "Staff Members",
+  title: "Personal",
 }
 
 export default async function StaffPage({ params }: StaffPageProps) {
@@ -60,9 +60,9 @@ export default async function StaffPage({ params }: StaffPageProps) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Staff</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Personal</h1>
           <p className="text-muted-foreground mt-1">
-            People on the calendar (barbers, stylists, etc.)
+            Personas en el calendario (barberos, estilistas, etc.)
           </p>
         </div>
         <StaffForm businessId={id} />

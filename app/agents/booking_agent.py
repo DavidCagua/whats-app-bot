@@ -1,6 +1,6 @@
 """
-Booking agent: appointment scheduling and calendar operations.
-Wraps the logic from langchain_service (LLM + calendar tools).
+Booking agent: appointment scheduling and availability operations.
+Wraps the logic from langchain_service (LLM + booking tools).
 """
 
 import os
@@ -20,7 +20,7 @@ from ..services.tracing import tracer
 
 
 class BookingAgent(BaseAgent):
-    """Agent for booking appointments via Google Calendar."""
+    """Agent for booking appointments via in-house booking tools."""
 
     agent_type = "booking"
 
@@ -31,7 +31,7 @@ class BookingAgent(BaseAgent):
             api_key=os.getenv("OPENAI_API_KEY"),
         )
         self.llm_with_tools = self.llm.bind_tools(calendar_tools)
-        logging.info("[BOOKING_AGENT] Initialized with calendar tools")
+        logging.info("[BOOKING_AGENT] Initialized with booking tools")
 
     def get_system_prompt(
         self,

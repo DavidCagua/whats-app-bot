@@ -16,8 +16,8 @@ import Link from "next/link"
 import { createBusiness } from "@/lib/actions/business"
 
 const createBusinessSchema = z.object({
-  name: z.string().min(1, "Business name is required"),
-  business_type: z.string().min(1, "Business type is required"),
+  name: z.string().min(1, "El nombre del negocio es requerido"),
+  business_type: z.string().min(1, "El tipo de negocio es requerido"),
 })
 
 type CreateBusinessFormData = z.infer<typeof createBusinessSchema>
@@ -39,13 +39,13 @@ export default function NewBusinessPage() {
     try {
       const result = await createBusiness(data)
       if (result.success && result.businessId) {
-        toast.success("Business created successfully!")
+        toast.success("¡Negocio creado exitosamente!")
         router.push(`/businesses/${result.businessId}/settings`)
       } else {
-        toast.error(result.error || "Failed to create business")
+        toast.error(result.error || "No se pudo crear el negocio")
       }
     } catch {
-      toast.error("An error occurred while creating the business")
+      toast.error("Ocurrió un error al crear el negocio")
     } finally {
       setIsLoading(false)
     }
@@ -60,9 +60,9 @@ export default function NewBusinessPage() {
           </Link>
         </Button>
         <div>
-          <h1 className="text-3xl font-bold">Create Business</h1>
+          <h1 className="text-3xl font-bold">Crear negocio</h1>
           <p className="text-muted-foreground">
-            Add a new business to the platform
+            Agrega un nuevo negocio a la plataforma
           </p>
         </div>
       </div>
@@ -71,20 +71,20 @@ export default function NewBusinessPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Building2 className="h-5 w-5" />
-            Business Details
+            Datos del negocio
           </CardTitle>
           <CardDescription>
-            Enter the basic information for the new business
+            Ingresa la información básica del nuevo negocio
           </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Business Name</Label>
+              <Label htmlFor="name">Nombre del negocio</Label>
               <Input
                 id="name"
                 {...form.register("name")}
-                placeholder="Enter business name"
+                placeholder="Ingresa el nombre del negocio"
               />
               {form.formState.errors.name && (
                 <p className="text-sm text-red-500">{form.formState.errors.name.message}</p>
@@ -92,13 +92,13 @@ export default function NewBusinessPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="business_type">Business Type</Label>
+              <Label htmlFor="business_type">Tipo de negocio</Label>
               <Select
                 value={form.watch("business_type")}
                 onValueChange={(value) => form.setValue("business_type", value)}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select business type" />
+                  <SelectValue placeholder="Selecciona el tipo de negocio" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="barberia">Barberia</SelectItem>
@@ -116,10 +116,10 @@ export default function NewBusinessPage() {
 
             <div className="flex justify-end gap-4 pt-4">
               <Button variant="outline" asChild>
-                <Link href="/businesses">Cancel</Link>
+                <Link href="/businesses">Cancelar</Link>
               </Button>
               <Button type="submit" disabled={isLoading}>
-                {isLoading ? "Creating..." : "Create Business"}
+                {isLoading ? "Creando..." : "Crear negocio"}
               </Button>
             </div>
           </form>

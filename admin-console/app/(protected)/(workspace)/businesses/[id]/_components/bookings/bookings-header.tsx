@@ -15,10 +15,10 @@ export function BookingsHeader({ bookings }: BookingsHeaderProps) {
 
   const stats = [
     { label: "Total", value: total, color: "text-foreground" },
-    { label: "Confirmed", value: confirmed, color: "text-green-600" },
-    { label: "Pending", value: pending, color: "text-yellow-600" },
-    { label: "Cancelled", value: cancelled, color: "text-gray-500" },
-    { label: "Completed", value: completed, color: "text-blue-600" },
+    { label: "Confirmadas", value: confirmed, color: "text-green-600" },
+    { label: "Pendientes", value: pending, color: "text-yellow-600" },
+    { label: "Canceladas", value: cancelled, color: "text-gray-500" },
+    { label: "Completadas", value: completed, color: "text-blue-600" },
   ]
 
   return (
@@ -26,9 +26,9 @@ export function BookingsHeader({ bookings }: BookingsHeaderProps) {
       <div className="flex items-center gap-2">
         <CalendarDays className="h-6 w-6" />
         <div>
-          <h1 className="text-2xl font-bold">Bookings</h1>
+          <h1 className="text-2xl font-bold">Reservas</h1>
           <p className="text-muted-foreground text-sm">
-            Manage appointments and availability for this week
+            Gestiona citas y disponibilidad para esta semana
           </p>
         </div>
       </div>

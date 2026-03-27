@@ -75,7 +75,7 @@ export function fromDisplayDate(displayDate: Date): Date {
 }
 
 export function bookingToEvent(booking: Booking): CalendarEvent {
-  const label = [booking.service_name, booking.customer?.name]
+  const label = [booking.service?.name, booking.customer?.name]
     .filter(Boolean)
     .join(" — ") || "Booking"
 

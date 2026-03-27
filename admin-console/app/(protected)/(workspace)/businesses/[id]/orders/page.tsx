@@ -62,9 +62,9 @@ export default async function OrdersPage({ params }: OrdersPageProps) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Orders</h2>
+          <h2 className="text-lg font-semibold">Pedidos</h2>
           <p className="text-sm text-muted-foreground">
-            Orders for {business.name}
+            Pedidos de {business.name}
           </p>
         </div>
       </div>
@@ -73,18 +73,18 @@ export default async function OrdersPage({ params }: OrdersPageProps) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Date</TableHead>
-              <TableHead>Customer</TableHead>
-              <TableHead>Items</TableHead>
+              <TableHead>Fecha</TableHead>
+              <TableHead>Cliente</TableHead>
+              <TableHead>Ítems</TableHead>
               <TableHead>Total</TableHead>
-              <TableHead>Status</TableHead>
+              <TableHead>Estado</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {orders.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
-                  No orders yet.
+                  Aún no hay pedidos.
                 </TableCell>
               </TableRow>
             ) : (

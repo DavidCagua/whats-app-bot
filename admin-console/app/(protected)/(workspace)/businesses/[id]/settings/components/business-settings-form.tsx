@@ -16,15 +16,15 @@ import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
 
 const businessSettingsSchema = z.object({
-  name: z.string().min(1, "Business name is required"),
-  business_type: z.string().min(1, "Business type is required"),
-  address: z.string().min(1, "Address is required"),
-  phone: z.string().min(1, "Phone is required"),
-  city: z.string().min(1, "City is required"),
-  state: z.string().min(1, "State is required"),
-  country: z.string().min(1, "Country is required"),
-  timezone: z.string().min(1, "Timezone is required"),
-  language: z.string().min(1, "Language is required"),
+  name: z.string().min(1, "El nombre del negocio es requerido"),
+  business_type: z.string().min(1, "El tipo de negocio es requerido"),
+  address: z.string().min(1, "La dirección es requerida"),
+  phone: z.string().min(1, "El teléfono es requerido"),
+  city: z.string().min(1, "La ciudad es requerida"),
+  state: z.string().min(1, "El departamento es requerido"),
+  country: z.string().min(1, "El país es requerido"),
+  timezone: z.string().min(1, "La zona horaria es requerida"),
+  language: z.string().min(1, "El idioma es requerido"),
   business_hours: z.object({
     monday: z.object({ open: z.string(), close: z.string() }),
     tuesday: z.object({ open: z.string(), close: z.string() }),
@@ -34,19 +34,14 @@ const businessSettingsSchema = z.object({
     saturday: z.object({ open: z.string(), close: z.string() }),
     sunday: z.object({ open: z.string(), close: z.string() }),
   }),
-  services: z.array(z.object({
-    name: z.string().min(1, "Service name is required"),
-    price: z.number().min(0, "Price must be positive"),
-    duration: z.number().min(1, "Duration must be at least 1 minute"),
-  })),
   payment_methods: z.array(z.string()),
   promotions: z.array(z.string()),
   appointment_settings: z.object({
-    max_concurrent: z.number().min(1, "Must allow at least 1 concurrent appointment"),
-    min_advance_hours: z.number().min(0, "Cannot be negative"),
-    default_duration_minutes: z.number().min(1, "Must be at least 1 minute"),
+    max_concurrent: z.number().min(1, "Debe permitir al menos 1 cita simultánea"),
+    min_advance_hours: z.number().min(0, "No puede ser negativo"),
+    default_duration_minutes: z.number().min(1, "Debe ser al menos 1 minuto"),
   }),
-  ai_prompt: z.string().min(1, "AI prompt is required"),
+  ai_prompt: z.string().min(1, "El prompt del asistente es requerido"),
   products_enabled: z.boolean(),
   menu_url: z.string().optional(),
   agent_enabled: z.boolean(),
@@ -78,28 +73,18 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
     try {
       const result = await updateBusinessSettings(business.id, data)
       if (result.success) {
-        toast.success("Settings updated successfully!")
+        toast.success("¡Configuración guardada exitosamente!")
       } else {
-        toast.error(result.error || "Failed to update settings")
+        toast.error(result.error || "No se pudo actualizar la configuración")
       }
     } catch {
-      toast.error("An error occurred while updating settings")
+      toast.error("Ocurrió un error al actualizar la configuración")
     } finally {
       setIsLoading(false)
     }
   }
 
   // Helper functions for dynamic arrays
-  const addService = () => {
-    const currentServices = form.getValues("services")
-    form.setValue("services", [...currentServices, { name: "", price: 0, duration: 60 }])
-  }
-
-  const removeService = (index: number) => {
-    const currentServices = form.getValues("services")
-    form.setValue("services", currentServices.filter((_, i) => i !== index))
-  }
-
   const addPaymentMethod = () => {
     const currentMethods = form.getValues("payment_methods")
     form.setValue("payment_methods", [...currentMethods, ""])
@@ -128,18 +113,18 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <MapPin className="h-5 w-5" />
-            Basic Information
+            Información básica
           </CardTitle>
           <CardDescription>
-            Configure the basic details of your business
+            Configura los detalles básicos de tu negocio
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
             <div className="space-y-1">
-              <Label className="text-base font-medium">AI Agent</Label>
+              <Label className="text-base font-medium">Agente IA</Label>
               <p className="text-sm text-muted-foreground">
-                When off, incoming messages are still saved but no automated replies are sent.
+                Cuando está apagado, los mensajes entrantes se guardan pero no se envían respuestas automáticas.
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
@@ -152,11 +137,11 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Business Name</Label>
+              <Label htmlFor="name">Nombre del negocio</Label>
               <Input
                 id="name"
                 {...form.register("name")}
-                placeholder="Enter business name"
+                placeholder="Ingresa el nombre del negocio"
               />
               {form.formState.errors.name && (
                 <p className="text-sm text-red-500">{form.formState.errors.name.message}</p>
@@ -164,13 +149,13 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="business_type">Business Type</Label>
+              <Label htmlFor="business_type">Tipo de negocio</Label>
               <Select
                 value={form.watch("business_type")}
                 onValueChange={(value) => form.setValue("business_type", value)}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select business type" />
+                  <SelectValue placeholder="Selecciona el tipo de negocio" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="barberia">Barbería</SelectItem>
@@ -184,16 +169,16 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="address">Address</Label>
+              <Label htmlFor="address">Dirección</Label>
               <Input
                 id="address"
                 {...form.register("address")}
-                placeholder="Enter business address"
+                placeholder="Ingresa la dirección del negocio"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="phone">Phone</Label>
+              <Label htmlFor="phone">Teléfono</Label>
               <Input
                 id="phone"
                 {...form.register("phone")}
@@ -202,40 +187,40 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="city">City</Label>
+              <Label htmlFor="city">Ciudad</Label>
               <Input
                 id="city"
                 {...form.register("city")}
-                placeholder="Enter city"
+                placeholder="Ingresa la ciudad"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="state">State/Province</Label>
+              <Label htmlFor="state">Departamento/Provincia</Label>
               <Input
                 id="state"
                 {...form.register("state")}
-                placeholder="Enter state or province"
+                placeholder="Ingresa el departamento o provincia"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="country">Country</Label>
+              <Label htmlFor="country">País</Label>
               <Input
                 id="country"
                 {...form.register("country")}
-                placeholder="Enter country"
+                placeholder="Ingresa el país"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="timezone">Timezone</Label>
+              <Label htmlFor="timezone">Zona horaria</Label>
               <Select
                 value={form.watch("timezone")}
                 onValueChange={(value) => form.setValue("timezone", value)}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select timezone" />
+                  <SelectValue placeholder="Selecciona la zona horaria" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="America/Bogota">America/Bogota (Colombia)</SelectItem>
@@ -248,13 +233,13 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="language">Language</Label>
+              <Label htmlFor="language">Idioma</Label>
               <Select
                 value={form.watch("language")}
                 onValueChange={(value) => form.setValue("language", value)}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select language" />
+                  <SelectValue placeholder="Selecciona el idioma" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="es-CO">Español (Colombia)</SelectItem>
@@ -304,10 +289,10 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Clock className="h-5 w-5" />
-            Business Hours
+            Horario de atención
           </CardTitle>
           <CardDescription>
-            Set your business operating hours for each day of the week
+            Configura el horario de operación de tu negocio para cada día de la semana
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -356,66 +341,10 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
                     })
                   }}
                 >
-                  {hours.open === "closed" ? "Open" : "Closed"}
+                  {hours.open === "closed" ? "Abrir" : "Cerrado"}
                 </Button>
               </div>
             ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Services */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <CreditCard className="h-5 w-5" />
-            Services
-          </CardTitle>
-          <CardDescription>
-            Define the services you offer with their prices and durations
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {form.watch("services").map((service, index) => (
-              <div key={index} className="flex gap-4 items-end p-4 border rounded-lg">
-                <div className="flex-1 space-y-2">
-                  <Label>Service Name</Label>
-                  <Input
-                    {...form.register(`services.${index}.name`)}
-                    placeholder="e.g., Corte de cabello"
-                  />
-                </div>
-                <div className="w-32 space-y-2">
-                  <Label>Price</Label>
-                  <Input
-                    type="number"
-                    {...form.register(`services.${index}.price`, { valueAsNumber: true })}
-                    placeholder="20000"
-                  />
-                </div>
-                <div className="w-32 space-y-2">
-                  <Label>Duration (min)</Label>
-                  <Input
-                    type="number"
-                    {...form.register(`services.${index}.duration`, { valueAsNumber: true })}
-                    placeholder="60"
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => removeService(index)}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
-            <Button type="button" variant="outline" onClick={addService}>
-              <Plus className="mr-2 h-4 w-4" />
-              Add Service
-            </Button>
           </div>
         </CardContent>
       </Card>
@@ -425,10 +354,10 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <CreditCard className="h-5 w-5" />
-            Payment Methods
+            Métodos de pago
           </CardTitle>
           <CardDescription>
-            List the payment methods you accept
+            Lista los métodos de pago que aceptas
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -437,7 +366,7 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
               <div key={index} className="flex gap-4 items-center">
                 <Input
                   {...form.register(`payment_methods.${index}`)}
-                  placeholder="e.g., Efectivo, Tarjeta, Nequi"
+                  placeholder="ej., Efectivo, Tarjeta, Nequi"
                 />
                 <Button
                   type="button"
@@ -451,7 +380,7 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             ))}
             <Button type="button" variant="outline" onClick={addPaymentMethod}>
               <Plus className="mr-2 h-4 w-4" />
-              Add Payment Method
+              Agregar método de pago
             </Button>
           </div>
         </CardContent>
@@ -462,10 +391,10 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Gift className="h-5 w-5" />
-            Promotions
+            Promociones
           </CardTitle>
           <CardDescription>
-            Define special offers and promotions for your customers
+            Define las ofertas especiales y promociones para tus clientes
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -489,7 +418,7 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             ))}
             <Button type="button" variant="outline" onClick={addPromotion}>
               <Plus className="mr-2 h-4 w-4" />
-              Add Promotion
+              Agregar promoción
             </Button>
           </div>
         </CardContent>
@@ -500,16 +429,16 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Calendar className="h-5 w-5" />
-            Appointment Settings
+            Configuración de citas
           </CardTitle>
           <CardDescription>
-            Configure how appointments are managed
+            Configura cómo se gestionan las citas
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="max_concurrent">Max Concurrent Appointments</Label>
+              <Label htmlFor="max_concurrent">Máx. citas simultáneas</Label>
               <Input
                 id="max_concurrent"
                 type="number"
@@ -518,7 +447,7 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="min_advance_hours">Min Advance Hours</Label>
+              <Label htmlFor="min_advance_hours">Horas mínimas de anticipación</Label>
               <Input
                 id="min_advance_hours"
                 type="number"
@@ -527,7 +456,7 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="default_duration_minutes">Default Duration (minutes)</Label>
+              <Label htmlFor="default_duration_minutes">Duración predeterminada (minutos)</Label>
               <Input
                 id="default_duration_minutes"
                 type="number"
@@ -544,19 +473,19 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <MessageSquare className="h-5 w-5" />
-            AI Assistant Prompt
+            Prompt del asistente IA
           </CardTitle>
           <CardDescription>
-            Customize how your AI assistant communicates with customers
+            Personaliza cómo tu asistente IA se comunica con los clientes
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-2">
-            <Label htmlFor="ai_prompt">AI Prompt</Label>
+            <Label htmlFor="ai_prompt">Prompt de IA</Label>
             <Textarea
               id="ai_prompt"
               {...form.register("ai_prompt")}
-              placeholder="Enter the AI prompt for your business..."
+              placeholder="Ingresa el prompt del asistente IA para tu negocio..."
               rows={10}
               className="font-mono text-sm"
             />
@@ -573,7 +502,7 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         <div className="flex justify-end">
           <Button type="submit" disabled={isLoading}>
             <Save className="mr-2 h-4 w-4" />
-            {isLoading ? "Saving..." : "Save Settings"}
+            {isLoading ? "Guardando..." : "Guardar configuración"}
           </Button>
         </div>
       )}

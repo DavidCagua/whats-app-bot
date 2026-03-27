@@ -22,9 +22,9 @@ import { toast } from "sonner"
 import { inviteUserToBusiness } from "@/lib/actions/users"
 
 const inviteSchema = z.object({
-  email: z.string().email("Invalid email address"),
-  full_name: z.string().min(1, "Name is required"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  email: z.string().email("Correo electrónico inválido"),
+  full_name: z.string().min(1, "El nombre es requerido"),
+  password: z.string().min(8, "La contraseña debe tener al menos 8 caracteres"),
   role: z.string(),
 })
 
@@ -54,14 +54,14 @@ export function InviteUserButton({ businessId, businessName }: InviteUserButtonP
     try {
       const result = await inviteUserToBusiness(businessId, data)
       if (result.success) {
-        toast.success("User invited successfully!")
+        toast.success("¡Usuario invitado exitosamente!")
         setOpen(false)
         form.reset()
       } else {
-        toast.error(result.error || "Failed to invite user")
+        toast.error(result.error || "No se pudo invitar al usuario")
       }
     } catch {
-      toast.error("An error occurred")
+      toast.error("Ocurrió un error")
     } finally {
       setIsLoading(false)
     }
@@ -72,23 +72,23 @@ export function InviteUserButton({ businessId, businessName }: InviteUserButtonP
       <DialogTrigger asChild>
         <Button>
           <UserPlus className="mr-2 h-4 w-4" />
-          Invite Team Member
+          Invitar miembro del equipo
         </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Invite Team Member</DialogTitle>
+          <DialogTitle>Invitar miembro del equipo</DialogTitle>
           <DialogDescription>
-            Add a new team member to {businessName}. If the user already exists, they will be added to this business.
+            Agrega un nuevo miembro del equipo a {businessName}. Si el usuario ya existe, será añadido a este negocio.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="full_name">Full Name</Label>
+            <Label htmlFor="full_name">Nombre completo</Label>
             <Input
               id="full_name"
               {...form.register("full_name")}
-              placeholder="Enter full name"
+              placeholder="Ingresa el nombre completo"
             />
             {form.formState.errors.full_name && (
               <p className="text-sm text-red-500">{form.formState.errors.full_name.message}</p>
@@ -96,12 +96,12 @@ export function InviteUserButton({ businessId, businessName }: InviteUserButtonP
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="email">Email</Label>
+            <Label htmlFor="email">Correo electrónico</Label>
             <Input
               id="email"
               type="email"
               {...form.register("email")}
-              placeholder="user@example.com"
+              placeholder="usuario@ejemplo.com"
             />
             {form.formState.errors.email && (
               <p className="text-sm text-red-500">{form.formState.errors.email.message}</p>
@@ -109,15 +109,15 @@ export function InviteUserButton({ businessId, businessName }: InviteUserButtonP
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
+            <Label htmlFor="password">Contraseña</Label>
             <Input
               id="password"
               type="password"
               {...form.register("password")}
-              placeholder="Minimum 8 characters"
+              placeholder="Mínimo 8 caracteres"
             />
             <p className="text-xs text-muted-foreground">
-              If user already exists, this password will be ignored
+              Si el usuario ya existe, esta contraseña será ignorada
             </p>
             {form.formState.errors.password && (
               <p className="text-sm text-red-500">{form.formState.errors.password.message}</p>
@@ -125,27 +125,27 @@ export function InviteUserButton({ businessId, businessName }: InviteUserButtonP
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="role">Role in this Business</Label>
+            <Label htmlFor="role">Rol en este negocio</Label>
             <Select
               value={form.watch("role")}
               onValueChange={(value) => form.setValue("role", value)}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Select role" />
+                <SelectValue placeholder="Selecciona el rol" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="admin">Admin (can edit settings)</SelectItem>
-                <SelectItem value="member">Member (view only)</SelectItem>
+                <SelectItem value="admin">Admin (puede editar configuración)</SelectItem>
+                <SelectItem value="member">Miembro (solo lectura)</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-              Cancel
+              Cancelar
             </Button>
             <Button type="submit" disabled={isLoading}>
-              {isLoading ? "Inviting..." : "Invite"}
+              {isLoading ? "Invitando..." : "Invitar"}
             </Button>
           </DialogFooter>
         </form>

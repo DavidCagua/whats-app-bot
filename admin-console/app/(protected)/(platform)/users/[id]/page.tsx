@@ -59,9 +59,9 @@ export default async function UserPage({ params }: UserPageProps) {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold">Edit User</h1>
+        <h1 className="text-3xl font-bold">Editar usuario</h1>
         <p className="text-muted-foreground">
-          Manage user details and access for {user.full_name || user.email}
+          Gestiona los datos y accesos de {user.full_name || user.email}
         </p>
       </div>
 

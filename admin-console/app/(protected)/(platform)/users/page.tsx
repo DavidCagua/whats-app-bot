@@ -20,15 +20,15 @@ export default async function UsersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Users</h1>
+          <h1 className="text-3xl font-bold">Usuarios</h1>
           <p className="text-muted-foreground">
-            Manage system users and their business assignments
+            Gestiona los usuarios del sistema y sus asignaciones de negocio
           </p>
         </div>
         <Button asChild>
           <Link href="/users/new">
             <Plus className="mr-2 h-4 w-4" />
-            Add User
+            Agregar usuario
           </Link>
         </Button>
       </div>

@@ -63,7 +63,7 @@ function BookingEventBlock({ event }: { event: CalendarEvent }) {
   const textClass = getStaffEventTextClass(booking.staff_member_id)
   return (
     <div className={`h-full px-1 py-0.5 rounded text-xs overflow-hidden ${textClass}`}>
-      <p className="font-semibold truncate leading-tight">{booking.service_name || "Booking"}</p>
+      <p className="font-semibold truncate leading-tight">{booking.service?.name || "Booking"}</p>
       {booking.customer?.name && (
         <p className="truncate opacity-80">{booking.customer.name}</p>
       )}

@@ -36,6 +36,7 @@ interface BookingsViewProps {
   initialFilters: InitialFilters
   initialWeekStart: string
   initialStaff: StaffMember[]
+  initialServices: Array<{ id: string; name: string; duration_minutes: number }>
   /** When set, all loads are scoped to this business (workspace route). */
   fixedBusinessId?: string
 }
@@ -52,6 +53,7 @@ export function BookingsView({
   initialFilters,
   initialWeekStart,
   initialStaff,
+  initialServices,
   fixedBusinessId,
 }: BookingsViewProps) {
   const [bookings, setBookings] = useState<Booking[]>(initialBookings)
@@ -249,6 +251,7 @@ export function BookingsView({
           businesses={access.businesses}
           defaultBusinessId={fixedBusinessId || access.businesses[0]?.id || ""}
           staffMembers={staffMembers}
+          services={initialServices}
           onClose={() => setModalState({ mode: "closed" })}
           onSaved={handleBookingSaved}
           onDeleted={handleBookingDeleted}

@@ -7,6 +7,8 @@ Generic service for any business type (barbershops, salons, restaurants, etc.)
 import logging
 from typing import Optional, Dict, List, Any
 from app.services.staff_service import staff_service
+from app.database.models import Service, get_db_session
+import uuid
 
 class BusinessConfigService:
     """Service for loading business-specific configuration from database."""
@@ -38,7 +40,6 @@ class BusinessConfigService:
             'country': settings.get('country', 'Colombia'),
             'timezone': settings.get('timezone', 'America/Bogota'),
             'business_hours': settings.get('business_hours', {}),
-            'services': settings.get('services', []),
             'payment_methods': settings.get('payment_methods', []),
             'promotions': settings.get('promotions', []),
             'staff': settings.get('staff', []),  # Generic: staff members (barbers, stylists, chefs, etc.)
@@ -47,9 +48,26 @@ class BusinessConfigService:
         }
 
     def get_services_list(self, business_context: Optional[Dict] = None) -> List[Dict]:
-        """Get list of services/products offered by the business."""
-        info = self.get_business_info(business_context)
-        return info.get('services', [])
+        """Get list of active services offered by the business from services table."""
+        if not business_context:
+            return []
+
+        business_id = business_context.get('business_id')
+        if not business_id:
+            return []
+
+        try:
+            session = get_db_session()
+            rows = session.query(Service).filter(
+                Service.business_id == uuid.UUID(business_id),
+                Service.is_active.is_(True)
+            ).order_by(Service.name.asc()).all()
+            result = [row.to_dict() for row in rows]
+            session.close()
+            return result
+        except Exception as e:
+            logging.error(f"[CONFIG] Error loading services for business {business_id}: {e}")
+            return []
 
     def get_services_text(self, business_context: Optional[Dict] = None) -> str:
         """Get formatted text of services and prices."""
@@ -225,7 +243,6 @@ class BusinessConfigService:
             'country': 'Colombia',
             'timezone': 'America/Bogota',
             'business_hours': {},
-            'services': [],
             'payment_methods': ['Efectivo', 'Tarjeta'],
             'promotions': [],
             'staff': [],

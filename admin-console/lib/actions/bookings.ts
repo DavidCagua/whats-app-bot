@@ -10,7 +10,7 @@ function mapBooking(b: {
   id: string
   business_id: string
   customer_id: number | null
-  service_name: string | null
+  service_id: string | null
   start_at: Date
   end_at: Date
   status: string
@@ -21,12 +21,21 @@ function mapBooking(b: {
   customers: { name: string; whatsapp_id: string } | null
   businesses: { name: string }
   staff_members: { id: string; name: string; role: string } | null
+  services: { id: string; name: string; price: { toString: () => string }; duration_minutes: number } | null
 }): Booking {
   return {
     id: b.id,
     business_id: b.business_id,
     customer_id: b.customer_id,
-    service_name: b.service_name,
+    service_id: b.service_id,
+    service: b.services
+      ? {
+          id: b.services.id,
+          name: b.services.name,
+          price: Number(b.services.price.toString()),
+          duration_minutes: b.services.duration_minutes,
+        }
+      : null,
     start_at: b.start_at,
     end_at: b.end_at,
     status: b.status,
@@ -48,6 +57,7 @@ const BOOKING_INCLUDE = {
   customers: { select: { name: true, whatsapp_id: true } },
   businesses: { select: { name: true } },
   staff_members: { select: { id: true, name: true, role: true } },
+  services: { select: { id: true, name: true, price: true, duration_minutes: true } },
 } as const
 
 function revalidateBusinessBookingsPath(businessId: string) {
@@ -81,7 +91,7 @@ async function resolveCustomerId(
 
 export async function createBooking(data: {
   business_id: string
-  service_name?: string | null
+  service_id?: string | null
   start_at: string
   end_at: string
   status?: string
@@ -111,7 +121,7 @@ export async function createBooking(data: {
       data: {
         business_id: data.business_id,
         customer_id,
-        service_name: data.service_name || null,
+        service_id: data.service_id || null,
         start_at: new Date(data.start_at),
         end_at: new Date(data.end_at),
         status: data.status || "confirmed",
@@ -133,7 +143,7 @@ export async function createBooking(data: {
 export async function updateBooking(
   id: string,
   data: {
-    service_name?: string | null
+    service_id?: string | null
     start_at?: string
     end_at?: string
     status?: string
@@ -168,7 +178,7 @@ export async function updateBooking(
     }
 
     const updateData: Record<string, unknown> = { updated_at: new Date() }
-    if (data.service_name !== undefined) updateData.service_name = data.service_name
+    if (data.service_id !== undefined) updateData.service_id = data.service_id
     if (data.start_at !== undefined) updateData.start_at = new Date(data.start_at)
     if (data.end_at !== undefined) updateData.end_at = new Date(data.end_at)
     if (data.status !== undefined) updateData.status = data.status

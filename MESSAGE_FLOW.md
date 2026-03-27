@@ -173,7 +173,7 @@ def generate_response(self, message_body: str, wa_id: str, name: str,
     # Extract business_id from context
     business_id = business_context.get('business_id') if business_context else None
 
-    # Set business context for calendar tools (they'll read max_concurrent, etc.)
+    # Set business context for booking tools (they'll read max_concurrent, etc.)
     set_business_context(business_context)
 
     # 1. Get conversation history from database (scoped to business)
@@ -193,7 +193,7 @@ def generate_response(self, message_body: str, wa_id: str, name: str,
     # - AI personality and tone (from database)
     # - max_concurrent setting (from database)
     # - Business hours (from database)
-    # - Available calendar tools
+    # - Available booking tools
 
     # 3. Create message chain
     messages = [
@@ -202,12 +202,12 @@ def generate_response(self, message_body: str, wa_id: str, name: str,
         HumanMessage(content=message_body)  # Current user message
     ]
 
-    # 4. Call OpenAI GPT-4o-mini with calendar tools
+    # 4. Call OpenAI GPT-4o-mini with booking tools
     response = self.llm_with_tools.invoke(messages)
 
-    # 5. If AI wants to use calendar tools (like schedule_appointment)
+    # 5. If AI wants to use booking tools (like schedule_appointment)
     if response.tool_calls:
-        # Execute tools (e.g., create Google Calendar event)
+        # Execute tools (e.g., create appointment record)
         # Tools automatically respect business-specific max_concurrent setting
         tool_results = []
         for tool_call in response.tool_calls:
@@ -228,22 +228,22 @@ def generate_response(self, message_body: str, wa_id: str, name: str,
 ```
 
 **What happens:**
-1. **Sets** business context globally for calendar tools
+1. **Sets** business context globally for booking tools
 2. **Retrieves** conversation history from PostgreSQL (filtered by business)
 3. **Builds** system prompt dynamically from database:
    - Business personality and tone (editable by admin)
    - Services and prices (per business)
    - max_concurrent appointments (configurable per business)
    - Business hours and location
-   - Available calendar tools
+   - Available booking tools
 4. **Sends** to OpenAI GPT-4o-mini
-5. **If needed**, executes calendar tools (respecting business-specific limits)
+5. **If needed**, executes booking tools (respecting business-specific limits)
 6. **Stores** conversation in database (linked to business_id)
 7. **Returns** AI-generated response
 
 ---
 
-### **7. Calendar Tool Execution** ([app/services/calendar_tools.py](app/services/calendar_tools.py:179))
+### **7. Booking Tool Execution** ([app/services/calendar_tools.py](app/services/calendar_tools.py:179))
 
 When user says "quiero agendar una cita mañana a las 10 AM":
 
@@ -265,13 +265,12 @@ def schedule_appointment(whatsapp_id: str, summary: str,
     if has_overlap:
         return f"❌ Ya hay {event_count} citas en ese horario (máximo: {max_concurrent})"
 
-    # 3. Create Google Calendar event
-    event = calendar_service.create_event(
+    # 3. Create booking record in the in-house booking system
+    booking = booking_service.create_booking(
         summary="Corte y barba",
         start_time="2025-10-12T10:00:00",
         end_time="2025-10-12T11:00:00",
-        description=f"[WhatsApp ID: {whatsapp_id}]",
-        location="Calle 18 #25-30, Pasto"
+        whatsapp_id=whatsapp_id
     )
 
     return "✅ Tu cita está agendada para el 12 de octubre a las 10:00 AM"
@@ -281,7 +280,7 @@ def schedule_appointment(whatsapp_id: str, summary: str,
 1. **Saves** customer info to database
 2. **Reads** `max_concurrent` from business settings (e.g., 2 for this business)
 3. **Checks** calendar for availability (respects business-specific limit)
-4. **Creates** event in Google Calendar if available
+4. **Creates** appointment in the in-house booking system if available
 5. **Returns** confirmation message to AI
 6. **AI formats** confirmation for user
 
@@ -401,17 +400,17 @@ def send_message(data):
 │    ✓ Load conversation history (PostgreSQL)                │
 │    ✓ Build system prompt (barbería personality)            │
 │    ✓ Call OpenAI GPT-4o-mini                              │
-│    ✓ Execute calendar tools if needed                      │
+│    ✓ Execute booking tools if needed                       │
 │    ✓ Save conversation to DB                               │
 └─────────────┬───────────────────────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 7. CALENDAR TOOLS (app/services/calendar_tools.py)        │
+│ 7. BOOKING TOOLS (app/services/calendar_tools.py)         │
 │    If appointment requested:                                │
 │    ✓ Save customer to DB                                   │
-│    ✓ Check Google Calendar availability                    │
-│    ✓ Create calendar event                                 │
+│    ✓ Check booking availability                            │
+│    ✓ Create appointment                                    │
 │    Return: "✅ Cita agendada..."                           │
 └─────────────┬───────────────────────────────────────────────┘
               │
@@ -466,7 +465,7 @@ DATABASE_URL=""           # PostgreSQL connection string
 ### **3. External APIs**
 - **Meta WhatsApp Cloud API** - Receive/send messages
 - **OpenAI GPT-4o-mini** - Generate responses
-- **Google Calendar API** - Schedule appointments
+- **In-house booking APIs** - Schedule appointments
 
 ---
 
@@ -490,7 +489,7 @@ Load business-specific configuration from database:
   ↓
 Generate business-specific response using:
   - Dynamic prompts from database
-  - Business-specific calendar limits
+  - Business-specific booking limits
   - Conversation history filtered by business
   ↓
 Response sent with ACCESS_TOKEN from .env
@@ -526,7 +525,7 @@ Response sent with ACCESS_TOKEN from .env
 3. ✅ Loads conversation history (last 10 messages)
 4. ✅ Sends to GPT-4o-mini with system prompt (barbería personality)
 5. ✅ AI decides to use `schedule_appointment` tool
-6. ✅ Tool creates Google Calendar event
+6. ✅ Tool creates appointment record
 7. ✅ AI generates: "✅ Tu cita está agendada para el 12 de octubre a las 10:00 AM, David!"
 8. ✅ Formats for WhatsApp
 9. ✅ Sends to user
@@ -545,7 +544,7 @@ tail -f flask.log
 # Look for these patterns:
 # - "Processing message from..."
 # - "[TOOL] Tool calls detected..."
-# - "[CALENDAR] Event created..."
+# - "[BOOKING] Appointment created..."
 # - "Message sent successfully..."
 ```
 

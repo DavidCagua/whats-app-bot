@@ -4,7 +4,6 @@ import { canAccessBusiness, canEditBusiness, isSuperAdmin } from "@/lib/permissi
 import { notFound, redirect } from "next/navigation"
 import { BusinessSettingsForm } from "./components/business-settings-form"
 import { DeleteBusinessButton } from "./components/delete-business-button"
-import { GoogleCalendarSettings } from "./components/google-calendar-settings"
 import { WhatsAppSettings } from "./components/whatsapp-settings"
 import { AgentsSettingsForm } from "./components/agents-settings-form"
 import { SettingsTabs, type SettingsTab } from "./components/settings-tabs"
@@ -17,8 +16,6 @@ interface BusinessSettingsPageProps {
   }>
   searchParams: Promise<{
     tab?: string
-    calendar_connected?: string
-    calendar_error?: string
   }>
 }
 
@@ -27,7 +24,7 @@ export default async function BusinessSettingsPage({
   searchParams,
 }: BusinessSettingsPageProps) {
   const { id } = await params
-  const { tab, calendar_connected, calendar_error } = await searchParams
+  const { tab } = await searchParams
   const session = await auth()
 
   if (!canAccessBusiness(session, id)) {
@@ -54,27 +51,21 @@ export default async function BusinessSettingsPage({
   const canEdit = canEditBusiness(session, id)
   const canDelete = isSuperAdmin(session)
 
-  const calendarConnected = calendar_connected === "true"
-  const calendarError = calendar_error
-
-  // When returning from calendar OAuth, open Integrations tab
   const validTabs: SettingsTab[] = ["general", "integrations", "agents"]
   const defaultTab: SettingsTab =
     (tab as SettingsTab) && validTabs.includes(tab as SettingsTab)
       ? (tab as SettingsTab)
-      : calendar_connected !== undefined || calendar_error !== undefined
-        ? "integrations"
-        : "general"
+      : "general"
 
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Business Settings</h1>
+          <h1 className="text-3xl font-bold">Configuración del negocio</h1>
           <p className="text-muted-foreground">
             {canEdit
-              ? `Configure settings for ${business.name}`
-              : `View settings for ${business.name}`}
+              ? `Configura los ajustes de ${business.name}`
+              : `Ver configuración de ${business.name}`}
           </p>
         </div>
         {canDelete && (
@@ -94,12 +85,6 @@ export default async function BusinessSettingsPage({
         integrationsContent={
           <>
             {isSuperAdmin(session) && <WhatsAppSettings businessId={id} />}
-            <GoogleCalendarSettings
-              businessId={id}
-              readOnly={!canEdit}
-              showSuccessMessage={calendarConnected}
-              errorMessage={calendarError}
-            />
           </>
         }
         agentsContent={

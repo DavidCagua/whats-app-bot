@@ -411,6 +411,36 @@ class Product(Base):
         }
 
 
+class Service(Base):
+    """Model for bookable services in a business catalog."""
+    __tablename__ = 'services'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    price = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(10), default='COP')
+    duration_minutes = Column(Integer, nullable=False, default=60)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'name': self.name,
+            'description': self.description,
+            'price': float(self.price) if self.price else 0,
+            'currency': self.currency,
+            'duration_minutes': self.duration_minutes,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Order(Base):
     """Model for customer orders."""
     __tablename__ = 'orders'
@@ -485,6 +515,7 @@ class Booking(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     customer_id = Column(Integer, ForeignKey('customers.id', ondelete='SET NULL'), nullable=True, index=True)
     service_name = Column(String(255), nullable=True)
+    service_id = Column(UUID(as_uuid=True), ForeignKey('services.id', ondelete='SET NULL'), nullable=True, index=True)
     start_at = Column(DateTime(timezone=True), nullable=False, index=True)
     end_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(String(20), nullable=False, default='confirmed')  # pending/confirmed/cancelled/no_show/completed
@@ -495,6 +526,7 @@ class Booking(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     customer = relationship("Customer", backref="bookings")
+    service = relationship("Service", backref="bookings")
 
     def to_dict(self):
         return {
@@ -502,6 +534,7 @@ class Booking(Base):
             'business_id': str(self.business_id),
             'customer_id': self.customer_id,
             'service_name': self.service_name,
+            'service_id': str(self.service_id) if self.service_id else None,
             'start_at': self.start_at.isoformat() if self.start_at else None,
             'end_at': self.end_at.isoformat() if self.end_at else None,
             'status': self.status,

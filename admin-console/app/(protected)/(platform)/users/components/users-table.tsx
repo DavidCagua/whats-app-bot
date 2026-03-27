@@ -37,18 +37,18 @@ export function UsersTable({ data }: UsersTableProps) {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>User</TableHead>
-            <TableHead>System Role</TableHead>
-            <TableHead>Businesses</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead className="text-right">Actions</TableHead>
+            <TableHead>Usuario</TableHead>
+            <TableHead>Rol en el sistema</TableHead>
+            <TableHead>Negocios</TableHead>
+            <TableHead>Estado</TableHead>
+            <TableHead className="text-right">Acciones</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {data.length === 0 ? (
             <TableRow>
               <TableCell colSpan={5} className="text-center text-muted-foreground">
-                No users found
+                No se encontraron usuarios
               </TableCell>
             </TableRow>
           ) : (
@@ -56,7 +56,7 @@ export function UsersTable({ data }: UsersTableProps) {
               <TableRow key={user.id}>
                 <TableCell>
                   <div className="flex flex-col">
-                    <span className="font-medium">{user.full_name || "No name"}</span>
+                    <span className="font-medium">{user.full_name || "Sin nombre"}</span>
                     <span className="text-sm text-muted-foreground">{user.email}</span>
                   </div>
                 </TableCell>
@@ -64,18 +64,18 @@ export function UsersTable({ data }: UsersTableProps) {
                   {user.role === "super_admin" ? (
                     <Badge variant="default" className="gap-1">
                       <Shield className="h-3 w-3" />
-                      Super Admin
+                      Súper Admin
                     </Badge>
                   ) : (
                     <Badge variant="secondary" className="gap-1">
                       <User className="h-3 w-3" />
-                      Business User
+                      Usuario de negocio
                     </Badge>
                   )}
                 </TableCell>
                 <TableCell>
                   {user.businesses.length === 0 ? (
-                    <span className="text-muted-foreground text-sm">No businesses</span>
+                    <span className="text-muted-foreground text-sm">Sin negocios</span>
                   ) : (
                     <div className="flex flex-wrap gap-1">
                       {user.businesses.map((business) => (
@@ -91,9 +91,9 @@ export function UsersTable({ data }: UsersTableProps) {
                 </TableCell>
                 <TableCell>
                   {user.is_active ? (
-                    <Badge variant="default" className="bg-green-500">Active</Badge>
+                    <Badge variant="default" className="bg-green-500">Activo</Badge>
                   ) : (
-                    <Badge variant="secondary">Inactive</Badge>
+                    <Badge variant="secondary">Inactivo</Badge>
                   )}
                 </TableCell>
                 <TableCell className="text-right">

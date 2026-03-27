@@ -31,18 +31,18 @@ export default async function BusinessesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">Businesses</h1>
+          <h1 className="text-3xl font-bold">Negocios</h1>
           <p className="text-muted-foreground">
             {isSuperAdmin(session)
-              ? "Manage all businesses and their WhatsApp configurations"
-              : "View your business configurations"}
+              ? "Gestiona todos los negocios y sus configuraciones de WhatsApp"
+              : "Visualiza las configuraciones de tu negocio"}
           </p>
         </div>
         {canAddBusiness && (
           <Button asChild>
             <Link href="/businesses/new">
               <Plus className="mr-2 h-4 w-4" />
-              Add Business
+              Agregar negocio
             </Link>
           </Button>
         )}

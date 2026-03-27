@@ -25,14 +25,14 @@ export function StaffForm({ businessId }: StaffFormProps) {
       <DialogTrigger asChild>
         <Button>
           <Plus className="mr-2 h-4 w-4" />
-          Add Staff Member
+          Agregar personal
         </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add Staff Member</DialogTitle>
+          <DialogTitle>Agregar personal</DialogTitle>
           <DialogDescription>
-            Create a new staff member for your business
+            Crea un nuevo miembro del personal para tu negocio
           </DialogDescription>
         </DialogHeader>
         <StaffFormDialog

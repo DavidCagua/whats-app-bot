@@ -49,12 +49,12 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
     try {
       const result = await removeUserFromBusiness(userId, businessId)
       if (result.success) {
-        toast.success("Team member removed")
+        toast.success("Miembro del equipo eliminado")
       } else {
-        toast.error(result.error || "Failed to remove team member")
+        toast.error(result.error || "No se pudo eliminar al miembro del equipo")
       }
     } catch {
-      toast.error("An error occurred")
+      toast.error("Ocurrió un error")
     } finally {
       setRemovingId(null)
     }
@@ -65,25 +65,25 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Email</TableHead>
-            <TableHead>Role</TableHead>
-            <TableHead>Status</TableHead>
-            {canEdit && <TableHead className="text-right">Actions</TableHead>}
+            <TableHead>Nombre</TableHead>
+            <TableHead>Correo electrónico</TableHead>
+            <TableHead>Rol</TableHead>
+            <TableHead>Estado</TableHead>
+            {canEdit && <TableHead className="text-right">Acciones</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
           {data.length === 0 ? (
             <TableRow>
               <TableCell colSpan={canEdit ? 5 : 4} className="text-center text-muted-foreground">
-                No team members yet
+                Aún no hay miembros en el equipo
               </TableCell>
             </TableRow>
           ) : (
             data.map((member) => (
               <TableRow key={member.id}>
                 <TableCell className="font-medium">
-                  {member.full_name || "No name"}
+                  {member.full_name || "Sin nombre"}
                 </TableCell>
                 <TableCell>{member.email}</TableCell>
                 <TableCell>
@@ -93,9 +93,9 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
                 </TableCell>
                 <TableCell>
                   {member.is_active ? (
-                    <Badge variant="default" className="bg-green-500">Active</Badge>
+                    <Badge variant="default" className="bg-green-500">Activo</Badge>
                   ) : (
-                    <Badge variant="secondary">Inactive</Badge>
+                    <Badge variant="secondary">Inactivo</Badge>
                   )}
                 </TableCell>
                 {canEdit && (
@@ -112,19 +112,19 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
                       </AlertDialogTrigger>
                       <AlertDialogContent>
                         <AlertDialogHeader>
-                          <AlertDialogTitle>Remove team member?</AlertDialogTitle>
+                          <AlertDialogTitle>¿Eliminar miembro del equipo?</AlertDialogTitle>
                           <AlertDialogDescription>
-                            This will remove <strong>{member.full_name || member.email}</strong> from this business.
-                            They will no longer have access to this business.
+                            Esto eliminará a <strong>{member.full_name || member.email}</strong> de este negocio.
+                            Ya no tendrá acceso a este negocio.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogCancel>Cancelar</AlertDialogCancel>
                           <AlertDialogAction
                             onClick={() => handleRemove(member.id)}
                             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                           >
-                            Remove
+                            Eliminar
                           </AlertDialogAction>
                         </AlertDialogFooter>
                       </AlertDialogContent>

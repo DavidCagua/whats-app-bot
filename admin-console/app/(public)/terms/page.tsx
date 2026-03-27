@@ -31,7 +31,7 @@ export default function TermsOfServicePage() {
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li>WhatsApp integration for customer communication</li>
               <li>AI-powered natural language processing for appointment scheduling</li>
-              <li>Google Calendar integration for appointment management</li>
+              <li>In-platform booking management for appointment operations</li>
               <li>Admin console for business configuration and management</li>
               <li>Multi-tenant architecture supporting multiple businesses</li>
             </ul>
@@ -75,26 +75,24 @@ export default function TermsOfServicePage() {
           <section>
             <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">5. Third-Party Services</h2>
             <p className="text-gray-700 leading-relaxed">
-              The Service integrates with third-party services including WhatsApp (Meta), Google Calendar, and OpenAI. Your use of these third-party services is subject to their respective terms and policies:
+              The Service integrates with third-party services including WhatsApp (Meta) and OpenAI. Your use of these third-party services is subject to their respective terms and policies:
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li>WhatsApp Business Terms: <a href="https://www.whatsapp.com/legal/business-terms" className="text-blue-600 hover:underline">https://www.whatsapp.com/legal/business-terms</a></li>
-              <li>Google Terms of Service: <a href="https://policies.google.com/terms" className="text-blue-600 hover:underline">https://policies.google.com/terms</a></li>
               <li>OpenAI Terms: <a href="https://openai.com/policies/terms-of-use" className="text-blue-600 hover:underline">https://openai.com/policies/terms-of-use</a></li>
             </ul>
           </section>
 
           <section>
-            <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">6. Google Calendar Access</h2>
+            <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">6. Appointment Data Access</h2>
             <p className="text-gray-700 leading-relaxed">
-              When you authorize our Service to access your Google Calendar:
+              When you use our appointment scheduling features:
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
-              <li>We will only access calendars you explicitly authorize</li>
-              <li>We will create, read, update, and delete calendar events as needed for appointment scheduling</li>
-              <li>Your credentials are encrypted and stored securely</li>
-              <li>You can revoke access at any time through the admin console</li>
-              <li>Revoking access will disable appointment scheduling features</li>
+              <li>We will create, read, update, and delete appointment records as needed for scheduling</li>
+              <li>Your business and customer data is stored securely with access controls</li>
+              <li>You can request account or data deletion at any time</li>
+              <li>Deleting your account will disable appointment scheduling features</li>
             </ul>
           </section>
 
@@ -105,7 +103,7 @@ export default function TermsOfServicePage() {
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li>Scheduled maintenance</li>
-              <li>Third-party service outages (WhatsApp, Google, OpenAI)</li>
+              <li>Third-party service outages (WhatsApp, OpenAI)</li>
               <li>Technical issues or system failures</li>
               <li>Force majeure events</li>
             </ul>

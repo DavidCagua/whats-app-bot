@@ -4,19 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a WhatsApp bot for a Colombian barbería (barber shop) that integrates WhatsApp Business API, Google Calendar, and OpenAI/LangChain for appointment scheduling and customer service. The bot speaks Spanish with Colombian expressions and handles appointment booking through natural language conversations.
+This is a WhatsApp bot for a Colombian barbería (barber shop) that integrates WhatsApp Business API and OpenAI/LangChain for appointment scheduling and customer service. The bot speaks Spanish with Colombian expressions and handles appointment booking through natural language conversations.
 
 ## Architecture
 
 ### Core Flow
 ```
-WhatsApp User → Meta Cloud API → Flask Webhook → LangChain Service → Calendar Tools → Response
+WhatsApp User → Meta Cloud API → Flask Webhook → LangChain Service → Booking Tools → Response
 ```
 
 ### Key Components
 - **Flask App** (`app/__init__.py`): Factory pattern with webhook endpoints in `app/views.py`
 - **LangChain Service** (`app/services/langchain_service.py`): Main AI orchestrator with conversation memory and tool calling
-- **Calendar Integration** (`app/services/calendar_service.py` + `calendar_tools.py`): Google Calendar API with LangChain tools
+- **Booking Tools** (`app/services/calendar_tools.py`): In-house booking and availability tools with LangChain
 - **WhatsApp Utils** (`app/utils/whatsapp_utils.py`): Message processing and API calls to Meta's WhatsApp Business API
 - **Business Logic** (`app/services/barberia_info.py`): Services, pricing, and business information
 
@@ -38,9 +38,6 @@ pip install -r requirements.txt
 cp example.env .env
 # Edit .env with your API keys
 
-# Set up Google Calendar OAuth
-python setup_calendar_auth.py
-
 # Run development server
 python run.py
 ```
@@ -51,9 +48,6 @@ The project has extensive test coverage with scenario-based testing:
 ```bash
 # Test main assistant functionality
 python test_barberia_assistant.py
-
-# Test calendar integration
-python test_calendar_tools.py
 
 # Test complete appointment flows
 python test_complete_appointment_flow.py
@@ -78,9 +72,9 @@ ngrok http 8000 --domain your-domain.ngrok-free.app
 
 ### AI Service Architecture
 - **Primary AI**: LangChain with GPT-4o-mini for main conversations
-- **Tool Calling**: Calendar operations through LangChain tools (create, list, update, delete events)
+- **Tool Calling**: Booking operations through LangChain tools (create, list, update, delete appointments)
 - **Conversation Memory**: Persistent storage using Python `shelve`, keeps last 10 messages per user
-- **Duplicate Prevention**: Built-in logic prevents multiple calendar events in same conversation
+- **Duplicate Prevention**: Built-in logic prevents duplicate appointment creation in the same conversation
 - **Timezone Handling**: Automatic Colombia timezone (UTC-5) conversion
 
 ### WhatsApp Integration
@@ -89,10 +83,10 @@ ngrok http 8000 --domain your-domain.ngrok-free.app
 - **Character Limits**: Handles 4096 char WhatsApp limit with message splitting
 - **Error Recovery**: Fallback responses when AI services fail
 
-### Calendar System
+### Booking System
 - **Capacity Management**: Maximum 2 simultaneous appointments to prevent overbooking
 - **Natural Language**: Converts "mañana a las 3" to proper ISO datetime format
-- **Overlap Detection**: Checks existing events before creating new ones
+- **Overlap Detection**: Checks existing bookings before creating new ones
 - **Business Hours**: Integrated with actual barbería schedule
 
 ### Colombian Business Context
@@ -121,8 +115,6 @@ OPENAI_ASSISTANT_ID=""      # Assistant ID (legacy support)
 ```
 
 ### Authentication Files
-- `client_secret_*.json`: Google OAuth2 credentials (download from Google Cloud Console)
-- `token.json`: Generated during `setup_calendar_auth.py` (don't commit)
 - `conversation_history.db`: Auto-created for user conversations
 - `threads_db`: Legacy OpenAI threads storage
 
@@ -132,22 +124,21 @@ OPENAI_ASSISTANT_ID=""      # Assistant ID (legacy support)
 - All webhooks validated with `@signature_required` decorator
 - HMAC SHA256 signature verification using Meta app secret
 - Secrets managed through environment variables only
-- Google OAuth2 with appropriate calendar scopes
 
 ### Testing Patterns
 - **User Isolation**: Test users with unique IDs (`test_client_001`)
 - **Scenario Testing**: Complete conversation flows from greeting to appointment confirmation
 - **Error Simulation**: Network failures, API timeouts, invalid inputs
-- **Integration Testing**: Real API calls to Google Calendar (uses test calendar)
+- **Integration Testing**: End-to-end booking flow validation against app APIs and DB state
 
-### Calendar Tool Usage
-When working with calendar functionality, understand these LangChain tools:
-- `list_calendar_events`: View upcoming appointments
-- `create_calendar_event`: Book appointments (includes overlap checking)
+### Booking Tool Usage
+When working with booking functionality, understand these LangChain tools:
+- `list_appointments`: View upcoming appointments
+- `schedule_appointment`: Book appointments (includes overlap checking)
 - `get_available_slots`: Check availability by time range (morning/afternoon/evening)
-- `update_calendar_event`: Modify existing appointments
-- `delete_calendar_event`: Cancel appointments by event ID
-- `get_calendar_event`: Get specific appointment details
+- `reschedule_appointment`: Modify existing appointments
+- `cancel_appointment`: Cancel appointments by booking ID
+- `check_appointment`: Get specific appointment details
 
 ### Message Flow Debugging
 - All operations logged with context (`[CALENDAR]`, `[TOOL]`, `[RESPONSE]` prefixes)

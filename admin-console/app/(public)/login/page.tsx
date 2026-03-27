@@ -33,12 +33,12 @@ export default function LoginPage() {
       if (result?.error) {
         toast.error(result.error)
       } else {
-        toast.success("Login successful!")
+        toast.success("¡Sesión iniciada exitosamente!")
         router.push("/")
         router.refresh()
       }
     } catch {
-      toast.error("An error occurred during login")
+      toast.error("Ocurrió un error al iniciar sesión")
     } finally {
       setIsLoading(false)
     }
@@ -51,19 +51,19 @@ export default function LoginPage() {
           <div className="mx-auto mb-2 flex justify-center">
             <Image src={logo} alt="Logo" width={120} height={120} priority className="object-contain" />
           </div>
-          <CardTitle className="text-2xl font-bold text-center">Super Admin Console</CardTitle>
+          <CardTitle className="text-2xl font-bold text-center">Consola de Administración</CardTitle>
           <CardDescription>
-            Omniabot helps businesses automate customer interactions such as appointment scheduling and support via WhatsApp. Enter your credentials to access the admin panel.
+            Omniabot ayuda a los negocios a automatizar la atención al cliente, como la programación de citas y soporte por WhatsApp. Ingresa tus credenciales para acceder al panel de administración.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email">Correo electrónico</Label>
               <Input
                 id="email"
                 type="email"
-                placeholder="admin@console.com"
+                placeholder="admin@consola.com"
                 value={formData.email}
                 onChange={(e) =>
                   setFormData({ ...formData, email: e.target.value })
@@ -73,7 +73,7 @@ export default function LoginPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password">Contraseña</Label>
               <Input
                 id="password"
                 type="password"
@@ -87,7 +87,7 @@ export default function LoginPage() {
               />
             </div>
             <Button type="submit" className="w-full" disabled={isLoading}>
-              {isLoading ? "Signing in..." : "Sign In"}
+              {isLoading ? "Iniciando sesión..." : "Iniciar sesión"}
             </Button>
           </form>
         </CardContent>

@@ -74,15 +74,15 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
       })
 
       if (result.success) {
-        toast.success("WhatsApp number added successfully!")
+        toast.success("¡Número de WhatsApp agregado exitosamente!")
         setFormData({ phoneNumberId: "", phoneNumber: "", displayName: "" })
         setShowAddForm(false)
         await loadNumbers()
       } else {
-        toast.error(result.error || "Failed to add WhatsApp number")
+        toast.error(result.error || "No se pudo agregar el número de WhatsApp")
       }
     } catch (error) {
-      toast.error("An error occurred while adding the number")
+      toast.error("Ocurrió un error al agregar el número")
       console.error(error)
     } finally {
       setIsSubmitting(false)
@@ -95,13 +95,13 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
     try {
       const result = await deleteWhatsAppNumber(numberToDelete)
       if (result.success) {
-        toast.success("WhatsApp number deleted successfully!")
+        toast.success("¡Número de WhatsApp eliminado exitosamente!")
         await loadNumbers()
       } else {
-        toast.error(result.error || "Failed to delete WhatsApp number")
+        toast.error(result.error || "No se pudo eliminar el número de WhatsApp")
       }
     } catch (error) {
-      toast.error("An error occurred while deleting the number")
+      toast.error("Ocurrió un error al eliminar el número")
       console.error(error)
     } finally {
       setDeleteDialogOpen(false)
@@ -113,13 +113,13 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
     try {
       const result = await toggleWhatsAppNumberStatus(id)
       if (result.success) {
-        toast.success("Status updated successfully!")
+        toast.success("¡Estado actualizado exitosamente!")
         await loadNumbers()
       } else {
-        toast.error(result.error || "Failed to update status")
+        toast.error(result.error || "No se pudo actualizar el estado")
       }
     } catch (error) {
-      toast.error("An error occurred while updating the status")
+      toast.error("Ocurrió un error al actualizar el estado")
       console.error(error)
     }
   }
@@ -130,11 +130,11 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Phone className="h-5 w-5" />
-            WhatsApp Configuration
+            Configuración de WhatsApp
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground">Loading...</p>
+          <p className="text-sm text-muted-foreground">Cargando...</p>
         </CardContent>
       </Card>
     )
@@ -146,23 +146,23 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Phone className="h-5 w-5" />
-            WhatsApp Configuration
+            Configuración de WhatsApp
           </CardTitle>
           <CardDescription>
-            Manage WhatsApp Business phone numbers for this business
+            Gestiona los números de WhatsApp Business para este negocio
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           {/* Help Documentation */}
           <div className="text-sm bg-blue-50 dark:bg-blue-950 p-4 rounded-lg space-y-2">
             <p className="font-semibold text-blue-900 dark:text-blue-100">
-              Super Admin Instructions:
+              Instrucciones para Super Admin:
             </p>
             <ol className="list-decimal pl-4 space-y-1 text-blue-800 dark:text-blue-200">
-              <li>Business owner provides their WhatsApp Business phone number</li>
-              <li>Enter the phone number below (with country code, e.g., +573001234567)</li>
+              <li>El dueño del negocio proporciona su número de WhatsApp Business</li>
+              <li>Ingresa el número de teléfono abajo (con código de país, ej., +573001234567)</li>
               <li>
-                <strong>Optional:</strong> If using Meta&apos;s WhatsApp Business API, you can also add the Phone Number ID from Meta Business Manager for more reliable routing
+                <strong>Opcional:</strong> Si usas la API de WhatsApp Business de Meta, también puedes agregar el ID del número desde el Administrador de Meta Business para un enrutamiento más confiable
               </li>
             </ol>
             <a
@@ -179,7 +179,7 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
           {/* Existing Numbers */}
           {numbers.length > 0 && (
             <div className="space-y-3">
-              <h3 className="text-sm font-semibold">Configured Numbers</h3>
+              <h3 className="text-sm font-semibold">Números configurados</h3>
               {numbers.map((number) => (
                 <div
                   key={number.id}
@@ -195,11 +195,11 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                       )}
                       {number.is_active ? (
                         <Badge variant="default" className="ml-2">
-                          Active
+                          Activo
                         </Badge>
                       ) : (
                         <Badge variant="secondary" className="ml-2">
-                          Inactive
+                          Inactivo
                         </Badge>
                       )}
                     </div>
@@ -212,7 +212,7 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                   <div className="flex items-center gap-2">
                     <div className="flex items-center gap-2">
                       <Label htmlFor={`active-${number.id}`} className="text-sm">
-                        Active
+                        Activo
                       </Label>
                       <Switch
                         id={`active-${number.id}`}
@@ -241,53 +241,53 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
             <form onSubmit={handleAddNumber} className="space-y-4 border p-4 rounded-lg">
               <div className="space-y-2">
                 <Label htmlFor="phoneNumber">
-                  Phone Number <span className="text-destructive">*</span>
+                  Número de teléfono <span className="text-destructive">*</span>
                 </Label>
                 <Input
                   id="phoneNumber"
-                  placeholder="e.g., +573001234567"
+                  placeholder="ej., +573001234567"
                   value={formData.phoneNumber}
                   onChange={(e) => setFormData({ ...formData, phoneNumber: e.target.value })}
                   required
                 />
                 <p className="text-xs text-muted-foreground">
-                  The WhatsApp Business phone number (with country code)
+                  El número de WhatsApp Business (con código de país)
                 </p>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="displayName">Display Name (Optional)</Label>
+                <Label htmlFor="displayName">Nombre de visualización (Opcional)</Label>
                 <Input
                   id="displayName"
-                  placeholder="e.g., Main Line"
+                  placeholder="ej., Línea principal"
                   value={formData.displayName}
                   onChange={(e) => setFormData({ ...formData, displayName: e.target.value })}
                 />
                 <p className="text-xs text-muted-foreground">
-                  A friendly name to identify this number
+                  Un nombre amigable para identificar este número
                 </p>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="phoneNumberId">
-                  Phone Number ID (Optional - Meta only)
+                  ID del número de teléfono (Opcional - solo Meta)
                 </Label>
                 <Input
                   id="phoneNumberId"
-                  placeholder="e.g., 123456789012345"
+                  placeholder="ej., 123456789012345"
                   value={formData.phoneNumberId}
                   onChange={(e) =>
                     setFormData({ ...formData, phoneNumberId: e.target.value })
                   }
                 />
                 <p className="text-xs text-muted-foreground">
-                  The unique ID from Meta Business Manager (15-20 digits). Only needed if using Meta&apos;s WhatsApp Business API.
+                  El ID único del Administrador de Meta Business (15-20 dígitos). Solo necesario si usas la API de WhatsApp Business de Meta.
                 </p>
               </div>
 
               <div className="flex gap-2">
                 <Button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "Adding..." : "Add Number"}
+                  {isSubmitting ? "Agregando..." : "Agregar número"}
                 </Button>
                 <Button
                   type="button"
@@ -297,22 +297,22 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                     setFormData({ phoneNumberId: "", phoneNumber: "", displayName: "" })
                   }}
                 >
-                  Cancel
+                  Cancelar
                 </Button>
               </div>
             </form>
           ) : (
             <Button onClick={() => setShowAddForm(true)} className="w-full">
               <Plus className="h-4 w-4 mr-2" />
-              Add WhatsApp Number
+              Agregar número de WhatsApp
             </Button>
           )}
 
           {numbers.length === 0 && !showAddForm && (
             <div className="text-center py-8 text-muted-foreground">
               <Phone className="h-12 w-12 mx-auto mb-2 opacity-50" />
-              <p className="text-sm">No WhatsApp numbers configured yet</p>
-              <p className="text-xs mt-1">Add a number to enable WhatsApp bot for this business</p>
+              <p className="text-sm">Aún no hay números de WhatsApp configurados</p>
+              <p className="text-xs mt-1">Agrega un número para habilitar el bot de WhatsApp en este negocio</p>
             </div>
           )}
         </CardContent>
@@ -322,18 +322,18 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete WhatsApp Number?</AlertDialogTitle>
+            <AlertDialogTitle>¿Eliminar número de WhatsApp?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will remove the WhatsApp number from this business. The bot will no longer
-              respond to messages sent to this number. This action cannot be undone.
+              Esto eliminará el número de WhatsApp de este negocio. El bot dejará de
+              responder mensajes enviados a este número. Esta acción no se puede deshacer.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => setNumberToDelete(null)}>
-              Cancel
+              Cancelar
             </AlertDialogCancel>
             <AlertDialogAction onClick={handleDeleteNumber} className="bg-destructive">
-              Delete
+              Eliminar
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -1,6 +1,6 @@
 # WhatsApp AI Agent
 
-A production-ready WhatsApp bot built on Meta's Cloud API that provides intelligent conversational AI with **multi-agent support** (orders, bookings), calendar integration, and multi-tenant business support.
+A production-ready WhatsApp bot built on Meta's Cloud API that provides intelligent conversational AI with **multi-agent support** (orders, bookings) and multi-tenant business support.
 
 ## What It Does
 
@@ -8,9 +8,9 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
 - **Multi-Agent Architecture**: Routes messages to enabled agents per business (e.g. **Order Agent** for product orders, **Booking Agent** for appointments). ConversationManager persists agent state updates; for Order agent, the executor loads session first so the backend is the single source of truth
 - **Order Agent (Planner / Executor / Response)**: No LLM tool loop. Per turn: (1) **Planner** LLM outputs one intent + params; (2) **Executor** validates intent against order state machine, runs one tool, updates session; (3) **Response** LLM generates reply from actual tool result and cart state—never from LLM belief. Cart lives only in session; cart changes only via tools; response shows real cart after mutations
 - **Order State Machine**: Explicit states in `order_context.state`: GREETING → ORDERING → COLLECTING_DELIVERY → READY_TO_PLACE. Backend restricts which intents are allowed per state (e.g. no PLACE_ORDER in ORDERING). Cart debug logging (cart_before / tool / cart_after) for add/remove/update
-- **Booking Agent**: LangChain tool calling with Google Calendar (list, create, update, delete events), availability checks, business-specific concurrency limits
+- **Booking Agent**: LangChain tool calling for in-house bookings and availability checks with business-specific concurrency limits
 - **Session State**: Short-term state in `conversation_sessions` (active agents, order_context with items, total, delivery_info, state, last_order_id). Long-term history in `conversations`. State derived on load when missing; session expiration (e.g. 2h) resets context but keeps the row
-- **Dynamic Prompts & Settings**: Business settings (menu URL, products enabled, calendar, agents) configurable from the Admin Console
+- **Dynamic Prompts & Settings**: Business settings (menu URL, products enabled, agents) configurable from the Admin Console
 - **Conversational Flow**: Conversation history in PostgreSQL; Order agent uses two LLM calls per turn (planner + response generator); WhatsApp-friendly formatting (bold, character limits)
 
 ## Architecture Overview
@@ -43,7 +43,7 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
 │    Order: Planner (intent+params) → Order flow executor      │
 │           (validate state, run one tool, update session)      │
 │           → Response generator (from tool result + cart)     │
-│    Booking: LLM + calendar tools (slots, create, update)     │
+│    Booking: LLM + booking tools (slots, create, update)       │
 │    Session state updated (order_context, state, active_agents)│
 └─────────────┬───────────────────────────────────────────────┘
               │
@@ -65,7 +65,7 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
 - **Order Tools** (`app/services/order_tools.py`): Product search (name + ingredients), cart (session only), delivery info, place_order (validates cart from session)
 - **Session State** (`app/database/session_state_service.py`): conversation_sessions (order_context with state, items, delivery_info, active_agents, last_order_id); state derived when missing; expiration on read
 - **Database** (`app/database/`): Businesses, products, orders, customers, conversation_sessions, conversations
-- **Admin Console** (`admin-console/`): Businesses, Products, Orders, Settings (menu URL, products on/off, agents, calendar)
+- **Admin Console** (`admin-console/`): Businesses, Products, Orders, Settings (menu URL, products on/off, agents)
 
 ### Order Flow & Session Lifecycle
 
@@ -81,14 +81,13 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
 
 ### Idempotency
 - **Webhook Message Deduplication**: Implemented message ID tracking to prevent processing the same WhatsApp message twice. Uses database storage (PostgreSQL) for persistent deduplication in production, with automatic fallback to in-memory LRU cache with 24-hour TTL for local development. Duplicate webhooks return 200 OK immediately without re-processing.
-- **Calendar Events**: Basic duplicate prevention checks for recent appointment creation (within 5 minutes) to avoid duplicate calendar events in the same conversation
+- **Bookings**: Basic duplicate prevention checks for recent appointment creation (within 5 minutes) to avoid duplicate bookings in the same conversation
 - **Database Writes**: Conversation history and customer records use upsert patterns where applicable
 - **Implementation**: Message IDs are extracted from Meta webhook payload (`messages[0].id`) and stored in `processed_messages` table (or memory cache). The deduplication check happens before message processing in the webhook handler (`app/views.py`).
 
 ### Retries
 - **WhatsApp API Calls**: HTTP requests to Meta API include timeout handling (10 seconds) but no automatic retry logic. Failed sends are logged but not retried
 - **OpenAI API**: LangChain's ChatOpenAI client uses default retry behavior from the OpenAI SDK
-- **Google Calendar API**: Uses google-api-python-client with default retry mechanisms
 - **TODO**: Consider implementing exponential backoff retry for critical WhatsApp message sends
 
 ### Logging
@@ -100,7 +99,6 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
 ### Rate Limits
 - **Meta WhatsApp API**: No explicit rate limit handling implemented. Meta enforces rate limits per phone number; monitor for 429 responses
 - **OpenAI API**: Relies on OpenAI SDK's built-in rate limit handling
-- **Google Calendar API**: No explicit rate limit handling; Google enforces quotas per project
 - **TODO**: Implement rate limit monitoring and backoff strategies for production scale
 
 ## Local Setup
@@ -109,7 +107,6 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
 - Python 3.8+
 - PostgreSQL database (or Supabase)
 - Meta Developer Account with WhatsApp Business API access
-- Google Cloud Project with Calendar API enabled
 - OpenAI API key
 
 ### Installation
@@ -148,19 +145,13 @@ A production-ready WhatsApp bot built on Meta's Cloud API that provides intellig
    python run_migration.py
    ```
 
-4. **Google Calendar setup:**
-   ```bash
-   # Follow CALENDAR_INTEGRATION.md for OAuth setup
-   python setup_calendar_auth.py
-   ```
-
-5. **Run the application:**
+4. **Run the application:**
    ```bash
    python run.py
    ```
    Server runs on `http://127.0.0.1:8000`
 
-6. **Configure webhook (Production):**
+5. **Configure webhook (Production):**
    - Use ngrok or similar to expose localhost: `ngrok http 8000 --domain your-domain.ngrok-free.app`
    - In Meta App Dashboard → WhatsApp → Configuration:
      - Callback URL: `https://your-domain.ngrok-free.app/webhook`
@@ -205,7 +196,7 @@ You can test the full webhook → agent → tools flow locally without Meta API 
 - Server logs show full execution flow
 - Messages are logged with `[MOCK MODE]` prefix instead of being sent
 - Tracing information is available
-- Tool calls execute normally (calendar tools may need Google credentials)
+- Tool calls execute normally
 
 See `fixtures/README.md` for creating custom fixtures.
 
@@ -297,7 +288,6 @@ Each agent run traces:
 ## Documentation
 
 - [MESSAGE_FLOW.md](MESSAGE_FLOW.md) - Detailed message processing flow
-- [CALENDAR_INTEGRATION.md](CALENDAR_INTEGRATION.md) - Google Calendar setup guide
 - [ROLE_SYSTEM.md](ROLE_SYSTEM.md) - Multi-tenant role and permission system
 - [DATABASE_MIGRATIONS.md](DATABASE_MIGRATIONS.md) - Database schema and migrations
 

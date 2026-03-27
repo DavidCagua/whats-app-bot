@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
 import { Loader2, Save } from "lucide-react"
 
-const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+const DAY_NAMES = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"]
 
 type DayRule = {
   day_of_week: number
@@ -79,11 +79,11 @@ export function AvailabilitySettings({
   const rulesEditor = (
     <>
       <div className="hidden sm:grid grid-cols-[120px_64px_100px_100px_120px] gap-2 text-xs text-muted-foreground font-medium">
-        <span>Day</span>
-        <span>Active</span>
-        <span>Opens</span>
-        <span>Closes</span>
-        <span>Slot (min)</span>
+        <span>Día</span>
+        <span>Activo</span>
+        <span>Abre</span>
+        <span>Cierra</span>
+        <span>Turno (min)</span>
       </div>
 
       <Separator className="hidden sm:block" />
@@ -107,12 +107,12 @@ export function AvailabilitySettings({
               }
             />
             <span className="text-xs sm:hidden text-muted-foreground">
-              {rule.is_active ? "Active" : "Closed"}
+              {rule.is_active ? "Activo" : "Cerrado"}
             </span>
           </div>
 
           <div className="space-y-0.5 sm:space-y-0">
-            <Label className="text-xs sm:hidden text-muted-foreground">Opens</Label>
+            <Label className="text-xs sm:hidden text-muted-foreground">Abre</Label>
             <Input
               type="time"
               value={rule.open_time}
@@ -123,7 +123,7 @@ export function AvailabilitySettings({
           </div>
 
           <div className="space-y-0.5 sm:space-y-0">
-            <Label className="text-xs sm:hidden text-muted-foreground">Closes</Label>
+            <Label className="text-xs sm:hidden text-muted-foreground">Cierra</Label>
             <Input
               type="time"
               value={rule.close_time}
@@ -134,7 +134,7 @@ export function AvailabilitySettings({
           </div>
 
           <div className="space-y-0.5 sm:space-y-0">
-            <Label className="text-xs sm:hidden text-muted-foreground">Slot duration (min)</Label>
+            <Label className="text-xs sm:hidden text-muted-foreground">Duración del turno (min)</Label>
             <Input
               type="number"
               min={15}
@@ -161,18 +161,18 @@ export function AvailabilitySettings({
         {saving ? (
           <>
             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            Saving…
+            Guardando…
           </>
         ) : (
           <>
             <Save className="h-4 w-4 mr-2" />
-            Save Hours
+            Guardar horario
           </>
         )}
       </Button>
 
       {success && (
-        <span className="text-sm text-green-600">✓ Saved successfully</span>
+        <span className="text-sm text-green-600">✓ Guardado exitosamente</span>
       )}
       {error && (
         <span className="text-sm text-destructive">{error}</span>
@@ -196,7 +196,7 @@ export function AvailabilitySettings({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Business Hours &amp; Availability</CardTitle>
+        <CardTitle className="text-base">Horario de atención y disponibilidad</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {rulesEditor}

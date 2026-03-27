@@ -24,11 +24,11 @@ import {
 import { Loader2, Trash2 } from "lucide-react"
 
 const STATUS_OPTIONS = [
-  { value: "confirmed", label: "Confirmed" },
-  { value: "pending", label: "Pending" },
-  { value: "completed", label: "Completed" },
-  { value: "cancelled", label: "Cancelled" },
-  { value: "no_show", label: "No Show" },
+  { value: "confirmed", label: "Confirmado" },
+  { value: "pending", label: "Pendiente" },
+  { value: "completed", label: "Completado" },
+  { value: "cancelled", label: "Cancelado" },
+  { value: "no_show", label: "No se presentó" },
 ]
 
 function toDatetimeLocal(date: Date): string {
@@ -43,6 +43,7 @@ interface BookingModalProps {
   businesses: Array<{ id: string; name: string }>
   defaultBusinessId: string
   staffMembers: Array<{ id: string; name: string }>
+  services: Array<{ id: string; name: string; duration_minutes: number }>
   onClose: () => void
   onSaved: (booking: Booking) => void
   onDeleted: (id: string) => void
@@ -55,6 +56,7 @@ export function BookingModal({
   businesses,
   defaultBusinessId,
   staffMembers,
+  services,
   onClose,
   onSaved,
   onDeleted,
@@ -67,7 +69,7 @@ export function BookingModal({
   const [businessId, setBusinessId] = useState(
     booking?.business_id || defaultBusinessId
   )
-  const [serviceName, setServiceName] = useState(booking?.service_name || "")
+  const [serviceId, setServiceId] = useState(booking?.service_id || "")
   const [customerWhatsappId, setCustomerWhatsappId] = useState(
     booking?.customer?.whatsapp_id || ""
   )
@@ -90,7 +92,7 @@ export function BookingModal({
     try {
       const payload = {
         business_id: businessId,
-        service_name: serviceName || null,
+        service_id: serviceId || null,
         start_at: new Date(startAt).toISOString(),
         end_at: new Date(endAt).toISOString(),
         status,
@@ -137,7 +139,7 @@ export function BookingModal({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {mode === "create" ? "New Booking" : "Edit Booking"}
+            {mode === "create" ? "Nueva cita" : "Editar cita"}
           </DialogTitle>
         </DialogHeader>
 
@@ -145,10 +147,10 @@ export function BookingModal({
           {/* Business selector */}
           {businesses.length > 1 && (
             <div className="space-y-1">
-              <Label>Business</Label>
+              <Label>Negocio</Label>
               <Select value={businessId} onValueChange={setBusinessId}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select business" />
+                  <SelectValue placeholder="Selecciona el negocio" />
                 </SelectTrigger>
                 <SelectContent>
                   {businesses.map((b) => (
@@ -164,25 +166,36 @@ export function BookingModal({
           {/* Service + Staff */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label>Service</Label>
-              <Input
-                placeholder="e.g. Haircut, Consultation..."
-                value={serviceName}
-                onChange={(e) => setServiceName(e.target.value)}
-              />
+              <Label>Servicio</Label>
+              <Select
+                value={serviceId || "__none__"}
+                onValueChange={(value) => setServiceId(value === "__none__" ? "" : value)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecciona un servicio" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">Sin servicio</SelectItem>
+                  {services.map((service) => (
+                    <SelectItem key={service.id} value={service.id}>
+                      {service.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             {staffMembers.length > 0 && (
               <div className="space-y-1">
-                <Label>Staff</Label>
+                <Label>Personal</Label>
                 <Select
                   value={staffMemberId || "__none__"}
                   onValueChange={(v) => setStaffMemberId(v === "__none__" ? "" : v)}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="Unassigned" />
+                    <SelectValue placeholder="Sin asignar" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__none__">Unassigned</SelectItem>
+                    <SelectItem value="__none__">Sin asignar</SelectItem>
                     {staffMembers.map((s) => (
                       <SelectItem key={s.id} value={s.id}>
                         {s.name}
@@ -199,7 +212,7 @@ export function BookingModal({
           {/* Customer */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label>Customer WhatsApp</Label>
+              <Label>WhatsApp del cliente</Label>
               <Input
                 placeholder="+57 300 000 0000"
                 value={customerWhatsappId}
@@ -207,9 +220,9 @@ export function BookingModal({
               />
             </div>
             <div className="space-y-1">
-              <Label>Customer Name</Label>
+              <Label>Nombre del cliente</Label>
               <Input
-                placeholder="Full name"
+                placeholder="Nombre completo"
                 value={customerName}
                 onChange={(e) => setCustomerName(e.target.value)}
               />
@@ -221,7 +234,7 @@ export function BookingModal({
           {/* Date & time */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label>Start</Label>
+              <Label>Inicio</Label>
               <Input
                 type="datetime-local"
                 value={startAt}
@@ -229,7 +242,7 @@ export function BookingModal({
               />
             </div>
             <div className="space-y-1">
-              <Label>End</Label>
+              <Label>Fin</Label>
               <Input
                 type="datetime-local"
                 value={endAt}
@@ -240,7 +253,7 @@ export function BookingModal({
 
           {/* Status */}
           <div className="space-y-1">
-            <Label>Status</Label>
+            <Label>Estado</Label>
             <Select value={status} onValueChange={setStatus}>
               <SelectTrigger>
                 <SelectValue />
@@ -257,9 +270,9 @@ export function BookingModal({
 
           {/* Notes */}
           <div className="space-y-1">
-            <Label>Notes</Label>
+            <Label>Notas</Label>
             <Input
-              placeholder="Optional notes..."
+              placeholder="Notas opcionales..."
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
             />
@@ -284,21 +297,21 @@ export function BookingModal({
               ) : (
                 <Trash2 className="h-4 w-4 mr-1" />
               )}
-              {confirmDelete ? "Confirm Cancel" : "Cancel Booking"}
+              {confirmDelete ? "Confirmar cancelación" : "Cancelar cita"}
             </Button>
           )}
 
           <Button variant="outline" onClick={onClose} disabled={saving || deleting}>
-            Dismiss
+            Cerrar
           </Button>
           <Button onClick={handleSave} disabled={saving || deleting}>
             {saving ? (
               <>
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Saving…
+                Guardando…
               </>
             ) : (
-              "Save"
+              "Guardar"
             )}
           </Button>
         </DialogFooter>

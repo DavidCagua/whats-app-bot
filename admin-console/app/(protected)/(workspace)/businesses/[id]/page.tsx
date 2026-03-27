@@ -62,44 +62,44 @@ export default async function BusinessOverviewPage({ params }: BusinessOverviewP
 
   const cards = [
     {
-      title: "Inbox threads",
+      title: "Conversaciones",
       value: uniqueThreads,
-      description: `${messageCount} messages`,
+      description: `${messageCount} mensajes`,
       href: `/businesses/${id}/inbox`,
       icon: MessageSquare,
     },
     {
-      title: "Bookings ahead",
+      title: "Próximas citas",
       value: upcomingBookings,
-      description: "From today (not cancelled)",
+      description: "Desde hoy (no canceladas)",
       href: `/businesses/${id}/bookings`,
       icon: CalendarDays,
     },
     {
-      title: "Products",
+      title: "Productos",
       value: productCount,
-      description: "In catalog",
+      description: "En catálogo",
       href: `/businesses/${id}/products`,
       icon: Package,
     },
     {
-      title: "Orders",
+      title: "Pedidos",
       value: orderCount,
-      description: "Total orders",
+      description: "Total pedidos",
       href: `/businesses/${id}/orders`,
       icon: ShoppingCart,
     },
     {
-      title: "Staff",
+      title: "Personal",
       value: staffActiveCount,
-      description: "Active (calendar)",
+      description: "Activos (calendario)",
       href: `/businesses/${id}/staff`,
       icon: Users,
     },
     {
-      title: "Access",
+      title: "Acceso",
       value: accessCount,
-      description: "Console users",
+      description: "Usuarios de la consola",
       href: `/businesses/${id}/team`,
       icon: UserCog,
     },
@@ -108,9 +108,9 @@ export default async function BusinessOverviewPage({ params }: BusinessOverviewP
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Resumen</h1>
         <p className="text-sm text-muted-foreground">
-          {business.name} — quick stats for this business only
+          {business.name} — estadísticas rápidas solo de este negocio
         </p>
       </div>
 

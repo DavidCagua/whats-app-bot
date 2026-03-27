@@ -27,6 +27,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   Package,
+  Scissors,
   Settings,
   ShoppingCart,
   UserCog,
@@ -37,42 +38,47 @@ const nav = (id: string) =>
   [
     {
       href: `/businesses/${id}`,
-      label: "Overview",
+      label: "Resumen",
       icon: LayoutDashboard,
     },
     {
       href: `/businesses/${id}/inbox`,
-      label: "Inbox",
+      label: "Bandeja de entrada",
       icon: MessageSquare,
     },
     {
       href: `/businesses/${id}/bookings`,
-      label: "Bookings",
+      label: "Reservas",
       icon: CalendarDays,
     },
     {
       href: `/businesses/${id}/orders`,
-      label: "Orders",
+      label: "Pedidos",
       icon: ShoppingCart,
     },
     {
       href: `/businesses/${id}/products`,
-      label: "Products",
+      label: "Productos",
       icon: Package,
     },
     {
+      href: `/businesses/${id}/services`,
+      label: "Servicios",
+      icon: Scissors,
+    },
+    {
       href: `/businesses/${id}/staff`,
-      label: "Staff",
+      label: "Personal",
       icon: Users,
     },
     {
       href: `/businesses/${id}/team`,
-      label: "Access",
+      label: "Acceso",
       icon: UserCog,
     },
     {
       href: `/businesses/${id}/settings`,
-      label: "Settings",
+      label: "Configuración",
       icon: Settings,
     },
   ] as const
@@ -125,7 +131,7 @@ export function BusinessWorkspaceShell({
               />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-semibold">{businessName}</p>
-                <p className="text-xs text-muted-foreground">Workspace</p>
+                <p className="text-xs text-muted-foreground">Área de trabajo</p>
               </div>
             </div>
           </SidebarHeader>
@@ -157,7 +163,7 @@ export function BusinessWorkspaceShell({
             <Button variant="ghost" size="sm" className="w-full justify-start" asChild>
               <Link href="/businesses" className="gap-2">
                 <ChevronLeft className="h-4 w-4" />
-                All businesses
+                Todos los negocios
               </Link>
             </Button>
             {isSuperAdmin && (
@@ -173,7 +179,7 @@ export function BusinessWorkspaceShell({
                 <p className="truncate text-xs font-medium">{userName}</p>
                 <p className="truncate text-xs text-muted-foreground">{userEmail}</p>
                 {isSuperAdmin && (
-                  <span className="text-xs font-medium text-primary">Super Admin</span>
+                  <span className="text-xs font-medium text-primary">Súper Admin</span>
                 )}
               </div>
               {signOutSlot}

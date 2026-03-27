@@ -40,7 +40,6 @@ export default function PrivacyPolicyPage() {
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li>Email address and account credentials</li>
               <li>Business information (name, services, pricing)</li>
-              <li>Google Calendar credentials (encrypted)</li>
               <li>Business configuration and settings</li>
             </ul>
           </section>
@@ -51,7 +50,7 @@ export default function PrivacyPolicyPage() {
             <p className="text-gray-700 leading-relaxed mt-2">We use the collected information for:</p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
               <li><strong>Appointment Scheduling:</strong> Processing and managing appointment requests through natural language conversations</li>
-              <li><strong>Calendar Integration:</strong> Creating, updating, and managing appointments in Google Calendar</li>
+              <li><strong>Booking Management:</strong> Creating, updating, and managing appointments in our platform</li>
               <li><strong>AI Processing:</strong> Using OpenAI services to understand and respond to customer messages</li>
               <li><strong>Service Improvement:</strong> Analyzing conversation patterns to improve bot responses and user experience</li>
               <li><strong>Communication:</strong> Sending appointment confirmations, reminders, and updates via WhatsApp</li>
@@ -67,12 +66,7 @@ export default function PrivacyPolicyPage() {
               We use Meta&apos;s WhatsApp Business API to send and receive messages. Meta&apos;s privacy policy applies to their services: <a href="https://www.whatsapp.com/legal/privacy-policy" className="text-blue-600 hover:underline">https://www.whatsapp.com/legal/privacy-policy</a>
             </p>
 
-            <h3 className="text-xl font-semibold text-gray-800 mt-6 mb-3">4.2 Google Calendar</h3>
-            <p className="text-gray-700 leading-relaxed">
-              We access Google Calendar to manage appointments. Each business authorizes access to their own calendar. Google&apos;s privacy policy: <a href="https://policies.google.com/privacy" className="text-blue-600 hover:underline">https://policies.google.com/privacy</a>
-            </p>
-
-            <h3 className="text-xl font-semibold text-gray-800 mt-6 mb-3">4.3 OpenAI</h3>
+            <h3 className="text-xl font-semibold text-gray-800 mt-6 mb-3">4.2 OpenAI</h3>
             <p className="text-gray-700 leading-relaxed">
               We use OpenAI&apos;s GPT models to process and respond to messages. OpenAI&apos;s privacy policy: <a href="https://openai.com/policies/privacy-policy" className="text-blue-600 hover:underline">https://openai.com/policies/privacy-policy</a>
             </p>
@@ -82,7 +76,6 @@ export default function PrivacyPolicyPage() {
             <h2 className="text-2xl font-semibold text-gray-900 mt-8 mb-4">5. Data Security</h2>
             <p className="text-gray-700 leading-relaxed">We implement security measures to protect your information:</p>
             <ul className="list-disc pl-6 mt-2 space-y-2 text-gray-700">
-              <li><strong>Encryption:</strong> Google Calendar credentials are encrypted using AES-256-GCM before storage</li>
               <li><strong>Secure Authentication:</strong> Admin console access is protected with secure authentication</li>
               <li><strong>HTTPS:</strong> All data transmission uses encrypted connections</li>
               <li><strong>Access Control:</strong> Multi-tenant architecture ensures each business can only access their own data</li>
@@ -111,7 +104,6 @@ export default function PrivacyPolicyPage() {
               <li>Request correction of inaccurate data</li>
               <li>Request deletion of your data (see our <Link href="/data-deletion" className="text-blue-600 hover:underline">Data Deletion Instructions</Link>)</li>
               <li>Opt-out of the Service by stopping WhatsApp interactions</li>
-              <li>Revoke Google Calendar access at any time through the admin console</li>
             </ul>
           </section>
 

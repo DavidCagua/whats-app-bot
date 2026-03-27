@@ -34,9 +34,9 @@ export function StaffList({
       const result = await deleteStaffMember(memberId)
       if (result.success) {
         setMembers((prev) => prev.filter((m) => m.id !== memberId))
-        toast.success("Staff member deleted")
+        toast.success("Miembro del personal eliminado")
       } else {
-        toast.error(result.error || "Failed to delete")
+        toast.error(result.error || "No se pudo eliminar")
       }
     } finally {
       setIsDeleting(null)
@@ -53,13 +53,13 @@ export function StaffList({
           )
         )
         toast.success(
-          `Staff member ${!currentState ? "activated" : "deactivated"}`
+          `Miembro del personal ${!currentState ? "activado" : "desactivado"}`
         )
       } else {
-        toast.error(result.error || "Failed to update")
+        toast.error(result.error || "No se pudo actualizar")
       }
     } catch (error) {
-      toast.error("An error occurred")
+      toast.error("Ocurrió un error")
     }
   }
 
@@ -71,13 +71,13 @@ export function StaffList({
       <table className="w-full">
         <thead className="bg-muted">
           <tr>
-            <th className="px-6 py-3 text-left text-sm font-medium">Name</th>
-            <th className="px-6 py-3 text-left text-sm font-medium">Role</th>
+            <th className="px-6 py-3 text-left text-sm font-medium">Nombre</th>
+            <th className="px-6 py-3 text-left text-sm font-medium">Rol</th>
             <th className="px-6 py-3 text-left text-sm font-medium">
-              Linked User
+              Usuario vinculado
             </th>
             <th className="px-6 py-3 text-right text-sm font-medium">
-              Actions
+              Acciones
             </th>
           </tr>
         </thead>
@@ -85,7 +85,7 @@ export function StaffList({
           {staff.length === 0 ? (
             <tr>
               <td colSpan={4} className="px-6 py-8 text-center text-muted-foreground">
-                No staff members
+                Sin miembros del personal
               </td>
             </tr>
           ) : (
@@ -107,7 +107,7 @@ export function StaffList({
                     </div>
                   ) : (
                     <span className="text-sm text-muted-foreground">
-                      Not linked
+                      Sin vincular
                     </span>
                   )}
                 </td>
@@ -154,10 +154,10 @@ export function StaffList({
       <Tabs defaultValue="all" className="space-y-4">
         <TabsList>
           <TabsTrigger value="all">
-            All ({members.length})
+            Todos ({members.length})
           </TabsTrigger>
-          <TabsTrigger value="active">Active ({activeCount})</TabsTrigger>
-          <TabsTrigger value="inactive">Inactive ({inactiveCount})</TabsTrigger>
+          <TabsTrigger value="active">Activos ({activeCount})</TabsTrigger>
+          <TabsTrigger value="inactive">Inactivos ({inactiveCount})</TabsTrigger>
         </TabsList>
 
         <TabsContent value="all" className="space-y-4">

@@ -41,7 +41,7 @@ export function AgentsSettingsForm({
         if (data) setAgents(data)
       } catch (err) {
         console.error("Error fetching agents:", err)
-        toast.error("Failed to load agents")
+        toast.error("No se pudieron cargar los agentes")
       } finally {
         setIsLoading(false)
       }
@@ -58,7 +58,7 @@ export function AgentsSettingsForm({
   const handleSave = async () => {
     const enabledCount = agents.filter((a) => a.enabled).length
     if (enabledCount === 0) {
-      toast.error("At least one agent must be enabled")
+      toast.error("Al menos un agente debe estar habilitado")
       return
     }
 
@@ -73,12 +73,12 @@ export function AgentsSettingsForm({
         }))
       )
       if (result.success) {
-        toast.success("Agents updated successfully")
+        toast.success("Agentes actualizados exitosamente")
       } else {
-        toast.error(result.error || "Failed to update agents")
+        toast.error(result.error || "No se pudieron actualizar los agentes")
       }
     } catch {
-      toast.error("An error occurred")
+      toast.error("Ocurrió un error")
     } finally {
       setIsSaving(false)
     }
@@ -99,7 +99,7 @@ export function AgentsSettingsForm({
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Bot className="h-5 w-5" />
-            AI Agents
+            Agentes IA
           </CardTitle>
         </CardHeader>
         <CardContent className="flex items-center justify-center py-8">
@@ -114,11 +114,11 @@ export function AgentsSettingsForm({
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Bot className="h-5 w-5" />
-          AI Agents
+          Agentes IA
         </CardTitle>
         <CardDescription>
-          Enable or disable agents for this business. Each agent handles different types of
-          customer requests (bookings, orders, support, etc.).
+          Habilita o deshabilita agentes para este negocio. Cada agente maneja diferentes tipos de
+          solicitudes de clientes (citas, pedidos, soporte, etc.).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -139,7 +139,7 @@ export function AgentsSettingsForm({
                   <span
                     className={`text-sm font-medium ${agent.enabled ? "text-green-600" : "text-muted-foreground"}`}
                   >
-                    {agent.enabled ? "Enabled" : "Disabled"}
+                    {agent.enabled ? "Habilitado" : "Deshabilitado"}
                   </span>
                 ) : (
                   <Switch
@@ -161,17 +161,17 @@ export function AgentsSettingsForm({
               ) : (
                 <Save className="mr-2 h-4 w-4" />
               )}
-              Save Agents
+              Guardar agentes
             </Button>
           </div>
         )}
 
         <div className="text-sm text-muted-foreground pt-2 border-t">
-          <p className="font-medium mb-1">How agents work:</p>
+          <p className="font-medium mb-1">¿Cómo funcionan los agentes?</p>
           <ul className="list-disc list-inside space-y-1">
-            <li>Incoming messages are routed to the appropriate agent based on intent</li>
-            <li>If only one agent is enabled, all messages go to it</li>
-            <li>Session state prevents reclassification in multi-turn flows</li>
+            <li>Los mensajes entrantes se enrutan al agente apropiado según la intención</li>
+            <li>Si solo hay un agente habilitado, todos los mensajes van a ese agente</li>
+            <li>El estado de sesión evita la reclasificación en flujos de múltiples turnos</li>
           </ul>
         </div>
       </CardContent>

@@ -20,6 +20,7 @@ export async function GET(
       customers: { select: { name: true, whatsapp_id: true } },
       businesses: { select: { name: true } },
       staff_members: { select: { id: true, name: true, role: true } },
+      services: { select: { id: true, name: true, price: true, duration_minutes: true } },
     },
   })
 
@@ -36,7 +37,25 @@ export async function GET(
   }
 
   return NextResponse.json({
-    ...booking,
+    id: booking.id,
+    business_id: booking.business_id,
+    customer_id: booking.customer_id,
+    service_id: booking.service_id,
+    start_at: booking.start_at,
+    end_at: booking.end_at,
+    status: booking.status,
+    notes: booking.notes,
+    created_via: booking.created_via,
+    created_at: booking.created_at,
+    staff_member_id: booking.staff_member_id,
+    service: booking.services
+      ? {
+          id: booking.services.id,
+          name: booking.services.name,
+          price: Number(booking.services.price.toString()),
+          duration_minutes: booking.services.duration_minutes,
+        }
+      : null,
     staff_member: booking.staff_members
       ? { id: booking.staff_members.id, name: booking.staff_members.name, role: booking.staff_members.role }
       : null,

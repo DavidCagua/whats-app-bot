@@ -28,11 +28,11 @@ export function SettingsTabs({
         </TabsTrigger>
         <TabsTrigger value="integrations" className="gap-2">
           <Plug className="h-4 w-4" />
-          Integrations
+          Integraciones
         </TabsTrigger>
         <TabsTrigger value="agents" className="gap-2">
           <Bot className="h-4 w-4" />
-          Agents
+          Agentes
         </TabsTrigger>
       </TabsList>
       <TabsContent value="general" className="space-y-6">

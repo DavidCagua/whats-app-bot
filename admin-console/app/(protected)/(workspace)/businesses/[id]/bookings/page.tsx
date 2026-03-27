@@ -56,7 +56,7 @@ export default async function BusinessBookingsPage({
   const dateFrom = paramsQ.dateFrom ? new Date(paramsQ.dateFrom) : weekStart
   const dateTo = paramsQ.dateTo ? new Date(paramsQ.dateTo) : weekEnd
 
-  const [bookings, availabilityRules, initialStaff, businessRow] = await Promise.all([
+  const [bookings, availabilityRules, initialStaff, businessRow, initialServices] = await Promise.all([
     getBookings({
       businessIds: access.businessIds,
       businessFilter: businessId,
@@ -73,6 +73,11 @@ export default async function BusinessBookingsPage({
     prisma.businesses.findUnique({
       where: { id: businessId },
       select: { id: true, name: true },
+    }),
+    prisma.services.findMany({
+      where: { business_id: businessId, is_active: true },
+      select: { id: true, name: true, duration_minutes: true },
+      orderBy: { name: "asc" },
     }),
   ])
 
@@ -105,6 +110,7 @@ export default async function BusinessBookingsPage({
         }}
         initialWeekStart={weekStart.toISOString()}
         initialStaff={initialStaff}
+        initialServices={initialServices}
       />
     </div>
   )

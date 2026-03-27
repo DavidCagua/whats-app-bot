@@ -23,11 +23,6 @@ type BusinessSettingsData = {
     saturday: { open: string; close: string }
     sunday: { open: string; close: string }
   }
-  services?: Array<{
-    name: string
-    price: number
-    duration: number
-  }>
   payment_methods?: string[]
   promotions?: string[]
   appointment_settings?: {
@@ -63,13 +58,6 @@ export type BusinessSettings = {
     saturday: { open: string; close: string }
     sunday: { open: string; close: string }
   }
-  
-  // Services
-  services: Array<{
-    name: string
-    price: number
-    duration: number
-  }>
   
   // Payment Methods
   payment_methods: string[]
@@ -138,7 +126,6 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
         saturday: { open: "09:00", close: "18:00" },
         sunday: { open: "closed", close: "closed" },
       },
-      services: settings?.services || [],
       payment_methods: settings?.payment_methods || [],
       promotions: settings?.promotions || [],
       appointment_settings: settings?.appointment_settings || {
@@ -209,7 +196,6 @@ export async function updateBusinessSettings(
       ...(settings.timezone !== undefined && { timezone: settings.timezone }),
       ...(settings.language !== undefined && { language: settings.language }),
       ...(settings.business_hours !== undefined && { business_hours: settings.business_hours }),
-      ...(settings.services !== undefined && { services: settings.services }),
       ...(settings.payment_methods !== undefined && { payment_methods: settings.payment_methods }),
       ...(settings.promotions !== undefined && { promotions: settings.promotions }),
       ...(settings.appointment_settings !== undefined && { appointment_settings: settings.appointment_settings }),

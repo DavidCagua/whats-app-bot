@@ -39,7 +39,7 @@ export function UserBusinessAssignments({
 
   const handleAdd = async () => {
     if (!selectedBusiness) {
-      toast.error("Please select a business")
+      toast.error("Por favor selecciona un negocio")
       return
     }
 
@@ -47,14 +47,14 @@ export function UserBusinessAssignments({
     try {
       const result = await assignUserToBusiness(userId, selectedBusiness, selectedRole)
       if (result.success) {
-        toast.success("Business assigned successfully")
+        toast.success("Negocio asignado exitosamente")
         setSelectedBusiness("")
         setSelectedRole("member")
       } else {
-        toast.error(result.error || "Failed to assign business")
+        toast.error(result.error || "No se pudo asignar el negocio")
       }
     } catch {
-      toast.error("An error occurred")
+      toast.error("Ocurrió un error")
     } finally {
       setIsAdding(false)
     }
@@ -65,12 +65,12 @@ export function UserBusinessAssignments({
     try {
       const result = await removeUserFromBusiness(userId, businessId)
       if (result.success) {
-        toast.success("Business assignment removed")
+        toast.success("Asignación de negocio eliminada")
       } else {
-        toast.error(result.error || "Failed to remove assignment")
+        toast.error(result.error || "No se pudo eliminar la asignación")
       }
     } catch {
-      toast.error("An error occurred")
+      toast.error("Ocurrió un error")
     } finally {
       setRemovingId(null)
     }
@@ -81,10 +81,10 @@ export function UserBusinessAssignments({
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Building2 className="h-5 w-5" />
-          Business Assignments
+          Asignaciones de negocio
         </CardTitle>
         <CardDescription>
-          Manage which businesses this user can access
+          Gestiona a qué negocios tiene acceso este usuario
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -92,7 +92,7 @@ export function UserBusinessAssignments({
         <div className="space-y-2">
           {userBusinesses.length === 0 ? (
             <p className="text-sm text-muted-foreground py-4 text-center">
-              No business assignments yet
+              Aún no hay asignaciones de negocio
             </p>
           ) : (
             userBusinesses.map((business) => (
@@ -122,11 +122,11 @@ export function UserBusinessAssignments({
         {/* Add new assignment */}
         {unassignedBusinesses.length > 0 && (
           <div className="border-t pt-4 space-y-3">
-            <p className="text-sm font-medium">Add Business Assignment</p>
+            <p className="text-sm font-medium">Agregar asignación de negocio</p>
             <div className="flex gap-2">
               <Select value={selectedBusiness} onValueChange={setSelectedBusiness}>
                 <SelectTrigger className="flex-1">
-                  <SelectValue placeholder="Select business" />
+                  <SelectValue placeholder="Selecciona el negocio" />
                 </SelectTrigger>
                 <SelectContent>
                   {unassignedBusinesses.map((business) => (
@@ -139,11 +139,11 @@ export function UserBusinessAssignments({
 
               <Select value={selectedRole} onValueChange={setSelectedRole}>
                 <SelectTrigger className="w-32">
-                  <SelectValue placeholder="Role" />
+                  <SelectValue placeholder="Rol" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="admin">Admin</SelectItem>
-                  <SelectItem value="member">Member</SelectItem>
+                  <SelectItem value="member">Miembro</SelectItem>
                 </SelectContent>
               </Select>
 

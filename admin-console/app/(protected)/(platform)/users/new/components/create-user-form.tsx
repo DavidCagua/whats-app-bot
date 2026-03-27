@@ -17,9 +17,9 @@ import Link from "next/link"
 import { createUser, assignUserToBusiness } from "@/lib/actions/users"
 
 const createUserSchema = z.object({
-  email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
-  full_name: z.string().min(1, "Full name is required"),
+  email: z.string().email("Correo electrónico inválido"),
+  password: z.string().min(8, "La contraseña debe tener al menos 8 caracteres"),
+  full_name: z.string().min(1, "El nombre completo es requerido"),
   role: z.string(),
 })
 
@@ -88,7 +88,7 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
   const onSubmit = async (data: CreateUserFormData) => {
     // Validate business assignments for business users
     if (isBusinessUser && businessAssignments.length === 0) {
-      toast.error("Business users must be assigned to at least one business")
+      toast.error("Los usuarios de negocio deben estar asignados a al menos un negocio")
       return
     }
 
@@ -109,13 +109,13 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
           }
         }
 
-        toast.success("User created successfully!")
+        toast.success("¡Usuario creado exitosamente!")
         router.push("/users")
       } else {
-        toast.error(result.error || "Failed to create user")
+        toast.error(result.error || "No se pudo crear el usuario")
       }
     } catch {
-      toast.error("An error occurred while creating the user")
+      toast.error("Ocurrió un error al crear el usuario")
     } finally {
       setIsLoading(false)
     }
@@ -130,8 +130,8 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
           </Link>
         </Button>
         <div>
-          <h1 className="text-3xl font-bold">Create User</h1>
-          <p className="text-muted-foreground">Add a new user to the system</p>
+          <h1 className="text-3xl font-bold">Crear usuario</h1>
+          <p className="text-muted-foreground">Agrega un nuevo usuario al sistema</p>
         </div>
       </div>
 
@@ -142,17 +142,17 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <UserPlus className="h-5 w-5" />
-                User Details
+                Datos del usuario
               </CardTitle>
-              <CardDescription>Enter the information for the new user</CardDescription>
+              <CardDescription>Ingresa la información del nuevo usuario</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="full_name">Full Name</Label>
+                <Label htmlFor="full_name">Nombre completo</Label>
                 <Input
                   id="full_name"
                   {...form.register("full_name")}
-                  placeholder="Enter full name"
+                  placeholder="Ingresa el nombre completo"
                 />
                 {form.formState.errors.full_name && (
                   <p className="text-sm text-red-500">{form.formState.errors.full_name.message}</p>
@@ -160,12 +160,12 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="email">Email</Label>
+                <Label htmlFor="email">Correo electrónico</Label>
                 <Input
                   id="email"
                   type="email"
                   {...form.register("email")}
-                  placeholder="user@example.com"
+                  placeholder="usuario@ejemplo.com"
                 />
                 {form.formState.errors.email && (
                   <p className="text-sm text-red-500">{form.formState.errors.email.message}</p>
@@ -173,12 +173,12 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
+                <Label htmlFor="password">Contraseña</Label>
                 <Input
                   id="password"
                   type="password"
                   {...form.register("password")}
-                  placeholder="Minimum 8 characters"
+                  placeholder="Mínimo 8 caracteres"
                 />
                 {form.formState.errors.password && (
                   <p className="text-sm text-red-500">{form.formState.errors.password.message}</p>
@@ -186,7 +186,7 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="role">System Role</Label>
+                <Label htmlFor="role">Rol en el sistema</Label>
                 <Select
                   value={form.watch("role")}
                   onValueChange={(value) => {
@@ -198,17 +198,17 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                   }}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="Select role" />
+                    <SelectValue placeholder="Selecciona el rol" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="business_user">Business User</SelectItem>
-                    <SelectItem value="super_admin">Super Admin (OmnIA Team)</SelectItem>
+                    <SelectItem value="business_user">Usuario de negocio</SelectItem>
+                    <SelectItem value="super_admin">Súper Admin (Equipo OmnIA)</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-sm text-muted-foreground">
                   {watchRole === "super_admin"
-                    ? "Super admins have full access to all businesses"
-                    : "Business users need to be assigned to specific businesses"}
+                    ? "Los súper admins tienen acceso total a todos los negocios"
+                    : "Los usuarios de negocio deben ser asignados a negocios específicos"}
                 </p>
               </div>
             </CardContent>
@@ -220,10 +220,10 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Building2 className="h-5 w-5" />
-                  Business Assignments
+                  Asignaciones de negocio
                 </CardTitle>
                 <CardDescription>
-                  Assign the user to businesses they can access
+                  Asigna el usuario a los negocios a los que puede acceder
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -231,7 +231,7 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                 <div className="space-y-2">
                   {businessAssignments.length === 0 ? (
                     <p className="text-sm text-muted-foreground py-4 text-center border rounded-lg">
-                      No businesses assigned yet. Add at least one.
+                      Aún no hay negocios asignados. Agrega al menos uno.
                     </p>
                   ) : (
                     businessAssignments.map((assignment) => (
@@ -261,11 +261,11 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                 {/* Add new assignment */}
                 {unassignedBusinesses.length > 0 && (
                   <div className="border-t pt-4 space-y-3">
-                    <p className="text-sm font-medium">Add Business</p>
+                    <p className="text-sm font-medium">Agregar negocio</p>
                     <div className="flex gap-2">
                       <Select value={selectedBusiness} onValueChange={setSelectedBusiness}>
                         <SelectTrigger className="flex-1">
-                          <SelectValue placeholder="Select business" />
+                          <SelectValue placeholder="Selecciona el negocio" />
                         </SelectTrigger>
                         <SelectContent>
                           {unassignedBusinesses.map((business) => (
@@ -278,11 +278,11 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
 
                       <Select value={selectedBusinessRole} onValueChange={setSelectedBusinessRole}>
                         <SelectTrigger className="w-32">
-                          <SelectValue placeholder="Role" />
+                          <SelectValue placeholder="Rol" />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="admin">Admin</SelectItem>
-                          <SelectItem value="member">Member</SelectItem>
+                          <SelectItem value="member">Miembro</SelectItem>
                         </SelectContent>
                       </Select>
 
@@ -304,10 +304,10 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
         {/* Submit buttons */}
         <div className="flex justify-end gap-4 mt-6">
           <Button variant="outline" asChild>
-            <Link href="/users">Cancel</Link>
+            <Link href="/users">Cancelar</Link>
           </Button>
           <Button type="submit" disabled={isLoading}>
-            {isLoading ? "Creating..." : "Create User"}
+            {isLoading ? "Creando..." : "Crear usuario"}
           </Button>
         </div>
       </form>

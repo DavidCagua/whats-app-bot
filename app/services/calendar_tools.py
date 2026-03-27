@@ -1,8 +1,7 @@
 """
 Calendar tools for the BookingAgent.
 
-Phase 4: Replaced Google Calendar backend with in-house booking system.
-All operations now hit booking_service (DB) directly instead of Google Calendar API.
+All operations hit booking_service (DB) directly.
 """
 
 import logging

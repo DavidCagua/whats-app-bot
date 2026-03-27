@@ -43,9 +43,9 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Products</h2>
+          <h2 className="text-lg font-semibold">Productos</h2>
           <p className="text-sm text-muted-foreground">
-            Product catalog for {business.name}
+            Catálogo de productos de {business.name}
           </p>
         </div>
       </div>
@@ -54,17 +54,17 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
+              <TableHead>Nombre</TableHead>
               <TableHead>SKU</TableHead>
-              <TableHead>Price</TableHead>
-              <TableHead>Status</TableHead>
+              <TableHead>Precio</TableHead>
+              <TableHead>Estado</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {products.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={4} className="text-center text-muted-foreground py-8">
-                  No products yet. Add products to your catalog.
+                  Aún no hay productos. Agrega productos a tu catálogo.
                 </TableCell>
               </TableRow>
             ) : (
@@ -77,9 +77,9 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
                   <TableCell>{formatPrice(product.price)}</TableCell>
                   <TableCell>
                     {product.is_active ? (
-                      <Badge variant="default">Active</Badge>
+                      <Badge variant="default">Activo</Badge>
                     ) : (
-                      <Badge variant="secondary">Inactive</Badge>
+                      <Badge variant="secondary">Inactivo</Badge>
                     )}
                   </TableCell>
                 </TableRow>

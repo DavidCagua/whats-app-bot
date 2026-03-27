@@ -13,9 +13,9 @@ type ConversationsHeaderProps = {
 
 export function ConversationsHeader({ role, access, stats }: ConversationsHeaderProps) {
   const getTitle = () => {
-    if (role === "super_admin") return "Conversations"
-    if (access.businesses.length === 1) return `Conversations — ${access.businesses[0].name}`
-    return "Conversations"
+    if (role === "super_admin") return "Conversaciones"
+    if (access.businesses.length === 1) return `Conversaciones — ${access.businesses[0].name}`
+    return "Conversaciones"
   }
 
   return (
@@ -27,7 +27,7 @@ export function ConversationsHeader({ role, access, stats }: ConversationsHeader
           <div className="flex items-center gap-2 sm:gap-3">
             <MessageSquare className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground flex-shrink-0" />
             <div>
-              <p className="text-xs text-muted-foreground leading-none">Total Messages</p>
+              <p className="text-xs text-muted-foreground leading-none">Total mensajes</p>
               <p className="text-lg sm:text-xl font-bold leading-tight">
                 {stats.totalMessages.toLocaleString()}
               </p>
@@ -37,7 +37,7 @@ export function ConversationsHeader({ role, access, stats }: ConversationsHeader
           <div className="flex items-center gap-2 sm:gap-3">
             <Users className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground flex-shrink-0" />
             <div>
-              <p className="text-xs text-muted-foreground leading-none">Customers</p>
+              <p className="text-xs text-muted-foreground leading-none">Clientes</p>
               <p className="text-lg sm:text-xl font-bold leading-tight">
                 {stats.uniqueCustomers.toLocaleString()}
               </p>
@@ -47,7 +47,7 @@ export function ConversationsHeader({ role, access, stats }: ConversationsHeader
           <div className="flex items-center gap-2 sm:gap-3">
             <TrendingUp className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground flex-shrink-0" />
             <div>
-              <p className="text-xs text-muted-foreground leading-none">Today</p>
+              <p className="text-xs text-muted-foreground leading-none">Hoy</p>
               <p className="text-lg sm:text-xl font-bold leading-tight">
                 {stats.todayMessages.toLocaleString()}
               </p>

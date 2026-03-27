@@ -6,7 +6,7 @@ import { canAccessBusiness, canEditBusiness } from "@/lib/permissions"
 import { revalidatePath } from "next/cache"
 
 const AGENT_TYPES = [
-  { type: "booking", name: "Booking Agent", description: "Handles appointment scheduling and calendar operations" },
+  { type: "booking", name: "Booking Agent", description: "Handles appointment scheduling and availability management" },
   { type: "order", name: "Order Agent", description: "Handles restaurant/retail orders" },
   { type: "sales", name: "Sales Agent", description: "Handles product sales and checkout" },
   { type: "support", name: "Support Agent", description: "Handles customer support and tickets" },

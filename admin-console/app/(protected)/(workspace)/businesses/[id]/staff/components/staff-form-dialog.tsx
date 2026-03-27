@@ -21,8 +21,8 @@ import { getBusinessUsers } from "@/lib/actions/users"
 import { StaffMember } from "@/types/staff"
 
 const staffFormSchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  role: z.string().min(1, "Role is required"),
+  name: z.string().min(1, "El nombre es requerido"),
+  role: z.string().min(1, "El rol es requerido"),
   is_active: z.boolean(),
   user_id: z.string().optional().nullable(),
 })
@@ -85,13 +85,13 @@ export function StaffFormDialog({
           })
 
       if (result.success && result.staff) {
-        toast.success(staff ? "Staff member updated" : "Staff member created")
+        toast.success(staff ? "Miembro del personal actualizado" : "Miembro del personal creado")
         onSave(result.staff)
       } else {
-        toast.error(result.error || "Failed to save")
+        toast.error(result.error || "No se pudo guardar")
       }
     } catch (error) {
-      toast.error("An error occurred")
+      toast.error("Ocurrió un error")
     } finally {
       setIsLoading(false)
     }
@@ -100,11 +100,11 @@ export function StaffFormDialog({
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor="name">Name</Label>
+        <Label htmlFor="name">Nombre</Label>
         <Input
           id="name"
           {...form.register("name")}
-          placeholder="e.g., Luis Gómez"
+          placeholder="ej., Luis Gómez"
         />
         {form.formState.errors.name && (
           <p className="text-sm text-red-500">
@@ -114,11 +114,11 @@ export function StaffFormDialog({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="role">Role</Label>
+        <Label htmlFor="role">Rol</Label>
         <Input
           id="role"
           {...form.register("role")}
-          placeholder="e.g., Barbero, Estilista"
+          placeholder="ej., Barbero, Estilista"
         />
         {form.formState.errors.role && (
           <p className="text-sm text-red-500">
@@ -128,19 +128,19 @@ export function StaffFormDialog({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="user">Link to User (Optional)</Label>
+        <Label htmlFor="user">Vincular a usuario (Opcional)</Label>
         <Select
           value={form.watch("user_id") || "none"}
           onValueChange={(value) => form.setValue("user_id", value === "none" ? null : value)}
         >
           <SelectTrigger id="user">
-            <SelectValue placeholder="No user linked" />
+            <SelectValue placeholder="Sin usuario vinculado" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="none">No user</SelectItem>
+            <SelectItem value="none">Sin usuario</SelectItem>
             {usersLoading ? (
               <div className="px-2 py-1 text-sm text-muted-foreground">
-                Loading...
+                Cargando...
               </div>
             ) : (
               users.map((user) => (
@@ -155,7 +155,7 @@ export function StaffFormDialog({
 
       <div className="flex items-center justify-between rounded-lg border p-3">
         <Label htmlFor="is_active" className="cursor-pointer">
-          Active
+          Activo
         </Label>
         <Switch
           id="is_active"
@@ -166,10 +166,10 @@ export function StaffFormDialog({
 
       <div className="flex justify-end gap-2 pt-4">
         <Button type="button" variant="outline" onClick={onClose}>
-          Cancel
+          Cancelar
         </Button>
         <Button type="submit" disabled={isLoading}>
-          {isLoading ? "Saving..." : staff ? "Update" : "Create"}
+          {isLoading ? "Guardando..." : staff ? "Actualizar" : "Crear"}
         </Button>
       </div>
     </form>

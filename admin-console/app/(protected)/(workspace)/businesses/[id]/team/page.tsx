@@ -33,9 +33,9 @@ export default async function BusinessTeamPage({ params }: BusinessTeamPageProps
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Access</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Acceso</h1>
           <p className="text-muted-foreground">
-            Who can sign in to this console for {business.name}
+            Quién puede iniciar sesión en esta consola para {business.name}
           </p>
         </div>
         {canInvite && (

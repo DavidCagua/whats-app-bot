@@ -27,8 +27,8 @@ import {
 } from "@/components/ui/alert-dialog"
 
 const userEditSchema = z.object({
-  email: z.string().email("Invalid email address"),
-  full_name: z.string().min(1, "Full name is required"),
+  email: z.string().email("Correo electrónico inválido"),
+  full_name: z.string().min(1, "El nombre completo es requerido"),
   role: z.string(),
   is_active: z.boolean(),
   password: z.string().optional(),
@@ -75,12 +75,12 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
       })
 
       if (result.success) {
-        toast.success("User updated successfully!")
+        toast.success("¡Usuario actualizado exitosamente!")
       } else {
-        toast.error(result.error || "Failed to update user")
+        toast.error(result.error || "No se pudo actualizar el usuario")
       }
     } catch {
-      toast.error("An error occurred while updating the user")
+      toast.error("Ocurrió un error al actualizar el usuario")
     } finally {
       setIsLoading(false)
     }
@@ -91,13 +91,13 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
     try {
       const result = await deleteUser(user.id)
       if (result.success) {
-        toast.success("User deleted successfully")
+        toast.success("Usuario eliminado exitosamente")
         router.push("/users")
       } else {
-        toast.error(result.error || "Failed to delete user")
+        toast.error(result.error || "No se pudo eliminar el usuario")
       }
     } catch {
-      toast.error("An error occurred while deleting the user")
+      toast.error("Ocurrió un error al eliminar el usuario")
     } finally {
       setIsDeleting(false)
     }
@@ -108,16 +108,16 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <User className="h-5 w-5" />
-          User Details
+          Datos del usuario
         </CardTitle>
         <CardDescription>
-          Update user information and system role
+          Actualiza la información del usuario y el rol en el sistema
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="full_name">Full Name</Label>
+            <Label htmlFor="full_name">Nombre completo</Label>
             <Input
               id="full_name"
               {...form.register("full_name")}
@@ -128,7 +128,7 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="email">Email</Label>
+            <Label htmlFor="email">Correo electrónico</Label>
             <Input
               id="email"
               type="email"
@@ -140,17 +140,17 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="password">New Password (leave blank to keep current)</Label>
+            <Label htmlFor="password">Nueva contraseña (dejar en blanco para mantener la actual)</Label>
             <Input
               id="password"
               type="password"
               {...form.register("password")}
-              placeholder="Enter new password"
+              placeholder="Ingresa la nueva contraseña"
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="role">System Role</Label>
+            <Label htmlFor="role">Rol en el sistema</Label>
             <Select
               value={form.watch("role")}
               onValueChange={(value) => {
@@ -159,20 +159,20 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
               }}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Select role" />
+                <SelectValue placeholder="Selecciona el rol" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="business_user">Business User</SelectItem>
-                <SelectItem value="super_admin">Super Admin (OmnIA Team)</SelectItem>
+                <SelectItem value="business_user">Usuario de negocio</SelectItem>
+                <SelectItem value="super_admin">Súper Admin (Equipo OmnIA)</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="flex items-center justify-between rounded-lg border p-4">
             <div className="space-y-0.5">
-              <Label htmlFor="is_active">Active Status</Label>
+              <Label htmlFor="is_active">Estado de la cuenta</Label>
               <p className="text-sm text-muted-foreground">
-                Inactive users cannot log in
+                Los usuarios inactivos no pueden iniciar sesión
               </p>
             </div>
             <Switch
@@ -187,25 +187,25 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
               <AlertDialogTrigger asChild>
                 <Button variant="destructive" type="button">
                   <Trash2 className="mr-2 h-4 w-4" />
-                  Delete User
+                  Eliminar usuario
                 </Button>
               </AlertDialogTrigger>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>Delete User?</AlertDialogTitle>
+                  <AlertDialogTitle>¿Eliminar usuario?</AlertDialogTitle>
                   <AlertDialogDescription>
-                    This will permanently delete <strong>{user.full_name || user.email}</strong> and remove all their business assignments.
-                    This action cannot be undone.
+                    Esto eliminará permanentemente a <strong>{user.full_name || user.email}</strong> y todas sus asignaciones de negocio.
+                    Esta acción no se puede deshacer.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogCancel>Cancelar</AlertDialogCancel>
                   <AlertDialogAction
                     onClick={handleDelete}
                     disabled={isDeleting}
                     className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                   >
-                    {isDeleting ? "Deleting..." : "Delete User"}
+                    {isDeleting ? "Eliminando..." : "Eliminar usuario"}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
@@ -213,7 +213,7 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
 
             <Button type="submit" disabled={isLoading}>
               <Save className="mr-2 h-4 w-4" />
-              {isLoading ? "Saving..." : "Save Changes"}
+              {isLoading ? "Guardando..." : "Guardar cambios"}
             </Button>
           </div>
         </form>
