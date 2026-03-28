@@ -461,6 +461,206 @@ def schedule_appointment(
 
 
 @tool
+def prepare_booking(
+    whatsapp_id: str,
+    summary: str,
+    start_time: str,
+    end_time: str,
+    customer_name: str = "",
+    customer_age: str = "",
+    description: str = "",
+    staff_preference: str = "anyone",
+    staff_member_id: str = "",
+    staff_name_hint: str = "",
+    injected_business_context: dict = None,
+) -> str:
+    """
+    Prepare a booking proposal WITHOUT saving to the database.
+    Call this instead of schedule_appointment to propose an appointment to the customer.
+    The customer must confirm the proposal before the booking is created.
+
+    Args:
+        whatsapp_id: WhatsApp ID of the customer
+        summary: Service name / title (e.g. "Corte y barba")
+        start_time: ISO format start time (e.g. "2025-03-25T10:00:00")
+        end_time: ISO format end time (e.g. "2025-03-25T11:00:00")
+        customer_name: Customer full name
+        customer_age: Customer age (optional)
+        description: Extra notes for the booking
+        staff_preference: "specific" or "anyone"
+        staff_member_id: UUID for specific staff (optional if staff_name_hint set)
+        staff_name_hint: Name the customer said (e.g. "Gio", "Joel") — resolved server-side
+
+    Returns:
+        JSON string with status "pending_confirmation" and booking details.
+    """
+    import json as _json
+
+    pref = (staff_preference or "anyone").strip().lower()
+    sid_raw = _normalize_staff_id(staff_member_id)
+    name_hint = (staff_name_hint or "").strip()
+
+    logger.warning(
+        f"[CALENDAR] prepare_booking: whatsapp_id={whatsapp_id}, "
+        f"summary='{summary}', start='{start_time}', end='{end_time}', "
+        f"staff_preference={pref}, staff_member_id={sid_raw!r}, staff_name_hint={name_hint!r}"
+    )
+
+    try:
+        business_id = _get_business_id(injected_business_context)
+        if not business_id:
+            return "❌ No se pudo determinar el negocio. Intenta de nuevo."
+
+        staff_rows = staff_service.get_staff_by_business(business_id, active_only=True)
+        if not staff_rows:
+            return (
+                "❌ No hay profesionales activos; no se puede agendar por WhatsApp. "
+                "Contacta al negocio."
+            )
+
+        if pref not in ("specific", "anyone"):
+            return '❌ staff_preference debe ser "specific" o "anyone".'
+
+        if name_hint:
+            lowered = name_hint.lower()
+            prefixes = ("dale ", "con ", "para ", "quiero ", "el ", "la ")
+            while True:
+                hit = False
+                for prefix in prefixes:
+                    if lowered.startswith(prefix):
+                        name_hint = name_hint[len(prefix):].strip()
+                        lowered = name_hint.lower()
+                        hit = True
+                        break
+                if not hit:
+                    break
+            resolved_id, resolve_err = _resolve_staff_id_by_hint(business_id, name_hint)
+            if resolve_err:
+                return f"❌ {resolve_err}"
+            if sid_raw and sid_raw != resolved_id:
+                logger.warning(
+                    f"[CALENDAR] staff_member_id {sid_raw} ignored; using name hint -> {resolved_id}"
+                )
+            sid_raw = resolved_id
+            pref = "specific"
+
+        if pref == "specific" and not sid_raw:
+            return (
+                "❌ Para un profesional específico usa staff_name_hint con el nombre que dijo el cliente "
+                '(ej. "Gio") o staff_member_id (UUID de list_booking_staff).'
+            )
+
+        if pref == "anyone" and len(staff_rows) == 1:
+            sid_raw = staff_rows[0]["id"]
+            pref = "specific"
+
+        start_dt = _parse_dt(start_time)
+        end_dt = _parse_dt(end_time)
+        if not start_dt or not end_dt:
+            return "❌ Formato de fecha/hora inválido. Usa YYYY-MM-DDTHH:MM:SS."
+
+        if end_dt <= start_dt:
+            return "❌ La hora de fin debe ser después de la hora de inicio."
+
+        from datetime import timezone as _tz
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=_tz.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=_tz.utc)
+
+        date_str = start_dt.strftime("%Y-%m-%d")
+        slots = booking_service.get_available_slots(
+            business_id,
+            date_str,
+            staff_member_id=sid_raw if pref == "specific" else None,
+        )
+
+        requested_start_hhmm = start_dt.strftime("%H:%M")
+        matched_slot = None
+        if slots is not None and len(slots) > 0:
+            matched_slot = next((s for s in slots if s["start"] == requested_start_hhmm), None)
+            if matched_slot and not matched_slot.get("available"):
+                return (
+                    f"❌ El horario {requested_start_hhmm} no está disponible para {date_str}. "
+                    "¿Quieres que te muestre los horarios disponibles?"
+                )
+        if not matched_slot:
+            return (
+                f"❌ El horario {requested_start_hhmm} está fuera del horario de atención para {date_str}. "
+                "¿Quieres que te muestre los horarios disponibles?"
+            )
+
+        chosen_staff_id: Optional[str] = None
+        if pref == "specific":
+            assert sid_raw
+            if not booking_service.is_interval_free_for_staff(
+                business_id, start_dt, end_dt, sid_raw
+            ):
+                return (
+                    "❌ Ese profesional no está libre en el horario solicitado. "
+                    "Pide horarios con get_available_slots y su staff_member_id."
+                )
+            chosen_staff_id = sid_raw
+        else:
+            chosen_staff_id = booking_service.pick_random_free_staff_for_interval(
+                business_id, start_dt, end_dt
+            )
+            if not chosen_staff_id:
+                return (
+                    "❌ No hay ningún profesional libre en ese horario. "
+                    "¿Te muestro otros horarios con get_available_slots?"
+                )
+
+        # Upsert customer (same as schedule_appointment)
+        customer = None
+        if customer_name and customer_name.strip():
+            age_int = None
+            if customer_age and customer_age.strip().isdigit():
+                age_int = int(customer_age.strip())
+            customer = customer_service.create_or_update_customer(
+                whatsapp_id=whatsapp_id,
+                name=customer_name.strip(),
+                age=age_int,
+            )
+        else:
+            customer = customer_service.get_customer_by_whatsapp_id(whatsapp_id)
+
+        customer_id = customer["id"] if customer else None
+
+        staff_name = ""
+        st = staff_service.get_staff_member(chosen_staff_id)
+        if st:
+            staff_name = st.get("name") or ""
+
+        display_date = start_dt.strftime("%d/%m/%Y")
+        display_time = start_dt.strftime("%I:%M %p")
+
+        pending = {
+            "status": "pending_confirmation",
+            "service_name": summary,
+            "start_at": start_dt.isoformat(),
+            "end_at": end_dt.isoformat(),
+            "staff_member_id": chosen_staff_id,
+            "_staff_name": staff_name,
+            "customer_id": customer_id,
+            "notes": description or None,
+            "display": {
+                "date": display_date,
+                "time": display_time,
+                "service": summary,
+                "professional": staff_name,
+            },
+        }
+
+        logger.warning(f"[CALENDAR] prepare_booking: pending proposal for {whatsapp_id} at {display_date} {display_time}")
+        return _json.dumps(pending, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"[CALENDAR] Error in prepare_booking: {e}")
+        return f"❌ Error preparando la cita: {str(e)}"
+
+
+@tool
 def reschedule_appointment(whatsapp_id: str, new_start_time: str, new_end_time: str,
                            appointment_selector: str = "latest",
                            injected_business_context: dict = None) -> str:
@@ -642,11 +842,20 @@ def _select_booking(bookings: list, selector: str) -> Optional[dict]:
     return bookings[0]  # fallback to first
 
 
-# List of all calendar tools (unchanged interface for booking_agent.py)
+# Full tool list (schedule_appointment kept for non-confirmation path)
 calendar_tools = [
     list_booking_staff,
     get_available_slots,
     schedule_appointment,
+    reschedule_appointment,
+    cancel_appointment,
+]
+
+# Tools for confirmation-required flow (prepare_booking replaces schedule_appointment)
+calendar_tools_with_confirmation = [
+    list_booking_staff,
+    get_available_slots,
+    prepare_booking,
     reschedule_appointment,
     cancel_appointment,
 ]

@@ -103,7 +103,15 @@ def get_menu_categories(injected_business_context: dict = None) -> str:
 
         categories = product_order_service.list_categories(business_id=business_id)
         if not categories:
-            return "No hay categorías disponibles en el menú por ahora."
+            # No categories set — fall back to listing all products directly
+            all_products = product_order_service.list_products(business_id=business_id)
+            if not all_products:
+                return "No hay productos disponibles en el menú por ahora."
+            lines = []
+            for p in all_products:
+                price_str = _format_price(p.get("price", 0), p.get("currency", "COP"))
+                lines.append(f"• {p['name']} - {price_str}")
+            return "Productos disponibles:\n\n" + "\n".join(lines)
         return "Categorías del menú: " + ", ".join(categories) + ". Pregunta por una categoría para ver los productos (ej. qué tienes de bebidas)."
     except Exception as e:
         logger.error(f"[ORDER_TOOL] get_menu_categories error: {e}")
