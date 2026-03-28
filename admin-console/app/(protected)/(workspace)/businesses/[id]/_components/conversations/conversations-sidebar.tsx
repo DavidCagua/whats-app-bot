@@ -1,6 +1,18 @@
 "use client"
 
 import { useState, useTransition } from "react"
+
+function loadLastSeen(): Record<string, number> {
+  if (typeof window === "undefined") return {}
+  const result: Record<string, number> = {}
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key?.startsWith("inbox:lastSeen:")) {
+      result[key.replace("inbox:lastSeen:", "")] = Number(localStorage.getItem(key))
+    }
+  }
+  return result
+}
 import { useRouter, useSearchParams } from "next/navigation"
 import { ConversationGroup } from "@/lib/conversations-queries"
 import { Card, CardContent } from "@/components/ui/card"
@@ -51,6 +63,7 @@ export function ConversationsSidebar({
   const searchParams = useSearchParams()
   const [isPending, startTransition] = useTransition()
   const [showFilters, setShowFilters] = useState(false)
+  const [lastSeen, setLastSeen] = useState<Record<string, number>>(loadLastSeen)
 
   const [search, setSearch] = useState(initialFilters.search || "")
   const [business, setBusiness] = useState(initialFilters.business || "all")
@@ -125,8 +138,13 @@ export function ConversationsSidebar({
   }
 
   const handleConversationClick = (whatsappId: string, businessId: string) => {
+    const conversationId = `${whatsappId}:${businessId}`
+    const now = Date.now()
+    setLastSeen((prev) => ({ ...prev, [conversationId]: now }))
+    localStorage.setItem(`inbox:lastSeen:${conversationId}`, String(now))
+
     const params = new URLSearchParams(searchParams.toString())
-    params.set("conversation", `${whatsappId}:${businessId}`)
+    params.set("conversation", conversationId)
 
     startTransition(() => {
       router.push(`${inboxBasePath}?${params.toString()}`)
@@ -219,11 +237,16 @@ export function ConversationsSidebar({
           ) : (
             conversations.map((conversation) => {
               const conversationId = `${conversation.whatsapp_id}:${conversation.business_id}`
+              const seenAt = lastSeen[conversationId]
+              const isUnread =
+                !seenAt ||
+                new Date(conversation.last_timestamp).getTime() > seenAt
               return (
                 <ConversationListItem
                   key={conversationId}
                   conversation={conversation}
                   isSelected={conversationId === selectedConversationId}
+                  isUnread={isUnread && conversationId !== selectedConversationId}
                   showBusiness={showBusinessColumn}
                   onClick={() =>
                     handleConversationClick(

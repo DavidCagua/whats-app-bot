@@ -15,11 +15,15 @@ type BusinessSettingsData = {
   timezone?: string
   language?: string
   payment_methods?: string[]
+  /** Enlace de pago (Stripe, Mercado Pago, etc.) para el agente de ventas */
+  payment_link?: string
   promotions?: string[]
   ai_prompt?: string
   products_enabled?: boolean
   menu_url?: string
   agent_enabled?: boolean
+  /** Si está definido y el agente está habilitado, recibe todos los mensajes (anula el orden solo por prioridad). */
+  conversation_primary_agent?: string
 }
 
 export type BusinessSettings = {
@@ -36,7 +40,8 @@ export type BusinessSettings = {
   
   // Payment Methods
   payment_methods: string[]
-  
+  payment_link: string
+
   // Promotions
   promotions: string[]
 
@@ -51,6 +56,9 @@ export type BusinessSettings = {
 
   // Agent master switch
   agent_enabled: boolean
+
+  /** "" = primer agente por prioridad; ej. "sales" para tiendas */
+  conversation_primary_agent: string
 }
 
 export async function getBusinessSettings(businessId: string): Promise<BusinessSettings | null> {
@@ -86,11 +94,13 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
       timezone: settings?.timezone || "America/Bogota",
       language: settings?.language || "es-CO",
       payment_methods: settings?.payment_methods || [],
+      payment_link: settings?.payment_link ?? "",
       promotions: settings?.promotions || [],
       ai_prompt: settings?.ai_prompt || "",
       products_enabled: settings?.products_enabled ?? true,
       menu_url: settings?.menu_url ?? "",
       agent_enabled: settings?.agent_enabled ?? true,
+      conversation_primary_agent: settings?.conversation_primary_agent ?? "",
     }
   } catch (error) {
     console.error("Error fetching business settings:", error)
@@ -150,11 +160,15 @@ export async function updateBusinessSettings(
       ...(settings.timezone !== undefined && { timezone: settings.timezone }),
       ...(settings.language !== undefined && { language: settings.language }),
       ...(settings.payment_methods !== undefined && { payment_methods: settings.payment_methods }),
+      ...(settings.payment_link !== undefined && { payment_link: settings.payment_link }),
       ...(settings.promotions !== undefined && { promotions: settings.promotions }),
       ...(settings.ai_prompt !== undefined && { ai_prompt: settings.ai_prompt }),
       ...(settings.products_enabled !== undefined && { products_enabled: settings.products_enabled }),
       ...(settings.menu_url !== undefined && { menu_url: settings.menu_url }),
       ...(settings.agent_enabled !== undefined && { agent_enabled: settings.agent_enabled }),
+      ...(settings.conversation_primary_agent !== undefined && {
+        conversation_primary_agent: settings.conversation_primary_agent,
+      }),
     }
 
     updateData.settings = newSettings

@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils"
 type ConversationListItemProps = {
   conversation: ConversationGroup
   isSelected: boolean
+  isUnread: boolean
   showBusiness: boolean
   onClick: () => void
 }
@@ -16,6 +17,7 @@ type ConversationListItemProps = {
 export function ConversationListItem({
   conversation,
   isSelected,
+  isUnread,
   showBusiness,
   onClick,
 }: ConversationListItemProps) {
@@ -33,7 +35,14 @@ export function ConversationListItem({
       )}
     >
       <div className="flex items-start justify-between gap-2 mb-1">
-        <h4 className="font-semibold text-sm truncate flex-1">{displayName}</h4>
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          {isUnread && (
+            <span className="h-2 w-2 rounded-full bg-blue-500 flex-shrink-0" />
+          )}
+          <h4 className={cn("text-sm truncate", isUnread ? "font-bold" : "font-semibold")}>
+            {displayName}
+          </h4>
+        </div>
         <span className="text-xs text-muted-foreground whitespace-nowrap">{timeAgo}</span>
       </div>
 

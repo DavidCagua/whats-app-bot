@@ -26,11 +26,19 @@ const businessSettingsSchema = z.object({
   timezone: z.string().min(1, "La zona horaria es requerida"),
   language: z.string().min(1, "El idioma es requerido"),
   payment_methods: z.array(z.string()),
+  payment_link: z
+    .string()
+    .default("")
+    .refine(
+      (s) => !s.trim() || /^https?:\/\/.+/i.test(s.trim()),
+      "Ingresa una URL válida (https://...)"
+    ),
   promotions: z.array(z.string()),
   ai_prompt: z.string().min(1, "El prompt del asistente es requerido"),
   products_enabled: z.boolean(),
   menu_url: z.string().optional(),
   agent_enabled: z.boolean(),
+  conversation_primary_agent: z.string().default(""),
 })
 
 type BusinessSettingsFormData = z.infer<typeof businessSettingsSchema>
@@ -258,6 +266,33 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
               />
             </div>
 
+            <div className="md:col-span-2 space-y-2">
+              <Label htmlFor="conversation_primary_agent">Agente principal en WhatsApp</Label>
+              <Select
+                value={form.watch("conversation_primary_agent") || "__auto__"}
+                onValueChange={(value) =>
+                  form.setValue("conversation_primary_agent", value === "__auto__" ? "" : value)
+                }
+              >
+                <SelectTrigger id="conversation_primary_agent">
+                  <SelectValue placeholder="Automático" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__auto__">
+                    Automático (el de menor número de prioridad en Agentes IA)
+                  </SelectItem>
+                  <SelectItem value="booking">Reservas / citas (booking)</SelectItem>
+                  <SelectItem value="order">Pedidos (order)</SelectItem>
+                  <SelectItem value="sales">Ventas / catálogo (sales)</SelectItem>
+                  <SelectItem value="support">Soporte (support)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-sm text-muted-foreground">
+                Si eliges un agente, todos los mensajes van a él mientras esté habilitado en la sección
+                Agentes IA. Déjalo en automático solo si el primero por prioridad es el que quieres.
+              </p>
+            </div>
+
             {form.watch("business_type") === "restaurant" && (
               <div className="md:col-span-2 space-y-2">
                 <Label htmlFor="menu_url">URL del menú</Label>
@@ -289,6 +324,21 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="payment_link">Enlace de pago</Label>
+              <Input
+                id="payment_link"
+                {...form.register("payment_link")}
+                type="url"
+                placeholder="https://..."
+              />
+              <p className="text-sm text-muted-foreground">
+                Opcional. Lo usa el asistente cuando el cliente quiere pagar (por ejemplo Stripe o Mercado Pago).
+              </p>
+              {form.formState.errors.payment_link && (
+                <p className="text-sm text-red-500">{form.formState.errors.payment_link.message}</p>
+              )}
+            </div>
             {form.watch("payment_methods").map((method, index) => (
               <div key={index} className="flex gap-4 items-center">
                 <Input

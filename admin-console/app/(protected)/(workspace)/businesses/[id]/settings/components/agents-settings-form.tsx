@@ -117,8 +117,8 @@ export function AgentsSettingsForm({
           Agentes IA
         </CardTitle>
         <CardDescription>
-          Habilita o deshabilita agentes para este negocio. Cada agente maneja diferentes tipos de
-          solicitudes de clientes (citas, pedidos, soporte, etc.).
+          Habilita o deshabilita agentes. El que tenga el número de prioridad más bajo recibe los
+          mensajes por defecto; en Configuración general puedes fijar un agente principal que lo anula.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -169,7 +169,7 @@ export function AgentsSettingsForm({
         <div className="text-sm text-muted-foreground pt-2 border-t">
           <p className="font-medium mb-1">¿Cómo funcionan los agentes?</p>
           <ul className="list-disc list-inside space-y-1">
-            <li>Los mensajes entrantes se enrutan al agente apropiado según la intención</li>
+            <li>Por ahora un solo agente atiende cada mensaje: el principal (configuración) o el de menor prioridad</li>
             <li>Si solo hay un agente habilitado, todos los mensajes van a ese agente</li>
             <li>El estado de sesión evita la reclasificación en flujos de múltiples turnos</li>
           </ul>
