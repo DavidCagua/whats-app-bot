@@ -20,6 +20,8 @@ export async function createBusiness(data: {
   }
 
   try {
+    // Empty settings: hours and booking rules live in business_availability (and related tables),
+    // not in settings JSON. Do not seed legacy keys (business_hours, appointment_settings).
     const business = await prisma.businesses.create({
       data: {
         name: data.name,

@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { Plus, X, Save, MapPin, CreditCard, Gift, Calendar, MessageSquare, Package } from "lucide-react"
+import { Plus, X, Save, MapPin, CreditCard, Gift, MessageSquare, Package } from "lucide-react"
 import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
 
@@ -27,11 +27,6 @@ const businessSettingsSchema = z.object({
   language: z.string().min(1, "El idioma es requerido"),
   payment_methods: z.array(z.string()),
   promotions: z.array(z.string()),
-  appointment_settings: z.object({
-    max_concurrent: z.number().min(1, "Debe permitir al menos 1 cita simultánea"),
-    min_advance_hours: z.number().min(0, "No puede ser negativo"),
-    default_duration_minutes: z.number().min(1, "Debe ser al menos 1 minuto"),
-  }),
   ai_prompt: z.string().min(1, "El prompt del asistente es requerido"),
   products_enabled: z.boolean(),
   menu_url: z.string().optional(),
@@ -62,7 +57,11 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
   const onSubmit = async (data: BusinessSettingsFormData) => {
     setIsLoading(true)
     try {
-      const result = await updateBusinessSettings(business.id, data)
+      const payload =
+        data.business_type === "restaurant"
+          ? data
+          : { ...data, menu_url: "" }
+      const result = await updateBusinessSettings(business.id, payload)
       if (result.success) {
         toast.success("¡Configuración guardada exitosamente!")
       } else {
@@ -259,18 +258,20 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
               />
             </div>
 
-            <div className="md:col-span-2 space-y-2">
-              <Label htmlFor="menu_url">URL del menú</Label>
-              <Input
-                id="menu_url"
-                {...form.register("menu_url")}
-                placeholder="https://ejemplo.com/menu.html"
-                type="url"
-              />
-              <p className="text-sm text-muted-foreground">
-                Enlace al menú completo. El asistente lo incluirá en el saludo inicial.
-              </p>
-            </div>
+            {form.watch("business_type") === "restaurant" && (
+              <div className="md:col-span-2 space-y-2">
+                <Label htmlFor="menu_url">URL del menú</Label>
+                <Input
+                  id="menu_url"
+                  {...form.register("menu_url")}
+                  placeholder="https://ejemplo.com/menu.html"
+                  type="url"
+                />
+                <p className="text-sm text-muted-foreground">
+                  Enlace al menú completo. El asistente lo incluirá en el saludo inicial.
+                </p>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -346,50 +347,6 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
               <Plus className="mr-2 h-4 w-4" />
               Agregar promoción
             </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Appointment Settings */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Calendar className="h-5 w-5" />
-            Configuración de citas
-          </CardTitle>
-          <CardDescription>
-            Configura cómo se gestionan las citas
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="max_concurrent">Máx. citas simultáneas</Label>
-              <Input
-                id="max_concurrent"
-                type="number"
-                {...form.register("appointment_settings.max_concurrent", { valueAsNumber: true })}
-                placeholder="2"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="min_advance_hours">Horas mínimas de anticipación</Label>
-              <Input
-                id="min_advance_hours"
-                type="number"
-                {...form.register("appointment_settings.min_advance_hours", { valueAsNumber: true })}
-                placeholder="1"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="default_duration_minutes">Duración predeterminada (minutos)</Label>
-              <Input
-                id="default_duration_minutes"
-                type="number"
-                {...form.register("appointment_settings.default_duration_minutes", { valueAsNumber: true })}
-                placeholder="60"
-              />
-            </div>
           </div>
         </CardContent>
       </Card>

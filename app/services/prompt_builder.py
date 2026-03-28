@@ -41,12 +41,6 @@ class PromptBuilder:
             # Get business information
             business_info = business_config_service.get_business_info(business_context)
 
-            # Get appointment settings
-            apt_settings = business_info.get('appointment_settings', {}) if business_context else {}
-            if not apt_settings:
-                apt_settings = business_context.get('business', {}).get('settings', {}).get('appointment_settings', {}) if business_context else {}
-            max_concurrent = apt_settings.get('max_concurrent', 2)
-
             # Get admin-editable prompt from database (NO variable injection)
             admin_prompt = ""
             if business_context:
@@ -61,7 +55,6 @@ class PromptBuilder:
             # Build context section (customer, business, runtime info)
             context_section = self._build_context_section(
                 business_info=business_info,
-                max_concurrent=max_concurrent,
                 name=name,
                 wa_id=wa_id,
                 current_date=current_date,
@@ -91,7 +84,6 @@ class PromptBuilder:
     def _build_context_section(
         self,
         business_info: Dict,
-        max_concurrent: int,
         name: str,
         wa_id: str,
         current_date: str,
@@ -119,7 +111,6 @@ class PromptBuilder:
             context += f"- Teléfono: {phone}\n"
 
         context += f"- Zona horaria: {business_info.get('timezone', 'UTC')}\n"
-        context += f"- Máximo de citas simultáneas: {max_concurrent}\n"
 
         context += "\n**Cliente actual:**\n"
         context += f"- Nombre: {name}\n"
@@ -190,7 +181,8 @@ class PromptBuilder:
         if not rules:
             return (
                 "🕐 **HORARIOS DE ATENCIÓN**\n\n"
-                "No hay horarios cargados en el sistema para este negocio."
+                "No hay horarios cargados en el sistema para este negocio "
+                "(tabla business_availability)."
             )
 
         day_names = [
@@ -233,6 +225,7 @@ Tu función es ayudar a los clientes con:
 Usa un tono profesional y amigable.
 
 REGLAS IMPORTANTES:
+- La lista de servicios y los horarios de atención del system prompt vienen solo de la base de datos. Si una sección dice explícitamente que no hay datos cargados en el sistema para este negocio, NO inventes servicios, precios ni horarios: dilo con claridad y ofrece que contacten al negocio o que un administrador cargue la información.
 - Verifica disponibilidad con las herramientas antes de confirmar citas (puedes filtrar por profesional o ver cupos para "cualquiera").
 - Pregunta si el cliente prefiere un profesional concreto o "cualquiera" / el primero disponible.
 - Si el cliente dice un nombre o apodo ("Gio", "Joel", "con Gio", "dale con Joel"): en schedule_appointment usa SIEMPRE staff_preference="specific" y staff_name_hint con el nombre corto (ej. "Gio"). El servidor asigna el UUID correcto; no adivines el UUID ni uses "anyone" si ya eligió persona.
@@ -253,6 +246,7 @@ Current date: {current_date}
 Current year: {current_year}
 
 You can help with scheduling appointments using the calendar tools available.
+Do not invent services, prices, or business hours if the system prompt says none are loaded for this business; say so clearly.
 Always be polite and professional.
 """
 

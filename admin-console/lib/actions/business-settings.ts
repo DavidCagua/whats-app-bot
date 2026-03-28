@@ -16,11 +16,6 @@ type BusinessSettingsData = {
   language?: string
   payment_methods?: string[]
   promotions?: string[]
-  appointment_settings?: {
-    max_concurrent: number
-    min_advance_hours: number
-    default_duration_minutes: number
-  }
   ai_prompt?: string
   products_enabled?: boolean
   menu_url?: string
@@ -44,14 +39,7 @@ export type BusinessSettings = {
   
   // Promotions
   promotions: string[]
-  
-  // Appointment Settings
-  appointment_settings: {
-    max_concurrent: number
-    min_advance_hours: number
-    default_duration_minutes: number
-  }
-  
+
   // AI Prompt
   ai_prompt: string
 
@@ -99,11 +87,6 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
       language: settings?.language || "es-CO",
       payment_methods: settings?.payment_methods || [],
       promotions: settings?.promotions || [],
-      appointment_settings: settings?.appointment_settings || {
-        max_concurrent: 2,
-        min_advance_hours: 1,
-        default_duration_minutes: 60,
-      },
       ai_prompt: settings?.ai_prompt || "",
       products_enabled: settings?.products_enabled ?? true,
       menu_url: settings?.menu_url ?? "",
@@ -168,7 +151,6 @@ export async function updateBusinessSettings(
       ...(settings.language !== undefined && { language: settings.language }),
       ...(settings.payment_methods !== undefined && { payment_methods: settings.payment_methods }),
       ...(settings.promotions !== undefined && { promotions: settings.promotions }),
-      ...(settings.appointment_settings !== undefined && { appointment_settings: settings.appointment_settings }),
       ...(settings.ai_prompt !== undefined && { ai_prompt: settings.ai_prompt }),
       ...(settings.products_enabled !== undefined && { products_enabled: settings.products_enabled }),
       ...(settings.menu_url !== undefined && { menu_url: settings.menu_url }),

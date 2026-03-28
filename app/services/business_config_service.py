@@ -61,6 +61,7 @@ class BusinessConfigService:
                 Service.business_id == uuid.UUID(business_id),
                 Service.is_active.is_(True)
             ).order_by(Service.name.asc()).all()
+
             result = [row.to_dict() for row in rows]
             session.close()
             return result
@@ -69,19 +70,24 @@ class BusinessConfigService:
             return []
 
     def get_services_text(self, business_context: Optional[Dict] = None) -> str:
-        """Get formatted text of services and prices."""
+        """Get formatted text of services and prices from the services table (same empty-state pattern as horarios)."""
         services = self.get_services_list(business_context)
-        if not services:
-            return "Servicios disponibles (consultar precios)"
-
-        business_type = self.get_business_info(business_context).get('business_type', 'service')
+        info = self.get_business_info(business_context)
+        business_type = info.get('business_type', 'service')
         icon = self._get_business_icon(business_type)
 
-        text = f"{icon} **SERVICIOS Y PRECIOS**\n\n"
+        if not services:
+            return (
+                f"{icon} **SERVICIOS Y PRECIOS**\n\n"
+                "No hay servicios cargados en el sistema para este negocio "
+                "(tabla services)."
+            )
+
+        text = f"{icon} **SERVICIOS Y PRECIOS** (configuración del sistema / services)\n\n"
         for service in services:
             name = service.get('name', 'Servicio')
             price = service.get('price', 0)
-            duration = service.get('duration', 0)
+            duration = service.get("duration_minutes") or service.get("duration") or 0
             if duration:
                 text += f"• {name}: ${price:,} COP ({duration} min)\n"
             else:

@@ -79,7 +79,8 @@ class BusinessService:
         Args:
             name: Business name
             business_type: Type of business (barberia, salon, etc.)
-            settings: Business settings (JSONB)
+            settings: Business settings (JSONB). Prefer {} — do not use legacy
+                business_hours or appointment_settings; use business_availability instead.
 
         Returns:
             Created business information as dictionary, or None if failed
