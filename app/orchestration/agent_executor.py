@@ -56,7 +56,7 @@ def execute_agent(
         message_id=message_id,
     )
 
-    if agent_type == "order" and business_id:
+    if agent_type in ("order", "booking") and business_id:
         load_result = session_state_service.load(wa_id, str(business_id))
         session = load_result.get("session", {})
         kwargs["session"] = session

@@ -8,11 +8,13 @@ from typing import Dict, List, Optional
 from .base_agent import BaseAgent
 from .booking_agent import BookingAgent
 from .order_agent import OrderAgent
+from .sales_agent import SalesAgent
 
 # Explicit registry: no hardcoding in router
 AGENT_REGISTRY: Dict[str, BaseAgent] = {
     "booking": BookingAgent(),
     "order": OrderAgent(),
+    "sales": SalesAgent(),
 }
 
 

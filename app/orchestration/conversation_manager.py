@@ -32,14 +32,42 @@ class ConversationManager:
         """
         business_id = business_context.get("business_id") if business_context else None
 
-        # Load enabled agents for this business
+        # Load enabled agents for this business (ordered by priority ascending).
         enabled_agents = business_agent_service.get_enabled_agents(business_id or "")
 
-        # Phase 1: Single-agent fast path - route to first enabled agent
         agent_type = "booking"
         if enabled_agents:
-            agent_type = enabled_agents[0]["agent_type"]
-        logging.info(f"[CONVERSATION_MANAGER] Routing to agent: {agent_type}")
+            biz = (business_context or {}).get("business") or {}
+            settings = biz.get("settings") or {}
+            primary = str(settings.get("conversation_primary_agent") or "").strip().lower()
+            if primary:
+                match = next(
+                    (a for a in enabled_agents if a["agent_type"] == primary),
+                    None,
+                )
+                if match:
+                    agent_type = primary
+                else:
+                    agent_type = enabled_agents[0]["agent_type"]
+                    logging.warning(
+                        "[CONVERSATION_MANAGER] conversation_primary_agent=%r not in enabled agents; "
+                        "using first by priority: %s",
+                        primary,
+                        agent_type,
+                    )
+            else:
+                agent_type = enabled_agents[0]["agent_type"]
+
+        agents_summary = (
+            ", ".join(f"{a['agent_type']}:{a.get('priority')}" for a in enabled_agents)
+            if enabled_agents
+            else "(none, default booking)"
+        )
+        logging.warning(
+            "[CONVERSATION_MANAGER] Routed to agent=%s | enabled by priority: [%s]",
+            agent_type,
+            agents_summary,
+        )
 
         output = execute_agent(
             agent_type=agent_type,

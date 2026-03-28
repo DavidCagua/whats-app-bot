@@ -72,6 +72,7 @@ def parse_inbound_message(body: dict, provider: str = "twilio") -> Optional[Dict
             })
         elif msg.get("type") == "image" and "image" in msg:
             image = msg["image"]
+            text = (image.get("caption") or "").strip()
             attachments.append({
                 "type": "image",
                 "content_type": (image.get("mime_type") or "image/jpeg"),
