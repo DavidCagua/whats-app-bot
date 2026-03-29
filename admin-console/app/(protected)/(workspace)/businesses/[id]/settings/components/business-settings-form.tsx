@@ -28,7 +28,6 @@ const businessSettingsSchema = z.object({
   payment_methods: z.array(z.string()),
   payment_link: z
     .string()
-    .default("")
     .refine(
       (s) => !s.trim() || /^https?:\/\/.+/i.test(s.trim()),
       "Ingresa una URL válida (https://...)"
@@ -38,7 +37,7 @@ const businessSettingsSchema = z.object({
   products_enabled: z.boolean(),
   menu_url: z.string().optional(),
   agent_enabled: z.boolean(),
-  conversation_primary_agent: z.string().default(""),
+  conversation_primary_agent: z.string(),
 })
 
 type BusinessSettingsFormData = z.infer<typeof businessSettingsSchema>
