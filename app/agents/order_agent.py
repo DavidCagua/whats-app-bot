@@ -267,23 +267,30 @@ class OrderAgent(BaseAgent):
 
             # 3) Response: deterministic greeting for GREET, else LLM response generator
             if intent == INTENT_GREET:
-                business_name = "el restaurante"
-                menu_url = ""
+                business_name = "BIELA FAST FOOD"
+                menu_url = "https://gixlink.com/Biela"
                 if business_context and business_context.get("business"):
                     biz = business_context["business"]
-                    business_name = biz.get("name") or business_name
+                    business_name = (biz.get("name") or business_name).strip()
                     settings = biz.get("settings") or {}
-                    menu_url = (settings.get("menu_url") or "").strip()
+                    menu_url = (settings.get("menu_url") or menu_url).strip()
+
                 customer_name = (name or "").strip()
-                if customer_name and customer_name.lower() not in ("usuario", "cliente", "user"):
-                    final_response_text = f"Hola {customer_name}, bienvenido a {business_name}. "
+                has_real_name = customer_name and customer_name.lower() not in ("usuario", "cliente", "user")
+
+                # Preserve the existing greeting cases: personalized when we have a real name, generic otherwise.
+                if has_real_name:
+                    opener = f"Hola {customer_name}.\n\n"
                 else:
-                    final_response_text = f"Hola, bienvenido a {business_name}. "
-                if menu_url:
-                    final_response_text += f"Este es nuestro menú: {menu_url}. "
-                else:
-                    final_response_text += "Puedes preguntarme por el menú por categorías. "
-                final_response_text += "¿Qué te gustaría ordenar?"
+                    opener = ""
+
+                final_response_text = (
+                    f"{opener}"
+                    f"Gracias por comunicarte con {business_name}. ¿Cómo podemos ayudarte?\n\n"
+                    "🍔🍟🔥😁\n\n"
+                    "Recuerda que nuestro horario de atención al público es de 5:30 PM a 10:00 PM de lunes a viernes.\n\n"
+                    f"{menu_url}"
+                )
             else:
                 response_system = RESPONSE_GENERATOR_SYSTEM + "\n\n" + _format_business_info_for_prompt(business_context)
                 if intent in (INTENT_ADD_TO_CART, INTENT_REMOVE_FROM_CART, INTENT_UPDATE_CART_ITEM) and success:
