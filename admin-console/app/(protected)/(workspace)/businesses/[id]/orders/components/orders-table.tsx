@@ -90,6 +90,7 @@ export function OrdersTable({ initialOrders }: { initialOrders: OrderRow[] }) {
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead>ID</TableHead>
             <TableHead>Fecha</TableHead>
             <TableHead>Cliente</TableHead>
             <TableHead>Ítems</TableHead>
@@ -101,7 +102,7 @@ export function OrdersTable({ initialOrders }: { initialOrders: OrderRow[] }) {
           {orders.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={5}
+                colSpan={6}
                 className="text-center text-muted-foreground py-8"
               >
                 Aún no hay pedidos.
@@ -110,7 +111,11 @@ export function OrdersTable({ initialOrders }: { initialOrders: OrderRow[] }) {
           ) : (
             orders.map((order) => (
               <TableRow key={order.id}>
-                <TableCell className="text-muted-foreground">
+                <TableCell className="font-mono text-xs">
+                  {order.id.slice(0, 8)}
+                </TableCell>
+
+                 <TableCell className="text-muted-foreground">
                   {order.created_at
                     ? format(new Date(order.created_at), "MMM d, yyyy HH:mm")
                     : "—"}
