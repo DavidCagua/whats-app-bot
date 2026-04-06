@@ -43,9 +43,10 @@ Reglas de menú y búsqueda (importante):
 - GET_PRODUCT con product_name: cuando pregunta qué trae o qué tiene un producto (ej. "qué trae la barracuda", "qué tiene la montesa").
 
 Otras reglas:
-- Si el usuario saluda o es el inicio: GREET.
-- Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id") y "quantity". Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1}}, ... ]. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}.
-- Si pide quitar algo: REMOVE_FROM_CART con product_id.
+- GREET SOLO si el mensaje es únicamente un saludo ("hola", "buenas", "buenos días", "buenas noches") SIN ninguna mención de producto, cantidad o intención de pedir. Si el usuario mezcla saludo con pedido ("hola quiero una barracuda", "buenas, un domicilio por favor") → usa ADD_TO_CART o SEARCH_PRODUCTS directamente, NO GREET.
+- Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}.
+- MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al carrito (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en carrito y "notes" con la instrucción. Ejemplo: carrito tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente.
+- Si pide quitar un producto del carrito completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
 - Si dice "listo", "procedamos", "confirmar": PROCEED_TO_CHECKOUT.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY): usa GET_CUSTOMER_INFO cuando necesites saber qué tenemos o qué falta (ej. usuario dice "listo", "ok", o para mostrar confirmación). Usa SUBMIT_DELIVERY_INFO cuando el usuario proporcione uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
@@ -221,7 +222,10 @@ class OrderAgent(BaseAgent):
         items = order_context.get("items") or []
         total = order_context.get("total") or 0
         if items:
-            lines = [f"{it.get('quantity', 0)}x {it.get('name', '')}" for it in items]
+            lines = []
+            for it in items:
+                notes_part = f" ({it['notes']})" if it.get("notes") else ""
+                lines.append(f"{it.get('quantity', 0)}x {it.get('name', '')}{notes_part}")
             cart_summary_str = "; ".join(lines) + f". Total: ${int(total):,}".replace(",", ".")
         else:
             cart_summary_str = "Carrito vacío."

@@ -289,12 +289,14 @@ def execute_order_intent(
         tool_args["product_id"] = params.get("product_id") or ""
         tool_args["product_name"] = params.get("product_name") or ""
         tool_args["quantity"] = int(params.get("quantity") or 1)
+        tool_args["notes"] = (params.get("notes") or "").strip()
     elif intent == INTENT_VIEW_CART:
         tool_name = "view_cart"
     elif intent == INTENT_UPDATE_CART_ITEM:
         tool_name = "update_cart_item"
         tool_args["product_id"] = params.get("product_id") or ""
         tool_args["quantity"] = int(params.get("quantity") or 0)
+        tool_args["notes"] = (params.get("notes") or "").strip()
         # Resolve product_id from product_name or first item if missing
         if not tool_args["product_id"] and wa_id and business_id:
             name = (params.get("product_name") or "").strip()
@@ -310,6 +312,12 @@ def execute_order_intent(
     elif intent == INTENT_REMOVE_FROM_CART:
         tool_name = "remove_from_cart"
         tool_args["product_id"] = params.get("product_id") or ""
+        tool_args["product_name"] = (params.get("product_name") or "").strip()
+        # Resolve product_id by name if not provided
+        if not tool_args["product_id"] and tool_args["product_name"] and wa_id and business_id:
+            resolved = _resolve_product_id_by_name(wa_id, business_id, tool_args["product_name"])
+            if resolved:
+                tool_args["product_id"] = resolved
     elif intent == INTENT_GET_CUSTOMER_INFO:
         tool_name = "get_customer_info"
     elif intent == INTENT_SUBMIT_DELIVERY_INFO:
