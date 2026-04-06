@@ -7,7 +7,10 @@
     "build": "prisma generate && next build --turbopack",
     "start": "next start",
     "lint": "eslint",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:sync": "prisma db pull && prisma generate",
+    "db:push": "echo '\\n❌ ERROR: No uses prisma db push aqui.\\nLas migraciones las maneja Python via /migrations/*.sql\\nPara sincronizar el schema corre: npm run db:sync\\n' && exit 1",
+    "db:migrate": "echo '\\n❌ ERROR: No uses prisma migrate aqui.\\nLas migraciones las maneja Python via /migrations/*.sql\\nPara sincronizar el schema corre: npm run db:sync\\n' && exit 1"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
