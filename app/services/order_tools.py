@@ -58,6 +58,14 @@ def _products_enabled(ctx: Optional[Dict]) -> bool:
     return settings.get("products_enabled", True)
 
 
+def _get_delivery_fee(ctx: Optional[Dict]) -> float:
+    """Get delivery fee from business settings. Defaults to 5000 COP."""
+    if not ctx:
+        return 5000.0
+    settings = (ctx.get("business") or {}).get("settings") or {}
+    return float(settings.get("delivery_fee", 5000))
+
+
 def _cart_from_session(wa_id: str, business_id: str) -> Dict:
     """
     Load order_context (cart + delivery_info + state) from session.
@@ -305,10 +313,10 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         _save_cart(wa_id, business_id, new_cart)
 
         notes_str = f" ({notes})" if notes else ""
-        return f"✅ Agregado {quantity}x {name}{notes_str} al carrito. Total: {_format_price(total)}"
+        return f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. Subtotal: {_format_price(total)}"
     except Exception as e:
         logger.error(f"[ORDER_TOOL] add_to_cart error: {e}")
-        return f"❌ Error al agregar al carrito: {str(e)}"
+        return f"❌ Error al agregar a tu pedido: {str(e)}"
 
 
 @tool
@@ -324,10 +332,10 @@ def view_cart(injected_business_context: dict = None) -> str:
 
         cart = _cart_from_session(wa_id, business_id)
         items = cart.get("items") or []
-        total = cart.get("total") or 0
+        subtotal = cart.get("total") or 0
 
         if not items:
-            return "Tu carrito está vacío. ¿Qué te gustaría ordenar? Pregunta por el menú o una categoría (ej. qué tienes de bebidas)."
+            return "Tu pedido está vacío. ¿Qué te gustaría ordenar? Pregunta por el menú o una categoría (ej. qué tienes de bebidas)."
 
         lines = []
         for it in items:
@@ -336,10 +344,19 @@ def view_cart(injected_business_context: dict = None) -> str:
             notes_str = f" ({it['notes']})" if it.get("notes") else ""
             lines.append(f"• {it.get('quantity', 0)}x {it.get('name', '')}{notes_str} - {price_str} (ID: {pid})")
 
-        return "Tu carrito:\n\n" + "\n".join(lines) + f"\n\n**Total: {_format_price(total)}**"
+        delivery_fee = _get_delivery_fee(injected_business_context)
+        grand_total = subtotal + delivery_fee
+        summary = (
+            "Tu pedido:\n\n"
+            + "\n".join(lines)
+            + f"\n\nSubtotal: {_format_price(subtotal)}"
+            + f"\n🛵 Domicilio: {_format_price(delivery_fee)}"
+            + f"\n**Total: {_format_price(grand_total)}**"
+        )
+        return summary
     except Exception as e:
         logger.error(f"[ORDER_TOOL] view_cart error: {e}")
-        return f"❌ Error al ver el carrito: {str(e)}"
+        return f"❌ Error al ver el pedido: {str(e)}"
 
 
 @tool
@@ -394,12 +411,12 @@ def update_cart_item(product_id: str = "", quantity: int = 0, notes: str = "", i
         _save_cart(wa_id, business_id, new_cart)
 
         if effective_quantity == 0:
-            return "✅ Producto eliminado del carrito."
+            return "✅ Producto quitado de tu pedido."
         notes_str = f" ({notes})" if notes else ""
-        return f"✅ Ítem actualizado{notes_str}. Total: {_format_price(total)}"
+        return f"✅ Ítem actualizado{notes_str}. Subtotal: {_format_price(total)}"
     except Exception as e:
         logger.error(f"[ORDER_TOOL] update_cart_item error: {e}")
-        return f"❌ Error al actualizar el carrito: {str(e)}"
+        return f"❌ Error al actualizar tu pedido: {str(e)}"
 
 
 @tool
@@ -437,16 +454,16 @@ def remove_from_cart(product_id: str = "", product_name: str = "", injected_busi
                         break
 
         if not resolved_id:
-            return "❌ No encontré ese producto en el carrito. ¿Puedes indicar el nombre exacto?"
+            return "❌ No encontré ese producto en tu pedido. ¿Puedes indicar el nombre exacto?"
 
         items = [it for it in original_items if it.get("product_id") != resolved_id]
         total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
         new_cart = {"items": items, "total": total}
         _save_cart(wa_id, business_id, new_cart)
-        return "✅ Producto eliminado del carrito."
+        return "✅ Producto quitado de tu pedido."
     except Exception as e:
         logger.error(f"[ORDER_TOOL] remove_from_cart error: {e}")
-        return f"❌ Error al eliminar del carrito: {str(e)}"
+        return f"❌ Error al quitar el producto de tu pedido: {str(e)}"
 
 
 NO_REGISTRADO = "NO_REGISTRADO"
@@ -602,19 +619,19 @@ def place_order(injected_business_context: dict = None) -> str:
         delivery_info = cart.get("delivery_info") or {}
 
         if not items:
-            return "❌ Tu carrito está vacío. Agrega productos antes de confirmar el pedido."
+            return "❌ Tu pedido está vacío. Agrega productos antes de confirmar."
 
         # Validate cart: each item must have product_id, name, price, quantity (from session only)
         for i, it in enumerate(items):
             if not it.get("product_id") or not it.get("name"):
-                return f"❌ Item en el carrito sin producto válido. Por favor revisa tu pedido."
+                return f"❌ Ítem en tu pedido sin producto válido. Por favor revisa tu pedido."
             try:
                 q = int(it.get("quantity") or 0)
                 p = float(it.get("price") or 0)
             except (TypeError, ValueError):
-                return "❌ Cantidades o precios inválidos en el carrito. Intenta de nuevo."
+                return "❌ Cantidades o precios inválidos en tu pedido. Intenta de nuevo."
             if q < 1 or p < 0:
-                return "❌ Cantidades o precios inválidos en el carrito. Intenta de nuevo."
+                return "❌ Cantidades o precios inválidos en tu pedido. Intenta de nuevo."
 
         address = (delivery_info.get("address") or "").strip()
         payment_method = (delivery_info.get("payment_method") or "").strip()
@@ -643,6 +660,8 @@ def place_order(injected_business_context: dict = None) -> str:
             for it in items
         ]
 
+        delivery_fee = _get_delivery_fee(injected_business_context)
+
         result = product_order_service.create_order(
             business_id=business_id,
             whatsapp_id=wa_id,
@@ -651,6 +670,7 @@ def place_order(injected_business_context: dict = None) -> str:
             contact_phone=phone,
             payment_method=payment_method,
             customer_name=customer_name,
+            delivery_fee=delivery_fee,
         )
 
         if not result.get("success"):
@@ -669,8 +689,15 @@ def place_order(injected_business_context: dict = None) -> str:
                 "last_order_id": order_id,
             },
         )
+        subtotal = result.get("subtotal", 0)
         total = result.get("total", 0)
-        return f"✅ ¡Pedido confirmado! Número de orden: {order_id[:8].upper()} Total: {_format_price(total)}. Nos pondremos en contacto pronto."
+        return (
+            f"✅ ¡Pedido confirmado! #{order_id[:8].upper()}\n"
+            f"Subtotal: {_format_price(subtotal)}\n"
+            f"🛵 Domicilio: {_format_price(delivery_fee)}\n"
+            f"Total: {_format_price(total)}\n"
+            f"Nos ponemos en contacto pronto para coordinar la entrega."
+        )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] place_order error: {e}")
         return f"❌ Error al confirmar el pedido: {str(e)}"

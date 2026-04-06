@@ -94,10 +94,10 @@ def _cart_summary_from_session(wa_id: str, business_id: str) -> str:
     items = oc.get("items") or []
     total = oc.get("total") or 0
     if not items:
-        return "Carrito vacío."
+        return "Pedido vacío."
     lines = [f"{it.get('quantity', 0)}x {it.get('name', '')}" for it in items]
     total_str = f"${int(total):,}".replace(",", ".")
-    return "Pedido actual: " + "; ".join(lines) + f". Total: {total_str}"
+    return "Pedido actual: " + "; ".join(lines) + f". Subtotal: {total_str}"
 
 
 def _normalize_product_name(s: str) -> str:
@@ -204,8 +204,8 @@ def execute_order_intent(
                 "success": False,
                 "tool_result": None,
                 "state_after": current_state,
-                "error": "El carrito está vacío. Agrega productos antes de continuar.",
-                "cart_summary": "Carrito vacío.",
+                "error": "Tu pedido está vacío. Agrega productos antes de continuar.",
+                "cart_summary": "Pedido vacío.",
             }
         session_state_service.save(
             wa_id,
@@ -395,7 +395,7 @@ def execute_order_intent(
         add_qty = int(second.get("quantity") or 1)
         pid = _resolve_product_id_by_name(wa_id, business_id, first_name) if first_name else None
         if not pid:
-            result_str = f"❌ No encontré '{first_name}' en tu carrito. Indica el producto a cambiar o revisa el carrito."
+            result_str = f"❌ No encontré '{first_name}' en tu pedido. Indica el producto a cambiar o revisa tu pedido."
         else:
             current_qty = _get_cart_item_quantity(wa_id, business_id, pid)
             new_qty = max(0, current_qty - remove_qty)

@@ -32,7 +32,7 @@ from ..services.tracing import tracer
 PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de pedidos. Dado el estado actual del pedido y el mensaje del usuario, devuelves EXACTAMENTE una intención y sus parámetros en JSON.
 
 Estado actual: {order_state}
-Resumen del carrito: {cart_summary}
+Resumen del pedido: {cart_summary}
 
 Intenciones válidas: GREET, GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CHAT.
 
@@ -45,8 +45,8 @@ Reglas de menú y búsqueda (importante):
 Otras reglas:
 - GREET SOLO si el mensaje es únicamente un saludo ("hola", "buenas", "buenos días", "buenas noches") SIN ninguna mención de producto, cantidad o intención de pedir. Si el usuario mezcla saludo con pedido ("hola quiero una barracuda", "buenas, un domicilio por favor") → usa ADD_TO_CART o SEARCH_PRODUCTS directamente, NO GREET.
 - Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}.
-- MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al carrito (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en carrito y "notes" con la instrucción. Ejemplo: carrito tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente.
-- Si pide quitar un producto del carrito completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
+- MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al pedido (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en el pedido y "notes" con la instrucción. Ejemplo: pedido tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente.
+- Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
 - Si dice "listo", "procedamos", "confirmar": PROCEED_TO_CHECKOUT.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY): usa GET_CUSTOMER_INFO cuando necesites saber qué tenemos o qué falta (ej. usuario dice "listo", "ok", o para mostrar confirmación). Usa SUBMIT_DELIVERY_INFO cuando el usuario proporcione uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
@@ -59,11 +59,11 @@ Responde ÚNICAMENTE con un JSON válido, sin markdown ni texto extra: {{"intent
 RESPONSE_GENERATOR_SYSTEM = """Generas la respuesta del asistente en español colombiano, amigable y breve.
 
 Reglas críticas:
-- NUNCA afirmes que agregaste, quitaste o modificaste algo en el carrito si la intención ejecutada no fue ADD_TO_CART, REMOVE_FROM_CART o UPDATE_CART_ITEM con éxito. Solo describe cambios que el backend confirmó.
-- Si se ejecutó add/remove/update con éxito, incluye el resumen del carrito actual que te doy (es la verdad del backend).
-- Usa solo la información del resultado de la herramienta y del resumen del carrito; no inventes datos.
+- NUNCA afirmes que agregaste, quitaste o modificaste algo en el pedido si la intención ejecutada no fue ADD_TO_CART, REMOVE_FROM_CART o UPDATE_CART_ITEM con éxito. Solo describe cambios que el backend confirmó.
+- Si se ejecutó add/remove/update con éxito, incluye el resumen del pedido actual que te doy (es la verdad del backend).
+- Usa solo la información del resultado de la herramienta y del resumen del pedido; no inventes datos.
 - Si hubo error, explica brevemente y sugiere qué hacer.
-- Después de un ADD_TO_CART exitoso: (1) confirma lo que se agregó, (2) muestra el resumen del carrito actual, (3) sugiere el siguiente paso: pregunta si desea agregar algo más (ej. bebida) o si procede con el pedido (ej. "¿Te gustaría agregar alguna bebida o procedemos con el pedido?").
+- Después de un ADD_TO_CART exitoso: (1) confirma lo que se agregó, (2) muestra el resumen del pedido actual, (3) sugiere el siguiente paso: pregunta si desea agregar algo más (ej. bebida) o si procede con el pedido (ej. "¿Te gustaría agregar alguna bebida o procedemos con el pedido?").
 - Búsqueda por ingrediente: cuando el resultado de la herramienta incluya descripciones de productos (varias líneas por producto) y el usuario preguntó por un ingrediente o tipo de plato (ej. "algo con queso azul", "hamburguesa con pollo"), menciona primero y de forma explícita el producto cuya descripción coincida con lo que pidió (ej. "La que lleva queso azul es la MONTESA: ...") y luego puedes listar brevemente otras opciones si aplica.
 - Datos de entrega: NUNCA digas "Tengo esta dirección, teléfono y tipo de pago" a menos que el resultado de la herramienta contenga exactamente "DELIVERY_STATUS" y "all_present=true". Si el resultado es "OK_COLLECTING_DELIVERY" (sin DELIVERY_STATUS), responde pidiendo los datos: "Para continuar con tu pedido necesito: nombre, dirección, teléfono y medio de pago. ¿Me los indicas?". Si el resultado tiene DELIVERY_STATUS y all_present=true, confirma incluyendo los valores reales (dirección, teléfono, medio de pago) en el mensaje: "Tengo esta dirección: [valor], teléfono [valor] y pago [valor]. ¿Gustas proceder o quieres enviarla a otra dirección?". Si DELIVERY_STATUS tiene missing= o all_present=false: pide SOLO lo que falta (ej. "Me falta: teléfono y medio de pago. ¿Me los indicas?") o todo si faltan todos; NUNCA en ese caso sugieras "proceder con el pedido" ni "agregar algo más" hasta que todos los datos estén completos.
 - Ubicación y datos del negocio: si el usuario pregunta dónde estamos ubicados, horarios, teléfono de contacto o dirección del local, responde usando ÚNICAMENTE la "Información del negocio" que te doy a continuación. Si esa información está vacía o dice "no configurada", di que por el momento no tienes esa información a mano y que puede preguntar por el menú o hacer su pedido.
@@ -226,9 +226,9 @@ class OrderAgent(BaseAgent):
             for it in items:
                 notes_part = f" ({it['notes']})" if it.get("notes") else ""
                 lines.append(f"{it.get('quantity', 0)}x {it.get('name', '')}{notes_part}")
-            cart_summary_str = "; ".join(lines) + f". Total: ${int(total):,}".replace(",", ".")
+            cart_summary_str = "; ".join(lines) + f". Subtotal: ${int(total):,}".replace(",", ".")
         else:
-            cart_summary_str = "Carrito vacío."
+            cart_summary_str = "Pedido vacío."
 
         try:
             tracer.start_run(run_id=run_id, user_id=wa_id, message_id=message_id, business_id=str(business_id))
@@ -298,8 +298,8 @@ class OrderAgent(BaseAgent):
             else:
                 response_system = RESPONSE_GENERATOR_SYSTEM + "\n\n" + _format_business_info_for_prompt(business_context)
                 if intent in (INTENT_ADD_TO_CART, INTENT_REMOVE_FROM_CART, INTENT_UPDATE_CART_ITEM) and success:
-                    response_system += f"\nEl backend confirmó la acción. Incluye este resumen del carrito actual: {cart_summary_after}"
-                resp_input = f"Usuario: {message_body}\nIntención ejecutada: {intent}. Éxito: {success}.\nResultado del backend: {tool_result}\nResumen carrito: {cart_summary_after}"
+                    response_system += f"\nEl backend confirmó la acción. Incluye este resumen del pedido actual: {cart_summary_after}"
+                resp_input = f"Usuario: {message_body}\nIntención ejecutada: {intent}. Éxito: {success}.\nResultado del backend: {tool_result}\nResumen pedido: {cart_summary_after}"
                 if error_msg:
                     resp_input += f"\nError: {error_msg}"
                 response_messages = [

@@ -367,6 +367,7 @@ class ProductOrderService:
         contact_phone: Optional[str] = None,
         payment_method: Optional[str] = None,
         customer_name: Optional[str] = None,
+        delivery_fee: float = 0.0,
     ) -> Dict[str, Any]:
         """
         Create an order with line items and delivery info.
@@ -381,13 +382,14 @@ class ProductOrderService:
             contact_phone: Contact phone (optional, for delivery)
             payment_method: Payment method for this order
             customer_name: Customer name for order; used when creating/updating customer
+            delivery_fee: Delivery fee to add to the order total (default 0)
 
         Returns:
-            {"success": True, "order_id": "uuid", "total": float} or {"success": False, "error": str}
+            {"success": True, "order_id": "uuid", "subtotal": float, "total": float} or {"success": False, "error": str}
         """
         try:
             if not items:
-                return {"success": False, "error": "El carrito está vacío"}
+                return {"success": False, "error": "El pedido está vacío"}
 
             db_session = get_db_session()
             total = 0.0
@@ -446,12 +448,15 @@ class ProductOrderService:
                 )
                 customer_id = new_cust.get("id") if new_cust else None
 
+            subtotal = total
+            grand_total = subtotal + float(delivery_fee)
+
             order = Order(
                 business_id=uuid.UUID(business_id),
                 customer_id=customer_id,
                 whatsapp_id=whatsapp_id,
                 status="pending",
-                total_amount=total,
+                total_amount=grand_total,
                 notes=notes,
                 delivery_address=delivery_address,
                 contact_phone=contact_phone,
@@ -475,10 +480,10 @@ class ProductOrderService:
             db_session.close()
 
             logger.info(
-                f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, total={total}, "
-                f"address={bool(delivery_address)}"
+                f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, subtotal={subtotal}, "
+                f"delivery_fee={delivery_fee}, total={grand_total}, address={bool(delivery_address)}"
             )
-            return {"success": True, "order_id": order_id, "total": total}
+            return {"success": True, "order_id": order_id, "subtotal": subtotal, "total": grand_total}
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error creating order: {e}")
             try:
