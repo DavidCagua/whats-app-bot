@@ -32,7 +32,7 @@ from ..services.tracing import tracer
 PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de pedidos. Dado el estado actual del pedido y el mensaje del usuario, devuelves EXACTAMENTE una intención y sus parámetros en JSON.
 
 Estado actual: {order_state}
-Resumen del pedido: {cart_summary}
+Productos YA en el pedido (NO los incluyas en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad): {cart_summary}
 
 Intenciones válidas: GREET, GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CHAT.
 

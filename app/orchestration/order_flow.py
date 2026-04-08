@@ -368,9 +368,20 @@ def execute_order_intent(
     result_str = None
     if intent == INTENT_ADD_TO_CART and isinstance(params.get("items"), list) and len(params["items"]) > 0:
         # Multi-item add: invoke add_to_cart for each item (backend remains single source of truth)
+        # Safety: filter out items already in the cart to prevent planner hallucination duplicates
+        cart_now = order_tools._cart_from_session(wa_id, business_id)
+        existing_names = {_normalize_product_name(it.get("name") or "") for it in (cart_now.get("items") or [])}
+
         result_parts = []
         for item in params["items"]:
             if not isinstance(item, dict):
+                continue
+            item_name = _normalize_product_name(item.get("product_name") or "")
+            if item_name and item_name in existing_names:
+                logger.warning(
+                    "[ORDER_FLOW] Skipping duplicate add: '%s' already in cart",
+                    item.get("product_name"),
+                )
                 continue
             args = {
                 "injected_business_context": ctx,
