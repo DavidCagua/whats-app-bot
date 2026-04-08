@@ -7,7 +7,7 @@ import logging
 from typing import Dict, List, Optional
 from langchain.tools import tool
 
-from ..database.product_order_service import product_order_service
+from ..database.product_order_service import product_order_service, AmbiguousProductError
 from ..database.session_state_service import session_state_service
 from ..database.customer_service import customer_service
 
@@ -232,11 +232,18 @@ def get_product_details(product_id: str = "", product_name: str = "", injected_b
         if not product_id and not (product_name and product_name.strip()):
             return "❌ Indica el nombre o ID del producto que deseas."
 
-        product = product_order_service.get_product(
-            product_id=product_id.strip() if product_id else None,
-            product_name=product_name.strip() if product_name else None,
-            business_id=business_id,
-        )
+        try:
+            product = product_order_service.get_product(
+                product_id=product_id.strip() if product_id else None,
+                product_name=product_name.strip() if product_name else None,
+                business_id=business_id,
+            )
+        except AmbiguousProductError as e:
+            options = "\n".join(
+                f"• {m['name']} - {_format_price(m.get('price', 0))}"
+                for m in e.matches
+            )
+            return f"🔎 Encontré varias opciones de {product_name}:\n{options}\n\n¿Cuál te interesa?"
 
         if not product:
             return "❌ Producto no encontrado. Usa list_category_products para ver el menú."
@@ -273,10 +280,17 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
             return "❌ La cantidad debe ser al menos 1."
 
         product = None
-        if product_id:
-            product = product_order_service.get_product(product_id=product_id, business_id=business_id)
-        elif product_name and product_name.strip():
-            product = product_order_service.get_product(product_name=product_name, business_id=business_id)
+        try:
+            if product_id:
+                product = product_order_service.get_product(product_id=product_id, business_id=business_id)
+            elif product_name and product_name.strip():
+                product = product_order_service.get_product(product_name=product_name, business_id=business_id)
+        except AmbiguousProductError as e:
+            options = "\n".join(
+                f"• {m['name']} - {_format_price(m.get('price', 0))}"
+                for m in e.matches
+            )
+            return f"🔎 Encontré varias opciones de {product_name}:\n{options}\n\n¿Cuál prefieres?"
 
         if not product:
             return "❌ Producto no encontrado. Pregunta por el menú o una categoría para ver productos."

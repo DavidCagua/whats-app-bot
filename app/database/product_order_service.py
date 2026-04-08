@@ -13,6 +13,15 @@ from .customer_service import customer_service
 
 logger = logging.getLogger(__name__)
 
+
+class AmbiguousProductError(Exception):
+    """Raised when a product search matches multiple products and needs disambiguation."""
+    def __init__(self, query: str, matches: List[Dict[str, Any]]):
+        self.query = query
+        self.matches = matches
+        names = ", ".join(m["name"] for m in matches)
+        super().__init__(f"Multiple products match '{query}': {names}")
+
 # Map natural-language category terms to canonical DB category values
 CATEGORY_MAP = {
     "hamburguesa": "BURGERS",
@@ -36,8 +45,12 @@ CATEGORY_MAP = {
     "pollo": "CHICKEN BURGERS",
     "chicken": "CHICKEN BURGERS",
     "infantil": "MENÚ INFANTIL",
+    "menu infantil": "MENÚ INFANTIL",
+    "menu": "MENÚ INFANTIL",
     "niños": "MENÚ INFANTIL",
+    "ninos": "MENÚ INFANTIL",
     "niñas": "MENÚ INFANTIL",
+    "ninas": "MENÚ INFANTIL",
     "steak": "STEAK & RIBS",
     "ribs": "STEAK & RIBS",
     "costilla": "STEAK & RIBS",
@@ -56,7 +69,17 @@ def normalize_category(input_category: str) -> str:
     # Strip accents for lookup (e.g. "bebidas" vs "bebídas")
     normalized_key = unicodedata.normalize("NFD", raw)
     normalized_key = "".join(c for c in normalized_key if unicodedata.category(c) != "Mn")
-    canonical = CATEGORY_MAP.get(normalized_key) or CATEGORY_MAP.get(raw)
+    # Try full phrase first, then accent-stripped, then individual words
+    canonical = (
+        CATEGORY_MAP.get(normalized_key)
+        or CATEGORY_MAP.get(raw)
+    )
+    if not canonical:
+        # Try individual words (e.g. "menu infantil" -> try "infantil")
+        for word in normalized_key.split():
+            canonical = CATEGORY_MAP.get(word)
+            if canonical:
+                break
     if canonical:
         logger.warning(
             "[CATEGORY_NORMALIZATION] input=%s normalized=%s",
@@ -192,6 +215,8 @@ class ProductOrderService:
             result = product.to_dict() if product else None
             db_session.close()
             return result
+        except AmbiguousProductError:
+            raise
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error getting product: {e}")
             return None
@@ -199,7 +224,8 @@ class ProductOrderService:
     def _find_product_by_name_or_desc(
         self, db_session, business_id: str, query: str
     ) -> Optional[Any]:
-        """Find a product by name or description. Tries full query, then token-by-token."""
+        """Find a product by name or description. Tries full query, then token-by-token.
+        Returns a single Product if unique match, or raises AmbiguousProductError if multiple matches."""
         from sqlalchemy import or_, func
 
         business_uuid = uuid.UUID(business_id)
@@ -217,22 +243,38 @@ class ProductOrderService:
             Product.is_active == True,
         )
 
+        def _check_unique(products_query):
+            """Return product if exactly one match, raise AmbiguousProductError if multiple."""
+            results = products_query.all()
+            if len(results) == 1:
+                return results[0]
+            if len(results) > 1:
+                # Check if any is an exact match (case-insensitive)
+                for p in results:
+                    if p.name.strip().lower() == qnorm:
+                        return p
+                raise AmbiguousProductError(
+                    query=query,
+                    matches=[p.to_dict() for p in results],
+                )
+            return None
+
         # 1. Try full query in name
-        product = base.filter(Product.name.ilike(f"%{qnorm}%")).first()
-        if product:
-            return product
+        result = _check_unique(base.filter(Product.name.ilike(f"%{qnorm}%")))
+        if result:
+            return result
 
         # 2. Try full query in name or description
-        product = base.filter(name_or_desc_contains(qnorm)).first()
-        if product:
-            return product
+        result = _check_unique(base.filter(name_or_desc_contains(qnorm)))
+        if result:
+            return result
 
         # 3. Try each significant token (e.g. "hamburguesa barracuda" -> "barracuda")
         tokens = _search_tokens(query)
         for tok in tokens:
-            product = base.filter(name_or_desc_contains(tok)).first()
-            if product:
-                return product
+            result = _check_unique(base.filter(name_or_desc_contains(tok)))
+            if result:
+                return result
 
         return None
 
@@ -306,12 +348,29 @@ class ProductOrderService:
             db_session = get_db_session()
             business_uuid = uuid.UUID(business_id)
             q = query.strip()
+            # Also try accent-stripped version for matching (e.g. "menu" matches "MENÚ")
+            q_no_accent = unicodedata.normalize("NFD", q)
+            q_no_accent = "".join(c for c in q_no_accent if unicodedata.category(c) != "Mn")
             desc_col = func.coalesce(Product.description, "")
-            # name OR description (ingredients not in schema; description often holds ingredients)
-            condition = or_(
+            cat_col = func.coalesce(Product.category, "")
+            # name OR description OR category, try both original and accent-stripped
+            conditions = [
                 Product.name.ilike(f"%{q}%"),
                 desc_col.ilike(f"%{q}%"),
-            )
+                cat_col.ilike(f"%{q}%"),
+            ]
+            if q_no_accent != q:
+                conditions.extend([
+                    Product.name.ilike(f"%{q_no_accent}%"),
+                    desc_col.ilike(f"%{q_no_accent}%"),
+                    cat_col.ilike(f"%{q_no_accent}%"),
+                ])
+            # Also try individual words for multi-word queries
+            for word in q_no_accent.lower().split():
+                if len(word) > 2:
+                    conditions.append(Product.name.ilike(f"%{word}%"))
+                    conditions.append(cat_col.ilike(f"%{word}%"))
+            condition = or_(*conditions)
             products = (
                 db_session.query(Product)
                 .filter(
