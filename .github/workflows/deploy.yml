@@ -98,13 +98,15 @@ jobs:
       - name: Vercel pull (env + project config)
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
 
-      - name: Install admin-console deps + refresh Prisma schema
+      - name: Install admin-console deps + generate Prisma client
         working-directory: admin-console
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
         run: |
           npm ci
-          npx prisma db pull
+          # schema.prisma is committed and is the source of truth.
+          # Devs run `prisma db pull` locally after a migration and
+          # commit the regenerated schema. CI just generates the client.
           npx prisma generate
 
       - name: Vercel build (prod)

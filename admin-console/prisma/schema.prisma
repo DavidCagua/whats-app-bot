@@ -14,8 +14,8 @@ model businesses {
   business_type               String?                       @default("barberia") @db.VarChar(50)
   settings                    Json?                         @default("{}")
   is_active                   Boolean?                      @default(true)
-  created_at                  DateTime?                     @default(now()) @db.Timestamptz(6)
-  updated_at                  DateTime?                     @default(now()) @db.Timestamptz(6)
+  created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime                      @default(now()) @db.Timestamptz(6)
   bookings                    bookings[]
   business_agents             business_agents[]
   business_availability       business_availability[]
@@ -40,8 +40,8 @@ model business_agents {
   priority    Int?       @default(100)
   config      Json?      @default("{}")
   created_by  String?    @db.Uuid
-  created_at  DateTime?  @default(now()) @db.Timestamptz(6)
-  updated_at  DateTime?  @default(now()) @db.Timestamptz(6)
+  created_at  DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime   @default(now()) @db.Timestamptz(6)
   businesses  businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   users       users?     @relation(fields: [created_by], references: [id], onUpdate: NoAction)
 
@@ -55,8 +55,8 @@ model conversation_agent_settings {
   business_id   String     @db.Uuid
   whatsapp_id   String     @db.VarChar(50)
   agent_enabled Boolean    @default(true)
-  created_at    DateTime?  @default(now()) @db.Timestamptz(6)
-  updated_at    DateTime?  @default(now()) @db.Timestamptz(6)
+  created_at    DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime   @default(now()) @db.Timestamptz(6)
   businesses    businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([business_id, whatsapp_id])
@@ -77,8 +77,8 @@ model conversation_attachments {
   duration_sec       Decimal?      @db.Decimal(10, 2)
   transcript         String?
   provider_metadata  Json?         @default("{}")
-  created_at         DateTime?     @default(now()) @db.Timestamptz(6)
-  updated_at         DateTime?     @default(now()) @db.Timestamptz(6)
+  created_at         DateTime      @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime      @default(now()) @db.Timestamptz(6)
   conversations      conversations @relation(fields: [conversation_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([conversation_id], map: "idx_conversation_attachments_conversation_id")
@@ -129,7 +129,7 @@ model user_businesses {
   user_id     String     @db.Uuid
   business_id String     @db.Uuid
   role        String?    @default("staff") @db.VarChar(50)
-  created_at  DateTime?  @default(now()) @db.Timestamptz(6)
+  created_at  DateTime   @default(now()) @db.Timestamptz(6)
   businesses  businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   users       users      @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
@@ -145,8 +145,8 @@ model users {
   password_hash   String
   full_name       String?           @db.VarChar(255)
   is_active       Boolean?          @default(true)
-  created_at      DateTime?         @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime?         @default(now()) @db.Timestamptz(6)
+  created_at      DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime          @default(now()) @db.Timestamptz(6)
   role            String?           @default("staff") @db.VarChar(50)
   business_agents business_agents[]
   staff_members   staff_members[]
@@ -163,8 +163,8 @@ model whatsapp_numbers {
   phone_number_id String?         @db.VarChar(255)
   phone_number    String          @db.VarChar(50)
   is_active       Boolean?        @default(true)
-  created_at      DateTime?       @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime?       @default(now()) @db.Timestamptz(6)
+  created_at      DateTime        @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime        @default(now()) @db.Timestamptz(6)
   display_name    String?         @db.VarChar(255)
   conversations   conversations[]
   businesses      businesses      @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -184,8 +184,8 @@ model products {
   currency    String?                @default("COP") @db.VarChar(10)
   sku         String?                @db.VarChar(50)
   is_active   Boolean?               @default(true)
-  created_at  DateTime?              @default(now()) @db.Timestamptz(6)
-  updated_at  DateTime?              @default(now()) @db.Timestamptz(6)
+  created_at  DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime               @default(now()) @db.Timestamptz(6)
   category    String?                @db.VarChar(50)
   tags        String[]               @default([])
   metadata    Json                   @default("{}")
@@ -209,8 +209,8 @@ model orders {
   status           String?       @default("pending") @db.VarChar(20)
   total_amount     Decimal       @default(0) @db.Decimal(12, 2)
   notes            String?
-  created_at       DateTime?     @default(now()) @db.Timestamptz(6)
-  updated_at       DateTime?     @default(now()) @db.Timestamptz(6)
+  created_at       DateTime      @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime      @default(now()) @db.Timestamptz(6)
   delivery_address String?
   contact_phone    String?
   payment_method   String?
@@ -225,16 +225,16 @@ model orders {
 }
 
 model order_items {
-  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  order_id   String    @db.Uuid
-  product_id String    @db.Uuid
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id   String   @db.Uuid
+  product_id String   @db.Uuid
   quantity   Int
-  unit_price Decimal   @db.Decimal(12, 2)
-  line_total Decimal   @db.Decimal(12, 2)
-  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  unit_price Decimal  @db.Decimal(12, 2)
+  line_total Decimal  @db.Decimal(12, 2)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
   notes      String?
-  orders     orders    @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  products   products  @relation(fields: [product_id], references: [id], onUpdate: NoAction)
+  orders     orders   @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  products   products @relation(fields: [product_id], references: [id], onUpdate: NoAction)
 
   @@index([order_id], map: "idx_order_items_order_id")
   @@index([product_id], map: "idx_order_items_product_id")
@@ -248,8 +248,8 @@ model business_availability {
   close_time            DateTime       @db.Time(6)
   slot_duration_minutes Int            @default(60)
   is_active             Boolean?       @default(true)
-  created_at            DateTime?      @default(now()) @db.Timestamptz(6)
-  updated_at            DateTime?      @default(now()) @db.Timestamptz(6)
+  created_at            DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime       @default(now()) @db.Timestamptz(6)
   staff_member_id       String?        @db.Uuid
   businesses            businesses     @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   staff_members         staff_members? @relation(fields: [staff_member_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -269,8 +269,8 @@ model bookings {
   status          String         @default("confirmed") @db.VarChar(20)
   notes           String?
   created_via     String?        @default("whatsapp") @db.VarChar(20)
-  created_at      DateTime?      @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime?      @default(now()) @db.Timestamptz(6)
+  created_at      DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime       @default(now()) @db.Timestamptz(6)
   staff_member_id String?        @db.Uuid
   service_id      String?        @db.Uuid
   businesses      businesses     @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -297,8 +297,8 @@ model services {
   currency         String?    @default("COP") @db.VarChar(10)
   duration_minutes Int        @default(60)
   is_active        Boolean?   @default(true)
-  created_at       DateTime?  @default(now()) @db.Timestamptz(6)
-  updated_at       DateTime?  @default(now()) @db.Timestamptz(6)
+  created_at       DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime   @default(now()) @db.Timestamptz(6)
   bookings         bookings[]
   businesses       businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
@@ -314,8 +314,8 @@ model staff_members {
   role                  String                  @db.VarChar(100)
   is_active             Boolean?                @default(true)
   user_id               String?                 @db.Uuid
-  created_at            DateTime                @default(now()) @db.Timestamp(6)
-  updated_at            DateTime                @default(now()) @db.Timestamp(6)
+  created_at            DateTime                @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime                @default(now()) @db.Timestamptz(6)
   bookings              bookings[]
   business_availability business_availability[]
   businesses            businesses              @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_staff_business")
@@ -329,11 +329,11 @@ model staff_members {
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model agent_types {
-  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  type        String    @unique @db.VarChar(50)
-  name        String    @db.VarChar(100)
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type        String   @unique @db.VarChar(50)
+  name        String   @db.VarChar(100)
   description String?
-  created_at  DateTime? @default(now()) @db.Timestamptz(6)
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
 }
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
@@ -345,8 +345,8 @@ model conversation_sessions {
   order_context    Json?      @default("{}")
   booking_context  Json?      @default("{}")
   agent_contexts   Json?      @default("{}")
-  last_activity_at DateTime?  @default(now()) @db.Timestamptz(6)
-  updated_at       DateTime?  @default(now()) @db.Timestamptz(6)
+  last_activity_at DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime   @default(now()) @db.Timestamptz(6)
   last_order_id    String?    @db.VarChar(50)
   last_booking_id  String?    @db.VarChar(50)
   businesses       businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -364,4 +364,8 @@ model processed_messages {
 
   @@index([processed_at], map: "idx_processed_at")
   @@index([message_id], map: "idx_processed_messages_message_id")
+}
+
+model alembic_version {
+  version_num String @id(map: "alembic_version_pkc") @db.VarChar(32)
 }

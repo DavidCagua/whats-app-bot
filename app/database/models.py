@@ -105,7 +105,10 @@ class WhatsappNumber(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
-    phone_number_id = Column(String(255), nullable=False, unique=True, index=True)  # Meta ID or "twilio:+123" for Twilio
+    # Nullable: businesses using Twilio (or any non-Meta provider) don't have
+    # a Meta phone_number_id. Migration 005 made it optional and added a
+    # partial unique index on the column where it's not null.
+    phone_number_id = Column(String(255), nullable=True, index=True)
     phone_number = Column(String(50), nullable=False)  # E.164 number for lookup (e.g., +15556738752)
     display_name = Column(
         String(255),
