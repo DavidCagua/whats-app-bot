@@ -8,7 +8,7 @@ import uuid
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from .models import Conversation, ConversationAttachment, get_db_session, create_tables
+from .models import Conversation, ConversationAttachment, get_db_session
 
 # Default business ID for backward compatibility
 DEFAULT_BUSINESS_ID = "00000000-0000-0000-0000-000000000001"
@@ -17,18 +17,10 @@ class ConversationService:
     """Service for managing conversation history in PostgreSQL."""
 
     def __init__(self):
-        """Initialize the conversation service."""
-        self.ensure_tables_exist()
+        """Initialize the conversation service. Schema is managed by Alembic,
+        not by create_all at runtime — import is side-effect-free so unit
+        tests don't need a live database."""
         logging.info("ConversationService initialized with PostgreSQL backend")
-
-    def ensure_tables_exist(self):
-        """Ensure database tables are created."""
-        try:
-            create_tables()
-            logging.info("Database tables verified/created successfully")
-        except Exception as e:
-            logging.error(f"Error creating database tables: {e}")
-            raise
 
     def get_conversation_history(self, wa_id: str, limit: int = 10, business_id: Optional[str] = None) -> List[Dict]:
         """
