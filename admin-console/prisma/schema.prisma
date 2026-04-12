@@ -1,5 +1,12 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // Generate engines for every target we ship to:
+  //   native               — local dev (macOS arm64 / x64)
+  //   debian-openssl-3.0.x — Debian-based Linux containers (Railway default)
+  //   rhel-openssl-3.0.x   — Vercel serverless runtime (Amazon Linux 2 / RHEL)
+  // Without this, generating on macOS produces only the darwin engine and
+  // any Linux runtime crashes with "could not locate the Query Engine".
+  binaryTargets = ["native", "debian-openssl-3.0.x", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
