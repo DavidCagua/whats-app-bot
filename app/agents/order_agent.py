@@ -177,12 +177,18 @@ class OrderAgent(BaseAgent):
     agent_type = "order"
 
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.3,
-            api_key=os.getenv("OPENAI_API_KEY"),
-        )
-        logging.info("[ORDER_AGENT] Initialized with planner + executor + response generator")
+        self._llm = None
+        logging.info("[ORDER_AGENT] Initialized with planner + executor + response generator (LLM lazy)")
+
+    @property
+    def llm(self) -> ChatOpenAI:
+        if self._llm is None:
+            self._llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0.3,
+                api_key=os.getenv("OPENAI_API_KEY"),
+            )
+        return self._llm
 
     def get_tools(self):
         return order_tools

@@ -29,13 +29,11 @@ jobs:
 
       - name: Run pytest (unit only)
         env:
-          # Fake URL so models.py passes its import-time env check.
-          # SQLAlchemy create_engine validates shape but doesn't connect.
+          # Fake URL so models.py's create_engine has a valid shape.
           # Unit tests should not hit the DB; if one does it'll error out
           # loudly, which is the signal to fix the test (or move it to
           # tests/integration).
           DATABASE_URL: postgresql://fake:fake@localhost:5432/fake
-          OPENAI_API_KEY: dummy
         run: python -m pytest tests/unit -q --disable-warnings
 
   migrate:
@@ -59,11 +57,6 @@ jobs:
       - name: Show current + pending revisions
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-          # Required because importing app.database.models transitively
-          # loads app/__init__.py -> agents, which instantiate ChatOpenAI
-          # at __init__ time and crash without a key. Dummy is fine for
-          # alembic; it never actually calls OpenAI.
-          OPENAI_API_KEY: dummy
         run: |
           alembic current || true
           alembic heads || true
@@ -71,7 +64,6 @@ jobs:
       - name: Alembic upgrade head
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-          OPENAI_API_KEY: dummy
         run: |
           alembic upgrade head
           alembic current

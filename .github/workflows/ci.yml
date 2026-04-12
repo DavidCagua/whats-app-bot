@@ -25,7 +25,6 @@ jobs:
       - name: Run pytest (unit only)
         env:
           DATABASE_URL: postgresql://fake:fake@localhost:5432/fake
-          OPENAI_API_KEY: dummy
         run: python -m pytest tests/unit -q --disable-warnings
 
   migrations-smoke:
@@ -67,9 +66,6 @@ jobs:
           PGPASSWORD: postgres
           PGDATABASE: postgres
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-          # Dummy: app/__init__.py transitively instantiates agents with
-          # ChatOpenAI which requires a key. Alembic never calls OpenAI.
-          OPENAI_API_KEY: dummy
         run: |
           for f in migrations/*.sql; do
             [ -f "$f" ] || continue
@@ -84,7 +80,6 @@ jobs:
       - name: Drift check (models vs DB schema)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-          OPENAI_API_KEY: dummy
         run: |
           # Fails if SQLAlchemy models drift from the DB schema. Catches
           # "forgot to add a new column to a migration" and similar bugs.
