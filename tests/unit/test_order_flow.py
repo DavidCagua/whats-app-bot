@@ -72,7 +72,9 @@ class TestIntentGuards:
             )
 
         assert result["success"] is False
-        assert "no permitido" in result["error"].lower()
+        assert result.get("result_kind") == "user_error"
+        assert result.get("error_kind") == "user_visible"
+        assert result.get("error")  # some user-facing message exists
         assert result["state_after"] == ORDER_STATE_GREETING
 
     # Case: PROCEED_TO_CHECKOUT blocked in GREETING state
