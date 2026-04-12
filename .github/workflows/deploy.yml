@@ -72,9 +72,6 @@ jobs:
     name: Deploy admin console (Vercel CLI)
     needs: migrate
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: admin-console
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -91,17 +88,27 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
-      - name: Pull Vercel env + config
+      # `vercel pull` from repo root creates ./.vercel/project.json.
+      # The Vercel project has `rootDirectory: admin-console` configured
+      # in its dashboard settings, so subsequent `vercel build` / `vercel
+      # deploy` called from repo root will correctly target the
+      # admin-console subdirectory. Running vercel commands from inside
+      # admin-console/ instead causes a double-nesting bug (it tries to
+      # find admin-console/admin-console/package.json).
+      - name: Vercel pull (env + project config)
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
 
-      - name: Build (with fresh schema pulled from prod at build time)
+      - name: Install admin-console deps + refresh Prisma schema
+        working-directory: admin-console
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
         run: |
           npm ci
           npx prisma db pull
           npx prisma generate
-          vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Vercel build (prod)
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
 
       - name: Deploy prebuilt artifacts
         run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
