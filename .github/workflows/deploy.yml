@@ -59,6 +59,11 @@ jobs:
       - name: Show current + pending revisions
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          # Required because importing app.database.models transitively
+          # loads app/__init__.py -> agents, which instantiate ChatOpenAI
+          # at __init__ time and crash without a key. Dummy is fine for
+          # alembic; it never actually calls OpenAI.
+          OPENAI_API_KEY: dummy
         run: |
           alembic current || true
           alembic heads || true
@@ -66,6 +71,7 @@ jobs:
       - name: Alembic upgrade head
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          OPENAI_API_KEY: dummy
         run: |
           alembic upgrade head
           alembic current
