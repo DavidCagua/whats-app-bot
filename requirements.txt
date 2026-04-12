@@ -16,3 +16,4 @@ supabase
 assemblyai
 snowballstemmer
 pgvector
+pytest
