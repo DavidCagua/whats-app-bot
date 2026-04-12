@@ -3,18 +3,53 @@ Database models for Multi-Tenant WhatsApp bot.
 Includes models for businesses, users, WhatsApp numbers, customers, and conversations.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Numeric, create_engine, BigInteger
+from sqlalchemy import (
+    Column,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    DateTime,
+    Time,
+    Boolean,
+    ForeignKey,
+    Numeric,
+    create_engine,
+    BigInteger,
+    Index,
+    UniqueConstraint,
+    MetaData,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from datetime import datetime
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base
+from pgvector.sqlalchemy import Vector
+from datetime import datetime, timezone
 import os
 import uuid
 from dotenv import load_dotenv
 
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now. Used by SQLAlchemy onupdate hooks."""
+    return datetime.now(timezone.utc)
+
 load_dotenv()
 
-Base = declarative_base()
+# Naming convention matches the raw SQL migrations in /migrations/*.sql
+# so that `index=True` and unique=True produce the same names as prod.
+# - Single-column indexes: idx_<table>_<column>
+# - Unique constraints:    <table>_<column>_key   (postgres default)
+# - Composite indexes/constraints: declared explicitly in __table_args__.
+NAMING_CONVENTION = {
+    "ix": "idx_%(table_name)s_%(column_0_name)s",
+    "uq": "%(table_name)s_%(column_0_name)s_key",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "%(table_name)s_%(column_0_name)s_fkey",
+    "pk": "%(table_name)s_pkey",
+}
+
+Base = declarative_base(metadata=MetaData(naming_convention=NAMING_CONVENTION))
 
 
 # ============================================================================
@@ -24,14 +59,15 @@ Base = declarative_base()
 class Business(Base):
     """Model for businesses/organizations."""
     __tablename__ = 'businesses'
+    __table_args__ = {"comment": "Multi-tenant businesses table - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
     business_type = Column(String(50), default='barberia')
     settings = Column(JSONB, default={})
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     whatsapp_numbers = relationship("WhatsappNumber", back_populates="business", cascade="all, delete-orphan")
@@ -65,15 +101,20 @@ class WhatsappNumber(Base):
     Only phone_number_id differs per business.
     """
     __tablename__ = 'whatsapp_numbers'
+    __table_args__ = {"comment": "WhatsApp Business API numbers - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     phone_number_id = Column(String(255), nullable=False, unique=True, index=True)  # Meta ID or "twilio:+123" for Twilio
     phone_number = Column(String(50), nullable=False)  # E.164 number for lookup (e.g., +15556738752)
-    display_name = Column(String(255), nullable=True)  # Optional friendly name
+    display_name = Column(
+        String(255),
+        nullable=True,
+        comment='Optional friendly name to identify this WhatsApp number (e.g., "Main Line", "Support Line")',
+    )
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     business = relationship("Business", back_populates="whatsapp_numbers")
@@ -99,15 +140,21 @@ class WhatsappNumber(Base):
 class User(Base):
     """Model for system users who can manage businesses."""
     __tablename__ = 'users'
+    __table_args__ = {"comment": "System users who can manage businesses - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), nullable=False, unique=True, index=True)
     password_hash = Column(Text, nullable=False)
     full_name = Column(String(255), nullable=True)
-    role = Column(String(50), nullable=True, index=True)  # 'super_admin' for OmnIA team, NULL for business users
+    role = Column(
+        String(50),
+        nullable=True,
+        index=True,
+        comment='User role: super_admin (full access), admin (org admin), staff (read-only)',
+    )
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     user_businesses = relationship("UserBusiness", back_populates="user", cascade="all, delete-orphan")
@@ -131,12 +178,13 @@ class User(Base):
 class UserBusiness(Base):
     """Model for user-business relationships (many-to-many with roles)."""
     __tablename__ = 'user_businesses'
+    __table_args__ = {"comment": "User-business access control - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     role = Column(String(50), default='member')  # 'admin' for business owners/admins, 'member' for employees
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
     user = relationship("User", back_populates="user_businesses")
@@ -168,7 +216,7 @@ class AgentType(Base):
     type = Column(String(50), nullable=False, unique=True)
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     def to_dict(self):
         return {
@@ -191,8 +239,8 @@ class BusinessAgent(Base):
     priority = Column(Integer, default=100)
     config = Column(JSONB, default={})
     created_by = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -221,8 +269,8 @@ class ConversationSession(Base):
     agent_contexts = Column(JSONB, default={})
     last_order_id = Column(String(50), nullable=True)
     last_booking_id = Column(String(50), nullable=True)
-    last_activity_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_activity_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -248,8 +296,8 @@ class ConversationAgentSetting(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     whatsapp_id = Column(String(50), nullable=False, index=True)
     agent_enabled = Column(Boolean, default=True, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -277,8 +325,8 @@ class ConversationAttachment(Base):
     duration_sec = Column(Numeric(10, 2), nullable=True)
     transcript = Column(Text, nullable=True)
     provider_metadata = Column(JSONB, default={}, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     conversation = relationship("Conversation", back_populates="attachments")
 
@@ -312,8 +360,8 @@ class Conversation(Base):
     message_type = Column(String(20), default='text', nullable=True)  # text | audio | image | document
     role = Column(String(20), nullable=False)  # 'user' or 'assistant'
     agent_type = Column(String(50), nullable=True)  # Future-proofing for per-agent history
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
     business = relationship("Business", back_populates="conversations")
@@ -354,8 +402,8 @@ class Customer(Base):
     address = Column(Text, nullable=True)
     phone = Column(String(50), nullable=True)
     payment_method = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def __repr__(self):
         return f"<Customer(id={self.id}, whatsapp_id='{self.whatsapp_id}', name='{self.name}')>"
@@ -392,10 +440,29 @@ class Product(Base):
     category = Column(String(50), nullable=True, index=True)
     sku = Column(String(50), nullable=True)
     is_active = Column(Boolean, default=True, index=True)
-    tags = Column(ARRAY(Text), nullable=False, default=list)
-    product_metadata = Column("metadata", JSONB, nullable=False, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    tags = Column(ARRAY(Text), nullable=False, server_default="{}")
+    product_metadata = Column("metadata", JSONB, nullable=False, server_default="{}")
+    embedding = Column(Vector(1536), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_products_business_sku", "business_id", "sku"),
+        Index("idx_products_tags_gin", "tags", postgresql_using="gin"),
+        Index(
+            "idx_products_metadata_gin",
+            "metadata",
+            postgresql_using="gin",
+            postgresql_ops={"metadata": "jsonb_path_ops"},
+        ),
+        Index(
+            "idx_products_embedding_cosine",
+            "embedding",
+            postgresql_using="ivfflat",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"lists": 100},
+        ),
+    )
 
     def to_dict(self):
         return {
@@ -427,8 +494,8 @@ class Service(Base):
     currency = Column(String(10), default='COP')
     duration_minutes = Column(Integer, nullable=False, default=60)
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -457,10 +524,10 @@ class Order(Base):
     total_amount = Column(Numeric(12, 2), nullable=False, default=0)
     notes = Column(Text, nullable=True)
     delivery_address = Column(Text, nullable=True)
-    contact_phone = Column(String(50), nullable=True)
-    payment_method = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    contact_phone = Column(Text, nullable=True)
+    payment_method = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
@@ -487,14 +554,14 @@ class BusinessAvailability(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
-    day_of_week = Column(Integer, nullable=False)  # 0=Sunday, 6=Saturday
-    open_time = Column(String(5), nullable=False)   # "HH:MM"
-    close_time = Column(String(5), nullable=False)  # "HH:MM"
+    day_of_week = Column(SmallInteger, nullable=False)  # 0=Sunday, 6=Saturday
+    open_time = Column(Time, nullable=False)
+    close_time = Column(Time, nullable=False)
     slot_duration_minutes = Column(Integer, nullable=False, default=60)
     is_active = Column(Boolean, default=True)
     staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='CASCADE'), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -526,8 +593,8 @@ class Booking(Base):
     notes = Column(Text, nullable=True)
     created_via = Column(String(20), default='whatsapp')  # whatsapp/admin/api
     staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='SET NULL'), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     customer = relationship("Customer", backref="bookings")
     service = relationship("Service", backref="bookings")
@@ -561,7 +628,7 @@ class OrderItem(Base):
     unit_price = Column(Numeric(12, 2), nullable=False)
     line_total = Column(Numeric(12, 2), nullable=False)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     order = relationship("Order", back_populates="order_items")
     product = relationship("Product", backref="order_items")
@@ -589,8 +656,8 @@ class StaffMember(Base):
     role = Column(String(100), nullable=False)  # e.g., 'barber', 'hairdresser', 'stylist'
     is_active = Column(Boolean, default=True, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     business = relationship("Business", backref="staff_members")

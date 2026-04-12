@@ -45,3 +45,4 @@ next-env.d.ts
 
 # Override parent .gitignore for lib directory
 !/lib/
+.env*.local

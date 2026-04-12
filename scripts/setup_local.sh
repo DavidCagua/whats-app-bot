@@ -59,7 +59,7 @@ if ! command -v psql &>/dev/null; then
   done
   echo ""
 else
-  echo "📦 Aplicando migraciones SQL (000–020, sin rollbacks)..."
+  echo "📦 Aplicando migraciones raw SQL (000–023 baseline)..."
   for n in "${MIGRATION_NUMBERS[@]}"; do
     for f in "$REPO_ROOT/migrations/${n}"_*.sql; do
       [[ -f "$f" ]] || continue
@@ -69,7 +69,14 @@ else
       psql "$LOCAL_DB_URL" -f "$f" -v ON_ERROR_STOP=1 -q
     done
   done
-  echo "✅ Migraciones aplicadas."
+  echo "✅ Baseline SQL aplicado."
+  echo ""
+
+  echo "🧭 Alembic baseline + upgrade head..."
+  cd "$REPO_ROOT"
+  DATABASE_URL="$LOCAL_DB_URL" alembic stamp head -q 2>&1 || DATABASE_URL="$LOCAL_DB_URL" alembic stamp head
+  DATABASE_URL="$LOCAL_DB_URL" alembic upgrade head
+  echo "✅ Alembic at head."
   echo ""
 
   echo "🍔 Biela (negocio + Twilio +14155238886, menú)..."
