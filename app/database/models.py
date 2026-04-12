@@ -4,7 +4,7 @@ Includes models for businesses, users, WhatsApp numbers, customers, and conversa
 """
 
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Numeric, create_engine, BigInteger
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -392,6 +392,8 @@ class Product(Base):
     category = Column(String(50), nullable=True, index=True)
     sku = Column(String(50), nullable=True)
     is_active = Column(Boolean, default=True, index=True)
+    tags = Column(ARRAY(Text), nullable=False, default=list)
+    product_metadata = Column("metadata", JSONB, nullable=False, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -406,6 +408,8 @@ class Product(Base):
             'category': self.category,
             'sku': self.sku,
             'is_active': self.is_active,
+            'tags': list(self.tags or []),
+            'metadata': dict(self.product_metadata or {}),
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -556,6 +560,7 @@ class OrderItem(Base):
     quantity = Column(Integer, nullable=False)
     unit_price = Column(Numeric(12, 2), nullable=False)
     line_total = Column(Numeric(12, 2), nullable=False)
+    notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     order = relationship("Order", back_populates="order_items")
@@ -569,6 +574,7 @@ class OrderItem(Base):
             'quantity': self.quantity,
             'unit_price': float(self.unit_price) if self.unit_price else 0,
             'line_total': float(self.line_total) if self.line_total else 0,
+            'notes': self.notes,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 

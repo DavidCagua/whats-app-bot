@@ -40,6 +40,7 @@ export default async function OrdersPage({ params }: OrdersPageProps) {
       id: oi.id,
       quantity: oi.quantity,
       productName: oi.products.name,
+      notes: oi.notes ?? null,
     })),
   }))
 

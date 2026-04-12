@@ -20,9 +20,23 @@ from ..orchestration.order_flow import (
     execute_order_intent,
     INTENT_CHAT,
     INTENT_GREET,
-    INTENT_ADD_TO_CART,
-    INTENT_REMOVE_FROM_CART,
-    INTENT_UPDATE_CART_ITEM,
+    RESULT_KIND_CHAT,
+    RESULT_KIND_MENU_CATEGORIES,
+    RESULT_KIND_PRODUCTS_LIST,
+    RESULT_KIND_PRODUCT_DETAILS,
+    RESULT_KIND_CART_CHANGE,
+    RESULT_KIND_CART_VIEW,
+    RESULT_KIND_DELIVERY_STATUS,
+    RESULT_KIND_ORDER_PLACED,
+    RESULT_KIND_NEEDS_CLARIFICATION,
+    RESULT_KIND_USER_ERROR,
+    RESULT_KIND_INTERNAL_ERROR,
+    CART_ACTION_ADDED,
+    CART_ACTION_REMOVED,
+    CART_ACTION_UPDATED_QUANTITY,
+    CART_ACTION_UPDATED_NOTES,
+    CART_ACTION_REPLACED,
+    CART_ACTION_NOOP,
 )
 from ..database.conversation_service import conversation_service
 from ..database.booking_service import booking_service
@@ -43,9 +57,10 @@ Reglas de menú y búsqueda (importante):
 - GET_PRODUCT con product_name: cuando pregunta qué trae o qué tiene un producto (ej. "qué trae la barracuda", "qué tiene la montesa").
 
 Otras reglas:
+- REGLA DE PRIORIDAD (más importante que las demás): si el mensaje NOMBRA uno o más productos del menú (aunque esté acompañado de un saludo, de la palabra "domicilio", "pedido", "por favor", o de una lista con saltos de línea), SIEMPRE clasifica como ADD_TO_CART con los items correspondientes. El saludo y palabras como "domicilio"/"pedido" son contexto, NO intención — se ignoran para la clasificación cuando hay productos nombrados. CHAT y GREET se usan SOLO cuando NO hay ningún producto en el mensaje.
 - GREET SOLO si el mensaje es únicamente un saludo ("hola", "buenas", "buenos días", "buenas noches") SIN ninguna mención de producto, cantidad o intención de pedir. Si el usuario mezcla saludo con un producto específico ("hola quiero una barracuda") → usa ADD_TO_CART o SEARCH_PRODUCTS directamente, NO GREET.
-- Si el usuario expresa intención de pedir u ordenar SIN nombrar un producto específico (ej. "para un domicilio", "quiero pedir", "quiero hacer un pedido", "buenas, un domicilio por favor", "me pueden atender"): usa CHAT. El usuario probablemente ya sabe qué quiere; solo invítalo a decir su pedido. NO uses ADD_TO_CART, SEARCH_PRODUCTS ni GET_MENU_CATEGORIES porque no hay producto ni pregunta por el menú.
-- Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}.
+- Si el usuario expresa intención de pedir u ordenar SIN nombrar ningún producto específico (ej. "para un domicilio", "quiero pedir", "quiero hacer un pedido", "buenas, un domicilio por favor", "me pueden atender"): usa CHAT. El usuario probablemente ya sabe qué quiere; solo invítalo a decir su pedido. NO uses ADD_TO_CART, SEARCH_PRODUCTS ni GET_MENU_CATEGORIES porque no hay producto ni pregunta por el menú. IMPORTANTE: esta regla aplica SOLO si no hay productos nombrados — si hay aunque sea un producto, gana la regla de prioridad de arriba.
+- Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}. Ejemplo saludo + pedido multi-producto: "hola buenas un domicilio por favor, 2 betas, 1 barracuda, 1 biela fries" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "BETA", "quantity": 2}}, {{"product_name": "BARRACUDA", "quantity": 1}}, {{"product_name": "BIELA FRIES", "quantity": 1}}]}}}}. Ejemplo con saltos de línea: "hola buenas tardes un domicilio por favor\\n2 betas\\n1 barracuda\\n1 biela fries" → mismo resultado (los saltos de línea son solo formato).
 - MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al pedido (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en el pedido y "notes" con la instrucción. Ejemplo: pedido tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente.
 - Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
 - Si dice "listo", "procedamos", "confirmar": PROCEED_TO_CHECKOUT.
@@ -190,6 +205,322 @@ class OrderAgent(BaseAgent):
             menu_url = settings.get("menu_url") or ""
         return f"Negocio: {business_name}. Menu URL: {menu_url or 'no configurado'}. Fecha: {current_date}."
 
+    def _build_response_prompt(
+        self,
+        result_kind: str,
+        exec_result: Dict[str, Any],
+        message_body: str,
+        business_context: Optional[Dict],
+        cart_summary_after: str,
+    ) -> tuple:
+        """
+        Build (response_system, resp_input) pair tailored to the result_kind.
+        Each branch gets structured data (never raw tool strings) and a dedicated tone guide.
+        """
+        biz_info = _format_business_info_for_prompt(business_context)
+        base_system = (
+            "Eres el asistente de pedidos de un restaurante colombiano. Hablas en español colombiano, "
+            "cálido, breve y natural — como un mesero profesional que conoce su menú. "
+            "Usa SOLO los datos que te doy; no inventes productos, precios, ni confirmes acciones que no ocurrieron. "
+            "Respuestas breves (1-4 líneas típicamente). Evita frases robóticas.\n\n"
+            + biz_info
+        )
+
+        def money(x: Any) -> str:
+            try:
+                return f"${int(x):,}".replace(",", ".")
+            except Exception:
+                return f"${x}"
+
+        if result_kind == RESULT_KIND_NEEDS_CLARIFICATION:
+            options = exec_result.get("options") or []
+            requested = exec_result.get("requested_name") or "ese producto"
+            opts_lines = "\n".join(f"- {o.get('name')} ({money(o.get('price'))})" for o in options)
+            system = base_system + (
+                "\n\nSITUACIÓN: El cliente pidió un producto con varias variantes. Necesitas saber cuál quiere ANTES de agregarlo. "
+                "Esto NO es un error — es una pregunta normal de mesero.\n"
+                "REGLAS:\n"
+                "- PROHIBIDO: 'no se pudo', 'no pude', 'error', 'problema', 'disculpa', 'lo siento', 'falló'.\n"
+                "- PROHIBIDO: 'agregué', 'listo', 'ya está', 'añadí' — el pedido NO cambió.\n"
+                "- NO repitas el resumen del pedido actual.\n"
+                "- Usa SOLO los nombres y precios de la lista, exactos.\n"
+                "- 1-3 líneas total."
+            )
+            inp = (
+                f"Cliente dijo: {message_body}\n"
+                f"Producto solicitado: {requested}\n"
+                f"Opciones disponibles (usa exactamente estos nombres y precios):\n{opts_lines}\n"
+                f"Tarea: presenta las opciones de forma natural y pregunta cuál prefiere."
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_CHAT:
+            system = base_system + (
+                "\n\nSITUACIÓN: El cliente está conversando sin pedir una acción específica. "
+                "Si mencionó que quiere hacer un pedido pero no dijo qué, invítalo a decirte qué quiere ordenar. "
+                "Si saludó o hizo small talk, responde amable y breve (1-2 líneas) y ofrécele ayuda con su pedido. "
+                "NO listes el menú a menos que lo pida."
+            )
+            inp = f"Cliente dijo: {message_body}\nEstado del pedido: {cart_summary_after}"
+            return system, inp
+
+        if result_kind == RESULT_KIND_MENU_CATEGORIES:
+            categories = exec_result.get("categories") or []
+            cats_lines = "\n".join(f"- {c}" for c in categories)
+            system = base_system + (
+                "\n\nSITUACIÓN: El cliente preguntó qué hay en el menú. Tienes las categorías disponibles. "
+                "REGLAS:\n"
+                "- Presenta las categorías de forma amigable (puedes traducirlas al español natural, ej. HAMBURGUESAS → hamburguesas).\n"
+                "- Invítalo a elegir una categoría para ver los productos (ej. '¿quieres ver las hamburguesas o las bebidas?').\n"
+                "- NO listes productos individuales — solo categorías.\n"
+                "- 1-3 líneas."
+            )
+            inp = f"Cliente dijo: {message_body}\nCategorías disponibles:\n{cats_lines}"
+            return system, inp
+
+        if result_kind == RESULT_KIND_PRODUCTS_LIST:
+            products = exec_result.get("products") or []
+            query_label = exec_result.get("query_label")
+            category_label = exec_result.get("category_label")
+            if not products:
+                label = query_label or category_label or "eso"
+                system = base_system + (
+                    "\n\nSITUACIÓN: No hay productos que coincidan con lo que el cliente pidió. "
+                    "Dile amablemente (sin 'lo siento') y ofrécele ver las categorías del menú. 1-2 líneas."
+                )
+                inp = f"Cliente buscó: {label}\nNo hay coincidencias."
+                return system, inp
+            prods_lines = "\n".join(
+                f"- {p.get('name')} ({money(p.get('price'))})"
+                + (f" — {p.get('description')}" if p.get("description") else "")
+                for p in products
+            )
+            context_label = ""
+            if category_label:
+                context_label = f"Categoría: {category_label}"
+            elif query_label:
+                context_label = f"Búsqueda: {query_label}"
+            system = base_system + (
+                "\n\nSITUACIÓN: El cliente pidió ver una lista de productos. "
+                "REGLAS:\n"
+                "- Presenta los productos de forma clara con nombre y precio.\n"
+                "- Si son muchos (>6), puedes agrupar o resumir; si son pocos, lístalos todos.\n"
+                "- Si hay descripciones y el cliente preguntó por un ingrediente, menciona primero el producto cuya descripción coincide.\n"
+                "- Termina invitando a ordenar o a preguntar por alguno en particular.\n"
+                "- NUNCA muestres IDs ni códigos internos.\n"
+                "- Máximo ~8 líneas."
+            )
+            inp = f"Cliente dijo: {message_body}\n{context_label}\nProductos disponibles:\n{prods_lines}"
+            return system, inp
+
+        if result_kind == RESULT_KIND_PRODUCT_DETAILS:
+            product = exec_result.get("product") or {}
+            desc = product.get("description") or "(sin descripción)"
+            system = base_system + (
+                "\n\nSITUACIÓN: El cliente preguntó por los detalles de un producto. "
+                "REGLAS:\n"
+                "- Di el nombre, precio y describe qué trae en 1-2 líneas.\n"
+                "- Termina preguntando si lo quiere agregar al pedido.\n"
+                "- NO inventes ingredientes fuera de la descripción dada."
+            )
+            inp = (
+                f"Cliente dijo: {message_body}\n"
+                f"Producto: {product.get('name')}\n"
+                f"Precio: {money(product.get('price'))}\n"
+                f"Descripción: {desc}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_CART_CHANGE:
+            cc = exec_result.get("cart_change") or {}
+            action = cc.get("action") or ""
+            added = cc.get("added") or []
+            removed = cc.get("removed") or []
+            updated = cc.get("updated") or []
+            cart_after = cc.get("cart_after") or []
+            total_after = cc.get("total_after") or 0
+
+            def fmt_items(items):
+                return "\n".join(
+                    f"- {it.get('quantity')}x {it.get('name')}"
+                    + (f" ({it.get('notes')})" if it.get("notes") else "")
+                    for it in items
+                )
+
+            cart_lines = fmt_items(cart_after) or "(vacío)"
+
+            if action == CART_ACTION_NOOP:
+                system = base_system + (
+                    "\n\nSITUACIÓN: El cliente pidió modificar el pedido pero nada cambió "
+                    "(tal vez ya estaba así, o no se encontró el producto). "
+                    "Dile amablemente el estado actual y pregúntale qué quiere hacer. "
+                    "NO uses 'error' ni 'lo siento'. 1-2 líneas."
+                )
+                inp = f"Cliente dijo: {message_body}\nPedido actual (sin cambios):\n{cart_lines}\nTotal: {money(total_after)}"
+                return system, inp
+
+            if action == CART_ACTION_ADDED:
+                situation = "El cliente agregó productos al pedido."
+                change_desc = f"Agregado:\n{fmt_items(added)}"
+            elif action == CART_ACTION_REMOVED:
+                situation = "El cliente quitó productos del pedido."
+                change_desc = f"Quitado:\n{fmt_items(removed)}"
+            elif action == CART_ACTION_UPDATED_QUANTITY:
+                situation = "El cliente actualizó la cantidad de un producto."
+                change_desc = f"Actualizado:\n{fmt_items(updated)}"
+            elif action == CART_ACTION_UPDATED_NOTES:
+                situation = "El cliente cambió las instrucciones de un producto (ej. 'sin cebolla')."
+                change_desc = f"Actualizado (notas):\n{fmt_items(added) or fmt_items(updated)}"
+            elif action == CART_ACTION_REPLACED:
+                situation = "El cliente reemplazó un producto por otro."
+                change_desc = f"Quitado:\n{fmt_items(removed)}\nAgregado:\n{fmt_items(added)}"
+            else:
+                situation = "Cambio en el pedido."
+                change_desc = f"Actualizado:\n{fmt_items(updated) or fmt_items(added) or fmt_items(removed)}"
+
+            system = base_system + (
+                f"\n\nSITUACIÓN: {situation}\n"
+                "REGLAS:\n"
+                "- Confirma brevemente el cambio que hizo el backend (está en 'Cambio realizado').\n"
+                "- Muestra el resumen del pedido actual.\n"
+                "- Sugiere el siguiente paso: preguntar si quiere agregar algo más (ej. bebida si no tiene una) o procedemos con el pedido.\n"
+                "- NO inventes productos ni precios — usa solo los datos dados.\n"
+                "- 2-5 líneas."
+            )
+            inp = (
+                f"Cliente dijo: {message_body}\n"
+                f"Cambio realizado:\n{change_desc}\n"
+                f"Pedido actual:\n{cart_lines}\n"
+                f"Subtotal: {money(total_after)}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_CART_VIEW:
+            cv = exec_result.get("cart_view") or {}
+            items = cv.get("items") or []
+            if cv.get("is_empty") or not items:
+                system = base_system + (
+                    "\n\nSITUACIÓN: El cliente pidió ver su pedido, pero está vacío. "
+                    "Invítalo amablemente a pedir algo (sugiérele preguntar por categorías). 1-2 líneas."
+                )
+                inp = f"Cliente dijo: {message_body}\nPedido: vacío"
+                return system, inp
+            items_lines = "\n".join(
+                f"- {it.get('quantity')}x {it.get('name')}"
+                + (f" ({it.get('notes')})" if it.get("notes") else "")
+                + f" — {money(int(it.get('price') or 0) * int(it.get('quantity') or 0))}"
+                for it in items
+            )
+            system = base_system + (
+                "\n\nSITUACIÓN: El cliente quiere ver su pedido actual. "
+                "REGLAS:\n"
+                "- Muestra cada ítem con cantidad, nombre, notas (si hay) y precio.\n"
+                "- Muestra subtotal, domicilio y total.\n"
+                "- Pregunta si quiere agregar algo más o proceder.\n"
+                "- NO muestres IDs internos."
+            )
+            inp = (
+                f"Cliente dijo: {message_body}\n"
+                f"Pedido actual:\n{items_lines}\n"
+                f"Subtotal: {money(cv.get('subtotal'))}\n"
+                f"Domicilio: {money(cv.get('delivery_fee'))}\n"
+                f"Total: {money(cv.get('total'))}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_DELIVERY_STATUS:
+            ds = exec_result.get("delivery_status") or {}
+            if ds.get("all_present"):
+                system = base_system + (
+                    "\n\nSITUACIÓN: Ya tenemos todos los datos de entrega del cliente. "
+                    "Confírmale los datos que tenemos y pregúntale si gusta proceder o quiere cambiar algo. "
+                    "FORMATO: 'Tengo esta dirección: [addr], teléfono [phone] y pago [payment]. ¿Procedemos o quieres cambiar algo?'. "
+                    "1-3 líneas."
+                )
+                inp = (
+                    f"Cliente dijo: {message_body}\n"
+                    f"Datos actuales:\n"
+                    f"- Nombre: {ds.get('name') or '(no registrado)'}\n"
+                    f"- Dirección: {ds.get('address')}\n"
+                    f"- Teléfono: {ds.get('phone')}\n"
+                    f"- Pago: {ds.get('payment_method')}"
+                )
+                return system, inp
+            missing = ds.get("missing") or []
+            missing_es = {"name": "nombre", "address": "dirección", "phone": "teléfono", "payment": "medio de pago"}
+            missing_labels = [missing_es.get(m, m) for m in missing]
+            system = base_system + (
+                "\n\nSITUACIÓN: Faltan algunos datos de entrega. "
+                "REGLAS:\n"
+                "- Pide SOLO los datos que faltan (nunca pidas de más).\n"
+                "- Si ya tenemos alguno, menciónalo brevemente (ej. 'ya tengo tu dirección').\n"
+                "- NO sugieras 'proceder con el pedido' hasta tener todos los datos.\n"
+                "- 1-3 líneas."
+            )
+            inp = (
+                f"Cliente dijo: {message_body}\n"
+                f"Datos ya registrados:\n"
+                f"- Nombre: {ds.get('name') or '(falta)'}\n"
+                f"- Dirección: {ds.get('address') or '(falta)'}\n"
+                f"- Teléfono: {ds.get('phone') or '(falta)'}\n"
+                f"- Pago: {ds.get('payment_method') or '(falta)'}\n"
+                f"Faltan: {', '.join(missing_labels) if missing_labels else '(ninguno)'}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_ORDER_PLACED:
+            op = exec_result.get("order_placed") or {}
+            oid = op.get("order_id_display") or ""
+            items = op.get("items") or []
+            items_lines = "\n".join(
+                f"- {it.get('quantity')}x {it.get('name')}"
+                + (f" ({it.get('notes')})" if it.get("notes") else "")
+                for it in items
+            )
+            system = base_system + (
+                "\n\nSITUACIÓN: El pedido fue confirmado exitosamente. "
+                "REGLAS:\n"
+                "- Celebra brevemente (ej. '¡Listo!').\n"
+                "- Muestra el número de pedido, items, subtotal, domicilio y total.\n"
+                "- Dile que pronto se comunicarán para coordinar la entrega.\n"
+                "- 3-6 líneas."
+            )
+            inp = (
+                f"Pedido confirmado.\n"
+                f"Número: #{oid}\n"
+                f"Items:\n{items_lines}\n"
+                f"Subtotal: {money(op.get('subtotal'))}\n"
+                f"Domicilio: {money(op.get('delivery_fee'))}\n"
+                f"Total: {money(op.get('total'))}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_USER_ERROR:
+            err = exec_result.get("error_message") or "No pude procesar eso."
+            system = base_system + (
+                "\n\nSITUACIÓN: Ocurrió una situación que requiere guiar al cliente (ej. pedido vacío, producto no encontrado). "
+                "REGLAS:\n"
+                "- Dile lo que pasa de forma amable y natural, SIN usar 'error', 'falló', 'disculpa', 'lo siento', 'no pude'.\n"
+                "- Ofrece el siguiente paso útil (ej. 'dime qué te gustaría pedir', 'revisa el menú').\n"
+                "- 1-2 líneas."
+            )
+            inp = f"Cliente dijo: {message_body}\nSituación: {err}"
+            return system, inp
+
+        if result_kind == RESULT_KIND_INTERNAL_ERROR:
+            # Safe generic fallback — the LLM sees no raw stack trace.
+            system = base_system + (
+                "\n\nSITUACIÓN: Hubo un problema técnico temporal. "
+                "Dile al cliente amablemente que intente de nuevo en un momento. 1 línea."
+            )
+            inp = f"Cliente dijo: {message_body}"
+            return system, inp
+
+        # Fallback — shouldn't normally happen
+        system = base_system + "\n\nResponde amablemente al cliente."
+        inp = f"Cliente dijo: {message_body}\nResumen pedido: {cart_summary_after}"
+        return system, inp
+
     def execute(
         self,
         message_body: str,
@@ -239,6 +570,33 @@ class OrderAgent(BaseAgent):
                 order_state=order_state,
                 cart_summary=cart_summary_str,
             )
+
+            # Pending disambiguation: if last turn we offered the customer a set
+            # of options, inject them so the planner can resolve replies like
+            # "la normal", "la primera", "la Corona" to a specific product.
+            pending = order_context.get("pending_disambiguation") or {}
+            logging.warning(
+                "[ORDER_AGENT] pending_disambiguation loaded=%s options=%s",
+                bool(pending and pending.get("options")),
+                [o.get("name") for o in (pending.get("options") or [])] if pending else [],
+            )
+            if pending and pending.get("options"):
+                opts_lines = "\n".join(
+                    f"  - {o.get('name')} (${int(o.get('price') or 0):,})".replace(",", ".")
+                    for o in pending.get("options", [])
+                )
+                planner_system += (
+                    "\n\nCONTEXTO DE ACLARACIÓN PENDIENTE: En tu turno ANTERIOR ofreciste al cliente "
+                    f"estas opciones porque preguntó por \"{pending.get('requested_name', '')}\":\n"
+                    f"{opts_lines}\n"
+                    "Si el mensaje actual del cliente es una elección (ej. 'la normal', 'la primera', 'la barata', "
+                    "'dame la Corona', 'la michelada', un nombre o un número), mapea su respuesta a UNA de estas opciones y "
+                    "clasifícalo como ADD_TO_CART con product_name EXACTO de la opción elegida. "
+                    "Ejemplos: 'la normal' → la opción SIN modificador (ej. \"Michelada\" no \"Corona michelada\"); "
+                    "'la primera' → la primera de la lista; 'la más barata' → la de menor precio. "
+                    "Si el cliente está cambiando de tema o pidiendo otra cosa, ignora este contexto y clasifica normalmente."
+                )
+
             history_text = ""
             for msg in conversation_history[-6:]:
                 role = msg.get("role", "")
@@ -264,11 +622,8 @@ class OrderAgent(BaseAgent):
                 intent=intent,
                 params=params,
             )
-            tool_result = exec_result.get("tool_result") or ""
             success = exec_result.get("success", False)
             cart_summary_after = exec_result.get("cart_summary") or cart_summary_str
-            state_after = exec_result.get("state_after", order_state)
-            error_msg = exec_result.get("error")
 
             # 3) Response: deterministic greeting for GREET, else LLM response generator
             if intent == INTENT_GREET:
@@ -297,15 +652,17 @@ class OrderAgent(BaseAgent):
                     f"{menu_url}"
                 )
             else:
-                response_system = RESPONSE_GENERATOR_SYSTEM + "\n\n" + _format_business_info_for_prompt(business_context)
-                if intent in (INTENT_ADD_TO_CART, INTENT_REMOVE_FROM_CART, INTENT_UPDATE_CART_ITEM) and success:
-                    response_system += f"\nEl backend confirmó la acción. Incluye este resumen del pedido actual: {cart_summary_after}"
-                resp_input = f"Usuario: {message_body}\nIntención ejecutada: {intent}. Éxito: {success}.\nResultado del backend: {tool_result}\nResumen pedido: {cart_summary_after}"
-                if error_msg:
-                    resp_input += f"\nError: {error_msg}"
+                result_kind = exec_result.get("result_kind", "")
+                response_system, resp_input = self._build_response_prompt(
+                    result_kind=result_kind,
+                    exec_result=exec_result,
+                    message_body=message_body,
+                    business_context=business_context,
+                    cart_summary_after=cart_summary_after,
+                )
                 response_messages = [
                     SystemMessage(content=response_system),
-                    HumanMessage(content=resp_input + "\n\nGenera la respuesta breve en español para el usuario:"),
+                    HumanMessage(content=resp_input + "\n\nResponde al cliente en español colombiano, breve y natural:"),
                 ]
                 response_llm = self.llm.invoke(response_messages)
                 final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)

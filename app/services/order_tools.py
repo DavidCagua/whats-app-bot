@@ -196,7 +196,7 @@ def search_products(query: str, injected_business_context: dict = None) -> str:
         lines = []
         for p in products:
             price_str = _format_price(p.get("price", 0), p.get("currency", "COP"))
-            line = f"• {p['name']} - {price_str} (ID: {p['id']})"
+            line = f"• {p['name']} - {price_str}"
             if include_desc:
                 desc = (p.get("description") or "").strip()
                 if desc:
@@ -232,25 +232,20 @@ def get_product_details(product_id: str = "", product_name: str = "", injected_b
         if not product_id and not (product_name and product_name.strip()):
             return "❌ Indica el nombre o ID del producto que deseas."
 
-        try:
-            product = product_order_service.get_product(
-                product_id=product_id.strip() if product_id else None,
-                product_name=product_name.strip() if product_name else None,
-                business_id=business_id,
-            )
-        except AmbiguousProductError as e:
-            options = "\n".join(
-                f"• {m['name']} - {_format_price(m.get('price', 0))}"
-                for m in e.matches
-            )
-            return f"🔎 Encontré varias opciones de {product_name}:\n{options}\n\n¿Cuál te interesa?"
+        product = product_order_service.get_product(
+            product_id=product_id.strip() if product_id else None,
+            product_name=product_name.strip() if product_name else None,
+            business_id=business_id,
+        )
 
         if not product:
             return "❌ Producto no encontrado. Usa list_category_products para ver el menú."
 
         price_str = _format_price(product.get("price", 0), product.get("currency", "COP"))
         desc = product.get("description") or ""
-        return f"**{product['name']}** - {price_str}\n" + (f"{desc}\n" if desc else "") + f"ID: {product['id']}"
+        return f"**{product['name']}** - {price_str}\n" + (f"{desc}" if desc else "")
+    except AmbiguousProductError:
+        raise
     except Exception as e:
         logger.error(f"[ORDER_TOOL] get_product_details error: {e}")
         return f"❌ Error al buscar producto: {str(e)}"
@@ -280,17 +275,10 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
             return "❌ La cantidad debe ser al menos 1."
 
         product = None
-        try:
-            if product_id:
-                product = product_order_service.get_product(product_id=product_id, business_id=business_id)
-            elif product_name and product_name.strip():
-                product = product_order_service.get_product(product_name=product_name, business_id=business_id)
-        except AmbiguousProductError as e:
-            options = "\n".join(
-                f"• {m['name']} - {_format_price(m.get('price', 0))}"
-                for m in e.matches
-            )
-            return f"🔎 Encontré varias opciones de {product_name}:\n{options}\n\n¿Cuál prefieres?"
+        if product_id:
+            product = product_order_service.get_product(product_id=product_id, business_id=business_id)
+        elif product_name and product_name.strip():
+            product = product_order_service.get_product(product_name=product_name, business_id=business_id)
 
         if not product:
             return "❌ Producto no encontrado. Pregunta por el menú o una categoría para ver productos."
@@ -328,6 +316,8 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
 
         notes_str = f" ({notes})" if notes else ""
         return f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. Subtotal: {_format_price(total)}"
+    except AmbiguousProductError:
+        raise
     except Exception as e:
         logger.error(f"[ORDER_TOOL] add_to_cart error: {e}")
         return f"❌ Error al agregar a tu pedido: {str(e)}"
@@ -354,9 +344,8 @@ def view_cart(injected_business_context: dict = None) -> str:
         lines = []
         for it in items:
             price_str = _format_price(it.get("price", 0) * it.get("quantity", 0))
-            pid = it.get("product_id", "")
             notes_str = f" ({it['notes']})" if it.get("notes") else ""
-            lines.append(f"• {it.get('quantity', 0)}x {it.get('name', '')}{notes_str} - {price_str} (ID: {pid})")
+            lines.append(f"• {it.get('quantity', 0)}x {it.get('name', '')}{notes_str} - {price_str}")
 
         delivery_fee = _get_delivery_fee(injected_business_context)
         grand_total = subtotal + delivery_fee
@@ -670,6 +659,7 @@ def place_order(injected_business_context: dict = None) -> str:
                 "name": it.get("name"),
                 "price": it.get("price", 0),
                 "quantity": it.get("quantity", 1),
+                "notes": (it.get("notes") or "").strip() or None,
             }
             for it in items
         ]

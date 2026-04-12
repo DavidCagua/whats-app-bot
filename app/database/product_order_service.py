@@ -10,17 +10,13 @@ from typing import Dict, List, Optional, Any
 
 from .models import Product, Order, OrderItem, get_db_session
 from .customer_service import customer_service
+# Re-export AmbiguousProductError from the new search module for backward compat
+from ..services.product_search import (
+    AmbiguousProductError,
+    search_products as _search_products_hybrid,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class AmbiguousProductError(Exception):
-    """Raised when a product search matches multiple products and needs disambiguation."""
-    def __init__(self, query: str, matches: List[Dict[str, Any]]):
-        self.query = query
-        self.matches = matches
-        names = ", ".join(m["name"] for m in matches)
-        super().__init__(f"Multiple products match '{query}': {names}")
 
 # Map natural-language category terms to canonical DB category values
 CATEGORY_MAP = {
@@ -88,22 +84,6 @@ def normalize_category(input_category: str) -> str:
         )
         return canonical
     return input_category.strip()
-
-
-# Common words to skip when searching by tokens (Spanish)
-_SEARCH_STOPWORDS = frozenset(
-    {"una", "un", "la", "el", "de", "con", "para", "por", "y", "e", "o", "u", "del", "al", "los", "las", "unos", "unas",
-     "que", "en", "lo", "le", "se", "da", "al", "algo", "uno", "como", "mas", "pero", "sus", "este", "esta", "este",
-     "hamburguesa", "burger", "bebida", "gaseosa", "refresco"}  # generic product terms - search by distinctive part
-)
-
-
-def _search_tokens(query: str) -> list:
-    """Extract significant search tokens from query, normalized."""
-    if not query or not query.strip():
-        return []
-    words = query.strip().lower().replace("-", " ").replace(",", " ").split()
-    return [w for w in words if len(w) > 1 and w not in _SEARCH_STOPWORDS]
 
 
 class ProductOrderService:
@@ -184,21 +164,15 @@ class ProductOrderService:
         business_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Get a single product by ID or by name (fuzzy match).
+        Get a single product by ID or by name.
 
-        Args:
-            product_id: Product UUID (takes precedence)
-            product_name: Product name to search (used if product_id not provided)
-            business_id: Business UUID (required for name search)
-
-        Returns:
-            Product dict or None if not found
+        For ID lookup: direct DB fetch.
+        For name lookup: delegates to the hybrid search module with unique=True,
+        which raises AmbiguousProductError if there's no clear winner.
         """
         try:
-            db_session = get_db_session()
-            product = None
-
             if product_id:
+                db_session = get_db_session()
                 product = (
                     db_session.query(Product)
                     .filter(
@@ -207,76 +181,23 @@ class ProductOrderService:
                     )
                     .first()
                 )
-            elif product_name and business_id:
-                product = self._find_product_by_name_or_desc(
-                    db_session, business_id, product_name.strip()
+                result = product.to_dict() if product else None
+                db_session.close()
+                return result
+            if product_name and business_id:
+                results = _search_products_hybrid(
+                    business_id=business_id,
+                    query=product_name.strip(),
+                    limit=5,
+                    unique=True,
                 )
-
-            result = product.to_dict() if product else None
-            db_session.close()
-            return result
+                return results[0] if results else None
+            return None
         except AmbiguousProductError:
             raise
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error getting product: {e}")
             return None
-
-    def _find_product_by_name_or_desc(
-        self, db_session, business_id: str, query: str
-    ) -> Optional[Any]:
-        """Find a product by name or description. Tries full query, then token-by-token.
-        Returns a single Product if unique match, or raises AmbiguousProductError if multiple matches."""
-        from sqlalchemy import or_, func
-
-        business_uuid = uuid.UUID(business_id)
-        qnorm = query.strip().lower()
-
-        def name_or_desc_contains(term: str):
-            desc_col = func.coalesce(Product.description, "")
-            return or_(
-                Product.name.ilike(f"%{term}%"),
-                desc_col.ilike(f"%{term}%"),
-            )
-
-        base = db_session.query(Product).filter(
-            Product.business_id == business_uuid,
-            Product.is_active == True,
-        )
-
-        def _check_unique(products_query):
-            """Return product if exactly one match, raise AmbiguousProductError if multiple."""
-            results = products_query.all()
-            if len(results) == 1:
-                return results[0]
-            if len(results) > 1:
-                # Check if any is an exact match (case-insensitive)
-                for p in results:
-                    if p.name.strip().lower() == qnorm:
-                        return p
-                raise AmbiguousProductError(
-                    query=query,
-                    matches=[p.to_dict() for p in results],
-                )
-            return None
-
-        # 1. Try full query in name
-        result = _check_unique(base.filter(Product.name.ilike(f"%{qnorm}%")))
-        if result:
-            return result
-
-        # 2. Try full query in name or description
-        result = _check_unique(base.filter(name_or_desc_contains(qnorm)))
-        if result:
-            return result
-
-        # 3. Try each significant token (e.g. "hamburguesa barracuda" -> "barracuda")
-        tokens = _search_tokens(query)
-        for tok in tokens:
-            result = _check_unique(base.filter(name_or_desc_contains(tok)))
-            if result:
-                return result
-
-        return None
 
     def search_products(
         self,
@@ -284,48 +205,18 @@ class ProductOrderService:
         query: str,
     ) -> List[Dict[str, Any]]:
         """
-        Search products by name, description, or category. Handles multi-word queries:
-        - "hamburguesa barracuda" -> matches BARRACUDA
-        - "bebidas" -> matches products in category BEBIDAS
-        - "coca zero" -> matches Coca-Cola Zero
+        Search products by name, description, category, tags, and semantic
+        similarity. Delegates to the hybrid product_search module.
         """
         try:
             if not query or not query.strip():
                 return []
-            from sqlalchemy import or_, func
-
-            db_session = get_db_session()
-            business_uuid = uuid.UUID(business_id)
-            qnorm = query.strip().lower()
-
-            def name_desc_or_category_contains(term: str):
-                desc_col = func.coalesce(Product.description, "")
-                cat_col = func.coalesce(Product.category, "")
-                return or_(
-                    Product.name.ilike(f"%{term}%"),
-                    desc_col.ilike(f"%{term}%"),
-                    cat_col.ilike(f"%{term}%"),
-                )
-
-            base = (
-                db_session.query(Product)
-                .filter(
-                    Product.business_id == business_uuid,
-                    Product.is_active == True,
-                )
+            return _search_products_hybrid(
+                business_id=business_id,
+                query=query.strip(),
+                limit=20,
+                unique=False,
             )
-
-            # Build OR of: full query + each significant token
-            conditions = [name_desc_or_category_contains(qnorm)]
-            for tok in _search_tokens(query):
-                if tok != qnorm:
-                    conditions.append(name_desc_or_category_contains(tok))
-
-            combined = or_(*conditions)
-            products = base.filter(combined).order_by(Product.name).all()
-            result = [p.to_dict() for p in products]
-            db_session.close()
-            return result
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error searching products: {e}")
             return []
@@ -336,60 +227,16 @@ class ProductOrderService:
         query: str,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """
-        Search products by name and description (and ingredients if column exists) using ILIKE.
-        No embeddings; for small menus. Used as fallback when category lookup returns no rows.
-        """
+        """Deprecated alias — kept for callers. Delegates to hybrid search."""
         try:
             if not query or not query.strip():
                 return []
-            from sqlalchemy import or_, func
-
-            db_session = get_db_session()
-            business_uuid = uuid.UUID(business_id)
-            q = query.strip()
-            # Also try accent-stripped version for matching (e.g. "menu" matches "MENÚ")
-            q_no_accent = unicodedata.normalize("NFD", q)
-            q_no_accent = "".join(c for c in q_no_accent if unicodedata.category(c) != "Mn")
-            desc_col = func.coalesce(Product.description, "")
-            cat_col = func.coalesce(Product.category, "")
-            # name OR description OR category, try both original and accent-stripped
-            conditions = [
-                Product.name.ilike(f"%{q}%"),
-                desc_col.ilike(f"%{q}%"),
-                cat_col.ilike(f"%{q}%"),
-            ]
-            if q_no_accent != q:
-                conditions.extend([
-                    Product.name.ilike(f"%{q_no_accent}%"),
-                    desc_col.ilike(f"%{q_no_accent}%"),
-                    cat_col.ilike(f"%{q_no_accent}%"),
-                ])
-            # Also try individual words for multi-word queries
-            for word in q_no_accent.lower().split():
-                if len(word) > 2:
-                    conditions.append(Product.name.ilike(f"%{word}%"))
-                    conditions.append(cat_col.ilike(f"%{word}%"))
-            condition = or_(*conditions)
-            products = (
-                db_session.query(Product)
-                .filter(
-                    Product.business_id == business_uuid,
-                    Product.is_active == True,
-                    condition,
-                )
-                .order_by(Product.name)
-                .limit(limit)
-                .all()
+            return _search_products_hybrid(
+                business_id=business_id,
+                query=query.strip(),
+                limit=limit,
+                unique=False,
             )
-            result = [p.to_dict() for p in products]
-            db_session.close()
-            logger.warning(
-                "[SEMANTIC_SEARCH] query=%s results=%s",
-                q,
-                len(result),
-            )
-            return result
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error in search_products_semantic: {e}")
             return []
@@ -483,6 +330,7 @@ class ProductOrderService:
                     "quantity": quantity,
                     "unit_price": price,
                     "line_total": line_total,
+                    "notes": (item.get("notes") or "").strip() or None,
                 })
 
             # Create or update customer with delivery info
@@ -531,6 +379,7 @@ class ProductOrderService:
                     quantity=oi["quantity"],
                     unit_price=oi["unit_price"],
                     line_total=oi["line_total"],
+                    notes=oi.get("notes"),
                 )
                 db_session.add(order_item)
 

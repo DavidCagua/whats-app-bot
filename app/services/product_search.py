@@ -1,0 +1,582 @@
+"""
+Hybrid product search: lexical + tag + semantic.
+
+Replaces the three legacy ILIKE functions in product_order_service with
+one parameterizable entry point:
+
+    search_products(business_id, query, *, limit=20, unique=False)
+
+Pipeline:
+    1. Normalize query: lowercase, strip accents, tokenize.
+    2. Stem tokens (Snowball Spanish).
+    3. Expand with per-business synonyms (business.settings.search_synonyms).
+    4. Lexical pass: ILIKE on name / description / category, token and
+       phrase level — fetches candidates.
+    5. Tag pass: GIN containment on products.tags.
+    6. Semantic pass (optional): pgvector cosine on query embedding —
+       only runs if OPENAI_API_KEY is set and products have embeddings.
+    7. Merge candidates, compute a weighted score per product, sort.
+    8. For unique=True: return top-1 if score ratio vs top-2 is > 2x,
+       otherwise raise AmbiguousProductError.
+
+Score weights (additive per product):
+    exact name match         100
+    tag match (per tag)       40
+    name substring            30
+    category match            20
+    description substring     15
+    embedding cosine       alpha * 50 (default alpha=1.0)
+    stem variant bonus         5
+"""
+
+import logging
+import re
+import unicodedata
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy import text as sql_text
+
+from ..database.models import Product, Business, get_db_session
+from .embeddings import embed_text, format_vector_literal
+
+logger = logging.getLogger(__name__)
+
+
+class AmbiguousProductError(Exception):
+    """Raised when unique=True but the search result has no clear winner."""
+    def __init__(self, query: str, matches: List[Dict[str, Any]]):
+        self.query = query
+        self.matches = matches
+        names = ", ".join(m.get("name", "?") for m in matches)
+        super().__init__(f"Multiple products match '{query}': {names}")
+
+
+# ---------- normalization ----------
+
+_SPANISH_STOPWORDS = frozenset({
+    "una", "un", "la", "el", "de", "con", "para", "por", "y", "e", "o", "u",
+    "del", "al", "los", "las", "unos", "unas", "que", "en", "lo", "le", "se",
+    "da", "algo", "uno", "como", "mas", "pero", "sus", "este", "esta", "eso",
+    "me", "mi", "tu", "su", "si", "no", "ya", "muy", "quiero", "dame", "pasame",
+    "dos", "tres",  # quantity words — safe to drop for search tokens
+})
+
+
+def _strip_accents(s: str) -> str:
+    nfkd = unicodedata.normalize("NFD", s or "")
+    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+
+
+def _normalize(query: str) -> str:
+    """Lowercase, strip accents, collapse whitespace."""
+    if not query:
+        return ""
+    s = _strip_accents(query.lower())
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _tokenize(query_norm: str) -> List[str]:
+    return [
+        w for w in query_norm.split()
+        if len(w) > 1 and w not in _SPANISH_STOPWORDS
+    ]
+
+
+_stemmer = None
+
+
+def _get_stemmer():
+    global _stemmer
+    if _stemmer is None:
+        try:
+            import snowballstemmer
+            _stemmer = snowballstemmer.stemmer("spanish")
+        except Exception as e:
+            logger.warning("[PRODUCT_SEARCH] snowballstemmer unavailable: %s", e)
+            _stemmer = False
+    return _stemmer if _stemmer is not False else None
+
+
+def _stem(token: str) -> str:
+    s = _get_stemmer()
+    if s is None:
+        return token
+    try:
+        return s.stemWord(token)
+    except Exception:
+        return token
+
+
+# ---------- synonym expansion ----------
+
+def _load_business_synonyms(db_session, business_id: str) -> Dict[str, List[str]]:
+    try:
+        business = (
+            db_session.query(Business)
+            .filter(Business.id == uuid.UUID(business_id))
+            .first()
+        )
+        if not business or not business.settings:
+            return {}
+        settings = business.settings if isinstance(business.settings, dict) else {}
+        syns = settings.get("search_synonyms") or {}
+        if not isinstance(syns, dict):
+            return {}
+        # Normalize keys: lowercase, accent-stripped
+        out: Dict[str, List[str]] = {}
+        for k, v in syns.items():
+            if not isinstance(k, str):
+                continue
+            key = _normalize(k)
+            if not isinstance(v, list):
+                continue
+            vals = [_normalize(x) for x in v if isinstance(x, str)]
+            vals = [x for x in vals if x]
+            if key and vals:
+                out[key] = vals
+        return out
+    except Exception as e:
+        logger.warning("[PRODUCT_SEARCH] Failed to load synonyms for %s: %s", business_id, e)
+        return {}
+
+
+def _expand_tokens(tokens: List[str], synonyms: Dict[str, List[str]]) -> List[str]:
+    """Add synonyms for each token. De-duplicated, original order preserved."""
+    seen = set()
+    out: List[str] = []
+    for tok in tokens:
+        for variant in [tok] + synonyms.get(tok, []):
+            if variant not in seen:
+                seen.add(variant)
+                out.append(variant)
+    # Also expand the full phrase as a synonym key (e.g. "cerveza rubia")
+    full = " ".join(tokens)
+    for variant in synonyms.get(full, []):
+        if variant not in seen:
+            seen.add(variant)
+            out.append(variant)
+    return out
+
+
+# ---------- lexical + tag + semantic search ----------
+
+_SCORE_EXACT_NAME = 100
+_SCORE_TAG = 40
+_SCORE_NAME_SUBSTRING = 30
+_SCORE_CATEGORY = 20
+_SCORE_DESCRIPTION = 15
+_SCORE_EMBEDDING_MAX = 50  # cosine 0..1 → 0..50
+_SCORE_STEM_BONUS = 5
+
+
+def _lexical_candidates(
+    db_session,
+    business_id: str,
+    tokens_expanded: List[str],
+    full_query_norm: str,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Pull candidate products via a single SQL query that ORs all lexical
+    conditions. Returns {product_id: product_row_dict} — dedup at the app
+    layer so we don't double-count scores.
+    """
+    if not tokens_expanded and not full_query_norm:
+        return {}
+
+    business_uuid = uuid.UUID(business_id)
+    like_params: Dict[str, str] = {}
+    or_clauses: List[str] = []
+    idx = 0
+
+    def add_like(field_sql: str, term: str):
+        nonlocal idx
+        key = f"p{idx}"
+        idx += 1
+        like_params[key] = f"%{term}%"
+        or_clauses.append(f"unaccent(lower({field_sql})) ILIKE unaccent(:{key})")
+
+    # Full phrase on name/desc/category
+    if full_query_norm:
+        add_like("coalesce(name,'')", full_query_norm)
+        add_like("coalesce(description,'')", full_query_norm)
+        add_like("coalesce(category,'')", full_query_norm)
+
+    # Each expanded token on name/desc/category
+    for tok in tokens_expanded:
+        add_like("coalesce(name,'')", tok)
+        add_like("coalesce(description,'')", tok)
+        add_like("coalesce(category,'')", tok)
+
+    # Tag containment (native array &&)
+    tag_clause = ""
+    if tokens_expanded:
+        tag_clause = "tags && CAST(:tag_list AS text[])"
+
+    all_clauses = or_clauses[:]
+    if tag_clause:
+        all_clauses.append(tag_clause)
+    if not all_clauses:
+        return {}
+
+    where_sql = " OR ".join(all_clauses)
+    sql = f"""
+        SELECT id, business_id, name, description, price, currency, category, sku,
+               is_active, tags, metadata, created_at, updated_at
+        FROM products
+        WHERE business_id = :business_id
+          AND is_active = TRUE
+          AND ({where_sql})
+        LIMIT 100
+    """
+    params = {**like_params, "business_id": str(business_uuid)}
+    if tag_clause:
+        params["tag_list"] = "{" + ",".join(tokens_expanded) + "}"
+
+    try:
+        rows = db_session.execute(sql_text(sql), params).mappings().all()
+    except Exception as e:
+        # unaccent() extension is missing — rollback (transaction is aborted)
+        # and retry the same query with plain lower() (query-side accents are
+        # already stripped in _normalize, so we only lose matches when a PRODUCT
+        # name contains accents; rare, and the caller can still fall back to
+        # embedding / tag search).
+        logger.warning("[PRODUCT_SEARCH] unaccent failed (%s), retrying without it", e)
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+        or_clauses_plain = []
+        for clause in or_clauses:
+            m = re.match(r"unaccent\(lower\((.+?)\)\) ILIKE unaccent\(:(\w+)\)", clause)
+            if m:
+                or_clauses_plain.append(f"lower({m.group(1)}) ILIKE :{m.group(2)}")
+            else:
+                or_clauses_plain.append(clause)
+        all_plain = or_clauses_plain + ([tag_clause] if tag_clause else [])
+        sql = f"""
+            SELECT id, business_id, name, description, price, currency, category, sku,
+                   is_active, tags, metadata, created_at, updated_at
+            FROM products
+            WHERE business_id = :business_id
+              AND is_active = TRUE
+              AND ({" OR ".join(all_plain)})
+            LIMIT 100
+        """
+        try:
+            rows = db_session.execute(sql_text(sql), params).mappings().all()
+        except Exception as e2:
+            logger.error("[PRODUCT_SEARCH] lexical fallback also failed: %s", e2)
+            try:
+                db_session.rollback()
+            except Exception:
+                pass
+            return {}
+
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        pid = str(row["id"])
+        candidates[pid] = {
+            "id": pid,
+            "business_id": str(row["business_id"]),
+            "name": row["name"],
+            "description": row["description"],
+            "price": float(row["price"]) if row["price"] is not None else 0.0,
+            "currency": row["currency"],
+            "category": row["category"],
+            "sku": row["sku"],
+            "is_active": row["is_active"],
+            "tags": list(row["tags"] or []),
+            "metadata": dict(row["metadata"] or {}),
+        }
+    return candidates
+
+
+def _semantic_candidates(
+    db_session,
+    business_id: str,
+    query: str,
+    limit: int,
+) -> Dict[str, Tuple[Dict[str, Any], float]]:
+    """
+    Fetch top-K nearest neighbors by embedding cosine distance.
+    Returns {product_id: (product_dict, similarity_0_to_1)}.
+    Empty dict if embeddings are unavailable.
+    """
+    vec = embed_text(query)
+    if not vec:
+        return {}
+
+    vec_lit = format_vector_literal(vec)
+    sql = sql_text("""
+        SELECT id, business_id, name, description, price, currency, category, sku,
+               is_active, tags, metadata,
+               1 - (embedding <=> CAST(:qvec AS vector)) AS similarity
+        FROM products
+        WHERE business_id = :business_id
+          AND is_active = TRUE
+          AND embedding IS NOT NULL
+        ORDER BY embedding <=> CAST(:qvec AS vector)
+        LIMIT :k
+    """)
+    try:
+        rows = db_session.execute(sql, {
+            "business_id": str(uuid.UUID(business_id)),
+            "qvec": vec_lit,
+            "k": limit,
+        }).mappings().all()
+    except Exception as e:
+        logger.debug("[PRODUCT_SEARCH] semantic search failed: %s", e)
+        return {}
+
+    out: Dict[str, Tuple[Dict[str, Any], float]] = {}
+    for row in rows:
+        pid = str(row["id"])
+        prod = {
+            "id": pid,
+            "business_id": str(row["business_id"]),
+            "name": row["name"],
+            "description": row["description"],
+            "price": float(row["price"]) if row["price"] is not None else 0.0,
+            "currency": row["currency"],
+            "category": row["category"],
+            "sku": row["sku"],
+            "is_active": row["is_active"],
+            "tags": list(row["tags"] or []),
+            "metadata": dict(row["metadata"] or {}),
+        }
+        sim = float(row["similarity"]) if row["similarity"] is not None else 0.0
+        out[pid] = (prod, max(0.0, min(1.0, sim)))
+    return out
+
+
+def _score_product(
+    product: Dict[str, Any],
+    full_query_norm: str,
+    tokens: List[str],
+    tokens_expanded: List[str],
+    stems: List[str],
+    semantic_sim: float,
+    alpha: float,
+) -> Dict[str, Any]:
+    """
+    Compute the aggregate match score for a single product.
+
+    Returns a dict: {score, exact_name_match, has_lexical_hit}
+    where has_lexical_hit is True if any non-embedding signal fired
+    (used to filter pure-embedding matches out of disambiguation).
+    """
+    name_norm = _normalize(product.get("name") or "")
+    desc_norm = _normalize(product.get("description") or "")
+    cat_norm = _normalize(product.get("category") or "")
+    tags_norm = [_normalize(t) for t in (product.get("tags") or [])]
+
+    # Build the "core" query (stopwords removed, joined) so that "la michelada"
+    # → "michelada" → matches the product "Michelada" as an exact name.
+    core_query = " ".join(tokens) if tokens else full_query_norm
+
+    score = 0.0
+    has_lexical_hit = False
+
+    # Exact name match (highest signal) — against full query, core query,
+    # or any single distinctive token.
+    exact_match = False
+    if full_query_norm and name_norm == full_query_norm:
+        exact_match = True
+    elif core_query and name_norm == core_query:
+        exact_match = True
+    elif len(tokens) == 1 and name_norm == tokens[0]:
+        exact_match = True
+    if exact_match:
+        score += _SCORE_EXACT_NAME
+        has_lexical_hit = True
+
+    # Name substring (full query) — applies for a fuzzy name match that isn't exact
+    if not exact_match and core_query and core_query in name_norm:
+        score += _SCORE_NAME_SUBSTRING
+        has_lexical_hit = True
+
+    # Per-token lexical contributions
+    for tok in tokens_expanded:
+        if not tok:
+            continue
+        if tok in name_norm:
+            score += _SCORE_NAME_SUBSTRING
+            has_lexical_hit = True
+        if tok in desc_norm:
+            score += _SCORE_DESCRIPTION
+            has_lexical_hit = True
+        if tok in cat_norm:
+            score += _SCORE_CATEGORY
+            has_lexical_hit = True
+
+    # Tag hits (exact and substring)
+    for tag in tags_norm:
+        if not tag:
+            continue
+        if tag in tokens_expanded or tag == full_query_norm:
+            score += _SCORE_TAG
+            has_lexical_hit = True
+            continue
+        for tok in tokens_expanded:
+            if tok and (tok in tag or tag in tok):
+                score += _SCORE_TAG * 0.7
+                has_lexical_hit = True
+                break
+
+    # Stem-based bonus: if any original-query stem matches a product token/tag stem
+    if stems:
+        prod_tokens = set()
+        for field in (name_norm, desc_norm, cat_norm):
+            prod_tokens.update(field.split())
+        prod_tokens.update(tags_norm)
+        prod_stems = {_stem(t) for t in prod_tokens if t}
+        for s in stems:
+            if s in prod_stems:
+                score += _SCORE_STEM_BONUS
+                has_lexical_hit = True
+
+    # Semantic contribution
+    if semantic_sim > 0:
+        score += alpha * _SCORE_EMBEDDING_MAX * semantic_sim
+
+    return {
+        "score": score,
+        "exact_name_match": exact_match,
+        "has_lexical_hit": has_lexical_hit,
+    }
+
+
+# ---------- public API ----------
+
+def search_products(
+    business_id: str,
+    query: str,
+    *,
+    limit: int = 20,
+    unique: bool = False,
+    alpha: float = 1.0,
+) -> List[Dict[str, Any]]:
+    """
+    Hybrid lexical + tag + semantic product search.
+
+    Args:
+        business_id: UUID string of the business to search within.
+        query: Free-form user query ("cerveza", "coca cola zero", "algo con queso azul").
+        limit: Max results to return (after scoring).
+        unique: If True, return a list with a single best match OR raise
+            AmbiguousProductError when no clear winner exists. Used by
+            add_to_cart / get_product_details paths.
+        alpha: Weight on the semantic signal (0.0 disables embeddings entirely).
+
+    Returns:
+        Ranked list of product dicts (high score first). Empty list if nothing matches.
+
+    Raises:
+        AmbiguousProductError: if unique=True and top-1 is not decisively ahead.
+    """
+    if not query or not query.strip():
+        return []
+    if not business_id:
+        return []
+
+    query_norm = _normalize(query)
+    tokens = _tokenize(query_norm)
+    if not tokens:
+        tokens = [query_norm]
+    stems = [_stem(t) for t in tokens]
+
+    db_session = get_db_session()
+    try:
+        synonyms = _load_business_synonyms(db_session, business_id)
+        tokens_expanded = _expand_tokens(tokens, synonyms)
+        # Also add stems as expansion tokens (so ILIKE can catch partial morphology)
+        for s in stems:
+            if s and s not in tokens_expanded:
+                tokens_expanded.append(s)
+
+        try:
+            lexical = _lexical_candidates(db_session, business_id, tokens_expanded, query_norm)
+        except Exception as e:
+            logger.warning("[PRODUCT_SEARCH] lexical phase failed: %s", e)
+            try:
+                db_session.rollback()
+            except Exception:
+                pass
+            lexical = {}
+
+        semantic_map: Dict[str, Tuple[Dict[str, Any], float]] = {}
+        if alpha > 0:
+            semantic_map = _semantic_candidates(db_session, business_id, query, limit * 2)
+
+        merged: Dict[str, Dict[str, Any]] = dict(lexical)
+        semantic_sim_by_id: Dict[str, float] = {}
+        for pid, (prod, sim) in semantic_map.items():
+            semantic_sim_by_id[pid] = sim
+            if pid not in merged:
+                merged[pid] = prod
+
+        if not merged:
+            return []
+
+        # scored: list of (score, exact_match, has_lexical, product)
+        scored: List[Tuple[float, bool, bool, Dict[str, Any]]] = []
+        for pid, product in merged.items():
+            sem_sim = semantic_sim_by_id.get(pid, 0.0)
+            s = _score_product(
+                product=product,
+                full_query_norm=query_norm,
+                tokens=tokens,
+                tokens_expanded=tokens_expanded,
+                stems=stems,
+                semantic_sim=sem_sim,
+                alpha=alpha,
+            )
+            if s["score"] <= 0:
+                continue
+            scored.append((s["score"], s["exact_name_match"], s["has_lexical_hit"], product))
+
+        # Sort: exact-name first, then by score, then by name
+        scored.sort(key=lambda x: (-int(x[1]), -x[0], x[3].get("name") or ""))
+        ranked = [p for _, _, _, p in scored[:limit]]
+
+        if unique:
+            if not scored:
+                return []
+
+            # Decisive rule 1: exactly one product has an exact name match → win
+            exact_matches = [s for s in scored if s[1]]
+            if len(exact_matches) == 1:
+                return [exact_matches[0][3]]
+
+            if len(scored) == 1:
+                return [scored[0][3]]
+
+            # Decisive rule 2: score ratio (top ≥ 2x second AND absolute ≥ 60)
+            top_score = scored[0][0]
+            second_score = scored[1][0]
+            if top_score >= max(60.0, 2.0 * second_score):
+                return [scored[0][3]]
+
+            # Disambiguation — but filter out pure-embedding matches.
+            # Only propose candidates that actually hit a lexical / tag signal;
+            # otherwise we'd show the customer a list of semantically-adjacent
+            # products they never asked about (e.g. malteadas for "michelada").
+            lexical_only = [s for s in scored if s[2]]
+            close = [p for _, _, _, p in (lexical_only or scored)[:5]]
+            raise AmbiguousProductError(query=query, matches=close)
+
+        return ranked
+    finally:
+        db_session.close()
+
+
+def get_unique_product(business_id: str, query: str) -> Optional[Dict[str, Any]]:
+    """Convenience wrapper: return single best match or None (no raise)."""
+    try:
+        results = search_products(business_id, query, limit=5, unique=True)
+        return results[0] if results else None
+    except AmbiguousProductError:
+        raise

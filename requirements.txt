@@ -14,3 +14,5 @@ twilio
 cryptography
 supabase
 assemblyai
+snowballstemmer
+pgvector
