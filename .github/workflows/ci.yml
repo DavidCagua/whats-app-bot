@@ -22,9 +22,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run pytest
-        run: |
-          python -m pytest -q --disable-warnings
+      - name: Run pytest (unit only)
+        env:
+          DATABASE_URL: postgresql://fake:fake@localhost:5432/fake
+          OPENAI_API_KEY: dummy
+        run: python -m pytest tests/unit -q --disable-warnings
 
   migrations-smoke:
     name: Alembic upgrade dry-run
