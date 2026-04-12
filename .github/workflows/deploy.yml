@@ -27,8 +27,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run pytest
-        run: python -m pytest -q --disable-warnings
+      - name: Run pytest (unit only)
+        env:
+          # Fake URL so models.py passes its import-time env check.
+          # SQLAlchemy create_engine validates shape but doesn't connect.
+          # Unit tests should not hit the DB; if one does it'll error out
+          # loudly, which is the signal to fix the test (or move it to
+          # tests/integration).
+          DATABASE_URL: postgresql://fake:fake@localhost:5432/fake
+          OPENAI_API_KEY: dummy
+        run: python -m pytest tests/unit -q --disable-warnings
 
   migrate:
     name: Apply migrations (alembic upgrade head)
