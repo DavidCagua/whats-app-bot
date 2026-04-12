@@ -5,27 +5,9 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run pytest (unit only)
-        env:
-          DATABASE_URL: postgresql://fake:fake@localhost:5432/fake
-        run: python -m pytest tests/unit -q --disable-warnings
+  # Tests are intentionally NOT in PR CI. Run them locally before pushing
+  # via `./scripts/test.sh [unit|integration|evals|e2e|all]`. Re-add a
+  # `test` job here when a second contributor joins.
 
   migrations-smoke:
     name: Alembic upgrade dry-run
