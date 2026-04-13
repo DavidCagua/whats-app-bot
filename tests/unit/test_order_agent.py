@@ -100,6 +100,17 @@ class TestPhoneFormatFromWaId:
 class TestPlannerPromptRules:
     """Verify planner prompt contains the rules that route intents correctly."""
 
+    def test_planner_prompt_has_implicit_drinks_rule(self):
+        """
+        Regression: "qué hay para tomar?" should go straight to LIST_PRODUCTS with
+        category=bebidas, not GET_MENU_CATEGORIES (which makes the bot ask "¿quieres
+        ver las bebidas?" instead of just showing them).
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        assert "para tomar" in prompt, \
+            "Planner prompt must describe the implicit 'para tomar' → bebidas case"
+        assert "LIST_PRODUCTS" in prompt
+
     def test_planner_prompt_has_sender_phone_rule(self):
         """
         Regression: when the user says "este número" / "este mismo" while the bot is
