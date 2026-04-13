@@ -11,16 +11,12 @@ context.
 
 ---
 
-## [Unreleased]
-
-- Semantic `CONFIRM` intent + rejection recovery. Planner stops picking
-  `PROCEED_TO_CHECKOUT` vs `PLACE_ORDER` for confirmation verbs; executor
-  resolves `CONFIRM` by state. Allowlist rejections now emit `[INVARIANT]`
-  logs + soft recovery instead of user-facing errors. New `[ORDER_TURN]`
-  structured log per turn. Fixes the Biela abandonment bug (2026-04-13,
-  wa_id `+573147624802`). Commit `<pending>`.
-
 ## 2026-04-13
+
+- `ae05da7` feat(order): semantic CONFIRM intent + rejection recovery —
+  executor resolves CONFIRM by state; allowlist rejections become
+  [INVARIANT] logs + soft recovery; new [ORDER_TURN] structured log.
+  Fixes Biela order abandonment, wa_id `+573147624802`.
 
 - `0803861` fix(order): disambiguate prefix matches + atomic variant swap
 - `a17e045` fix(twilio): chunk long messages to avoid 1600-char limit
