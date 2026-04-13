@@ -11,21 +11,13 @@ context.
 
 ---
 
-## [Unreleased]
+## 2026-04-14 (turn lock)
 
-- `<pending>` fix(views): per-wa_id turn serialization via Postgres advisory
-  lock. Two consecutive WhatsApp messages from the same user (e.g.
-  "hola buenas tardes" + "para hacer un pedido" 4 seconds apart) used to
-  run two pipeline passes in parallel — the second loaded pre-first-turn
-  session state and produced a stale reply. Adds a `wa_id_turn_lock`
-  context manager (new `app/services/turn_lock.py`) using
-  `pg_advisory_lock` keyed on a blake2b hash of the wa_id, with bounded
-  `lock_timeout` and graceful fallback to unsynchronized processing if
-  acquisition fails (better one stale message than a dropped one). Wired
-  into `handle_twilio_message` in `app/views.py` around the
-  `process_whatsapp_message` call. Closes Roadmap item #2 from the
-  CONFIRM-fix changelog. Different users still process in parallel; only
-  the same wa_id is serialized.
+- `eb8dd64` fix(views): per-wa_id turn serialization via Postgres advisory
+  lock. Closes the double-reply race where two consecutive messages from
+  the same user ran in parallel and the second loaded stale session
+  state. New `app/services/turn_lock.py` + 12 unit tests. Closes
+  Roadmap item #2.
 
 ## 2026-04-13 (carta + denver)
 
