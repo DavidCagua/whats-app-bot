@@ -17,3 +17,6 @@ assemblyai
 snowballstemmer
 pgvector
 pytest
+# Agent trajectory evaluators for tests/evals/
+# https://docs.langchain.com/oss/python/langchain/test/evals
+agentevals
