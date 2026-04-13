@@ -256,6 +256,12 @@ def _clean_product_dict(p: Dict[str, Any]) -> Dict[str, Any]:
         "currency": p.get("currency") or "COP",
         "description": (p.get("description") or "").strip() or None,
         "category": p.get("category") or None,
+        # "exact" | "lexical" | "embedding" — which retrieval lane fired.
+        # Response generator uses this to decide whether to present results
+        # as authoritative matches or as "related products you might like".
+        # Absent = direct DB lookup (LIST_PRODUCTS by category), treat as
+        # authoritative.
+        "matched_by": p.get("matched_by"),
     }
 
 

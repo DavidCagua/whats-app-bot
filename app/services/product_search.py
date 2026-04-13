@@ -171,6 +171,14 @@ _SCORE_DESCRIPTION = 15
 _SCORE_EMBEDDING_MAX = 50  # cosine 0..1 → 0..50
 _SCORE_STEM_BONUS = 5
 
+# Minimum cosine similarity for a semantic hit to count. Below this, the
+# match is near-random noise from nearest-neighbor search — e.g. "pizza" at
+# a burger shop returning burgers because they're the closest vectors in
+# embedding space, even though nothing actually matches. Tune based on
+# [ORDER_TURN] log signal: raise if noise leaks through, drop if legitimate
+# typos/near-matches get killed. 0.55 is a conservative starting point.
+_EMBEDDING_SIMILARITY_FLOOR = 0.55
+
 
 def _lexical_candidates(
     db_session,
@@ -333,6 +341,11 @@ def _semantic_candidates(
 
     out: Dict[str, Tuple[Dict[str, Any], float]] = {}
     for row in rows:
+        sim = float(row["similarity"]) if row["similarity"] is not None else 0.0
+        sim = max(0.0, min(1.0, sim))
+        # Floor: near-zero neighbors are semantic noise, not matches. Skip.
+        if sim < _EMBEDDING_SIMILARITY_FLOOR:
+            continue
         pid = str(row["id"])
         prod = {
             "id": pid,
@@ -347,8 +360,7 @@ def _semantic_candidates(
             "tags": list(row["tags"] or []),
             "metadata": dict(row["metadata"] or {}),
         }
-        sim = float(row["similarity"]) if row["similarity"] is not None else 0.0
-        out[pid] = (prod, max(0.0, min(1.0, sim)))
+        out[pid] = (prod, sim)
     return out
 
 
@@ -522,6 +534,10 @@ def search_products(
             return []
 
         # scored: list of (score, exact_match, has_lexical, product)
+        # Each product dict gains a "matched_by" tag so downstream layers
+        # (order_flow → response generator) can distinguish authoritative
+        # lexical matches from pure-embedding neighbors without re-running
+        # the scorer.
         scored: List[Tuple[float, bool, bool, Dict[str, Any]]] = []
         for pid, product in merged.items():
             sem_sim = semantic_sim_by_id.get(pid, 0.0)
@@ -536,11 +552,44 @@ def search_products(
             )
             if s["score"] <= 0:
                 continue
+            if s["exact_name_match"]:
+                product["matched_by"] = "exact"
+            elif s["has_lexical_hit"]:
+                product["matched_by"] = "lexical"
+            else:
+                product["matched_by"] = "embedding"
             scored.append((s["score"], s["exact_name_match"], s["has_lexical_hit"], product))
 
         # Sort: exact-name first, then by score, then by name
         scored.sort(key=lambda x: (-int(x[1]), -x[0], x[3].get("name") or ""))
-        ranked = [p for _, _, _, p in scored[:limit]]
+
+        # Pure-embedding filter (applied to ALL paths, not just unique=True).
+        #
+        # Policy: embedding is allowed to RE-RANK and TIE-BREAK, never to add
+        # results on its own when other real matches exist. Two consequences:
+        #
+        #   1. If any result has a lexical/tag/exact hit, drop every
+        #      embedding-only result. Kills the "Denver + NIJABOU/NAIROBI"
+        #      bleed where the exact name match wins but the semantic lane
+        #      appends unrelated products alongside it.
+        #
+        #   2. If NO result has any lexical/tag/exact hit, return empty.
+        #      Kills the "una pizza" → burgers and "un sushi" → burgers
+        #      fallthrough at Biela (a restaurant with no pizzas or sushi;
+        #      embedding was pivoting to the nearest neighbors regardless).
+        #
+        # The unique=True path below has its own soft fallback for the
+        # disambiguation UI — it reuses `scored` if lexical_only is empty.
+        # That's intentional: disambig is rarely reached without at least
+        # one partial hit, and the softer policy preserves fuzzy matches
+        # like "mishelada" → "Michelada" that depend on semantic rescue.
+        has_any_lexical = any(s[2] for s in scored)
+        if has_any_lexical:
+            scored_filtered = [s for s in scored if s[2]]
+        else:
+            scored_filtered = []
+
+        ranked = [p for _, _, _, p in scored_filtered[:limit]]
 
         if unique:
             if not scored:

@@ -11,6 +11,25 @@ context.
 
 ---
 
+## [Unreleased]
+
+- Product search retrieval hardening. Five fixes to stop the embedding
+  lane from hallucinating matches: (1) cosine similarity floor in
+  `_semantic_candidates` drops near-zero neighbors; (2) pure-embedding
+  filter extended from `unique=True` disambiguation to the main
+  `search_products` path — embedding is now allowed to re-rank but never
+  to add results without lexical backing; (3) category existence
+  pre-check in `list_products_with_fallback` skips semantic fallback
+  when the requested category doesn't exist at this tenant; (4)
+  `matched_by` signal (`exact`/`lexical`/`embedding`) propagated through
+  results so the response generator can phrase embedding-only results
+  as "related" rather than authoritative; (5) regression tests in
+  `tests/unit/test_product_search_retrieval.py` (13 cases) covering the
+  pizza/sushi/denver bugs and the picante/queso azul/michelada/limonada
+  preservation cases. Fixes the Biela false-positive where "pizza" and
+  "sushi" returned burgers and "perro caliente denver" returned Denver
+  + unrelated neighbors. Commit `<pending>`.
+
 ## 2026-04-13
 
 - `ae05da7` feat(order): semantic CONFIRM intent + rejection recovery —

@@ -54,6 +54,15 @@ CATEGORY_MAP = {
 }
 
 
+def _normalize_for_category_check(s: str) -> str:
+    """Lowercase + accent-strip for case/accent-insensitive category overlap."""
+    if not s:
+        return ""
+    raw = s.strip().lower()
+    nfkd = unicodedata.normalize("NFD", raw)
+    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+
+
 def normalize_category(input_category: str) -> str:
     """
     Map natural-language category to canonical DB category.
@@ -247,20 +256,48 @@ class ProductOrderService:
         category: str,
     ) -> List[Dict[str, Any]]:
         """
-        List products by category with normalization and semantic fallback.
+        List products by category with normalization and bounded fallback.
+
         1) Normalize category (e.g. hamburguesas -> BURGERS), list by category.
-        2) If no rows, run semantic search on the original category/query string.
+        2) If no rows AND the raw input actually overlaps some existing
+           category at this business, fall back to hybrid search. We check
+           category existence first so that "pizza" at a burger shop returns
+           empty instead of pivoting to semantically-adjacent burgers.
         """
         raw = (category or "").strip()
         normalized = normalize_category(category) if raw else ""
         products = self.list_products(business_id=business_id, category=normalized or None)
-        if not products and raw:
+        if products or not raw:
+            return products
+
+        # Before any fallback, require the requested category to overlap an
+        # existing category at this tenant. This guards against the "qué
+        # pizzas tienen" case where no pizza category exists and we used to
+        # quietly pivot to embedding noise.
+        raw_norm = _normalize_for_category_check(raw)
+        normalized_norm = _normalize_for_category_check(normalized) if normalized else ""
+        existing = [
+            _normalize_for_category_check(c)
+            for c in (self.list_categories(business_id=business_id) or [])
+        ]
+
+        def _overlaps(needle: str) -> bool:
+            if not needle:
+                return False
+            return any(needle in cat or cat in needle for cat in existing if cat)
+
+        if not (_overlaps(raw_norm) or _overlaps(normalized_norm)):
             logger.warning(
-                "[LOOKUP_FALLBACK] category_lookup_empty → semantic_search_used category=%s",
-                raw,
+                "[LOOKUP_FALLBACK] category_not_available business=%s category=%s → returning empty",
+                business_id, raw,
             )
-            products = self.search_products_semantic(business_id=business_id, query=raw)
-        return products
+            return []
+
+        logger.warning(
+            "[LOOKUP_FALLBACK] category_lookup_empty → hybrid_search_used category=%s",
+            raw,
+        )
+        return self.search_products_semantic(business_id=business_id, query=raw)
 
     def create_order(
         self,

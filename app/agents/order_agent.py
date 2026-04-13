@@ -295,10 +295,21 @@ class OrderAgent(BaseAgent):
                 label = query_label or category_label or "eso"
                 system = base_system + (
                     "\n\nSITUACIÓN: No hay productos que coincidan con lo que el cliente pidió. "
-                    "Dile amablemente (sin 'lo siento') y ofrécele ver las categorías del menú. 1-2 líneas."
+                    "REGLAS CRÍTICAS:\n"
+                    "- Di explícitamente que NO tenemos ese producto/categoría (ej. \"no tenemos pizza\").\n"
+                    "- NUNCA ofrezcas productos como si fueran una versión del producto pedido. No digas \"tenemos esta pizza\" si no tienes pizzas — nunca.\n"
+                    "- Puedes invitar amablemente a ver las categorías disponibles del menú.\n"
+                    "- Sin 'lo siento', 'disculpa', ni 'error'. 1-2 líneas."
                 )
-                inp = f"Cliente buscó: {label}\nNo hay coincidencias."
+                inp = f"Cliente buscó: {label}\nNo hay coincidencias exactas ni parciales en el catálogo."
                 return system, inp
+            # Defense in depth: even after the Phase 2 filter, if every item
+            # only matched via embedding the response generator should not
+            # pretend they exactly match the query. Flag it so the prompt
+            # phrases them as "related" rather than authoritative.
+            all_embedding = bool(products) and all(
+                (p.get("matched_by") == "embedding") for p in products
+            )
             prods_lines = "\n".join(
                 f"- {p.get('name')} ({money(p.get('price'))})"
                 + (f" — {p.get('description')}" if p.get("description") else "")
@@ -309,7 +320,7 @@ class OrderAgent(BaseAgent):
                 context_label = f"Categoría: {category_label}"
             elif query_label:
                 context_label = f"Búsqueda: {query_label}"
-            system = base_system + (
+            rules = (
                 "\n\nSITUACIÓN: El cliente pidió ver una lista de productos. "
                 "REGLAS:\n"
                 "- Presenta los productos de forma clara con nombre y precio.\n"
@@ -319,6 +330,14 @@ class OrderAgent(BaseAgent):
                 "- Termina invitando a ordenar o a preguntar por alguno en particular.\n"
                 "- NUNCA muestres IDs ni códigos internos."
             )
+            if all_embedding and query_label:
+                rules += (
+                    "\n- IMPORTANTE: ninguno de estos productos coincide exactamente con "
+                    f"lo que el cliente buscó ({query_label}). Presenta la lista como "
+                    "\"opciones relacionadas que podrían gustarte\", NO como \"aquí están "
+                    f"los {query_label}\". Nunca afirmes que la lista ES {query_label}."
+                )
+            system = base_system + rules
             inp = f"Cliente dijo: {message_body}\n{context_label}\nProductos disponibles:\n{prods_lines}"
             return system, inp
 
