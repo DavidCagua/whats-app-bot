@@ -19,6 +19,7 @@ from .database.business_service import business_service
 from .database.conversation_service import conversation_service
 from .database.booking_service import booking_service
 from .services.message_deduplication import message_deduplication_service
+from .services.turn_lock import wa_id_turn_lock
 from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message, send_typing_indicator
 
 webhook_blueprint = Blueprint("webhook", __name__)
@@ -201,9 +202,18 @@ def handle_twilio_message():
     normalized_body = normalize_twilio_to_meta(form_data)
     logging.warning("[DEBUG] Valid Twilio message, processing...")
 
+    # Per-wa_id turn serialization — see app/services/turn_lock.py.
+    # Two consecutive messages from the same user (e.g. "hola" + "para
+    # hacer un pedido" 4 seconds apart) used to run two pipeline passes
+    # in parallel; the second loaded the pre-first-turn session state
+    # and produced a stale reply. The advisory lock makes the second
+    # webhook wait for the first to commit its session before running.
+    sender_wa_id = (form_data.get("From") or "").replace("whatsapp:", "").strip()
+
     try:
         processing_start = time.time()
-        process_whatsapp_message(normalized_body, business_context=business_context)
+        with wa_id_turn_lock(sender_wa_id):
+            process_whatsapp_message(normalized_body, business_context=business_context)
         logging.warning(
             f"[TIMING] process_whatsapp_message (Twilio) took {time.time() - processing_start:.3f}s"
         )
