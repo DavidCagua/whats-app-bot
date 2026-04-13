@@ -47,7 +47,65 @@ class TestAddToCart:
         assert items[0]["quantity"] == 1
 
     # Case: Add product with notes ("sin cebolla") — notes field saved on item
-    # Case: Add same product twice without notes — quantity increments instead of duplicate
+    def test_add_single_product_by_name_with_notes(self, fake_session, sample_products):
+        """Adding a product by name should find it in DB and add to session cart with notes."""
+        mock_product_service = MagicMock()
+        mock_product_service.get_product.return_value = sample_products[0]  # BARRACUDA
+
+        with patch("app.services.order_tools.product_order_service", mock_product_service), \
+             patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import add_to_cart
+
+            result = add_to_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_id": "",
+                "product_name": "Barracuda",
+                "notes": "sin cebolla crispy",
+                "quantity": 1,
+            })
+
+        assert "✅" in result
+        assert "BARRACUDA" in result
+        assert "sin cebolla crispy" in result
+        # Verify cart was saved to session
+        session = fake_session.load(FAKE_WA_ID, FAKE_BUSINESS_ID)
+        items = session["session"]["order_context"].get("items", [])
+        assert len(items) == 1
+        assert items[0]["name"] == "BARRACUDA"
+        assert items[0]["quantity"] == 1
+        assert items[0]["notes"] == "sin cebolla crispy"
+
+    def test_add_twice_same_product_by_name(self, fake_session, sample_products):
+        """Two adds of the same product without notes merge into one line (quantity increments)."""
+        mock_product_service = MagicMock()
+        mock_product_service.get_product.return_value = sample_products[0]  # BARRACUDA
+
+        invoke_kw = {
+            "injected_business_context": _make_ctx(),
+            "product_id": "",
+            "product_name": "barracuda",
+            "quantity": 1,
+            "notes": "",
+        }
+        with patch("app.services.order_tools.product_order_service", mock_product_service), \
+             patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import add_to_cart
+
+            r1 = add_to_cart.invoke(invoke_kw)
+            r2 = add_to_cart.invoke(invoke_kw)
+
+        assert "✅" in r1
+        assert "✅" in r2
+        assert "$36.000" in r2  # subtotal after second add (2 × 18.000)
+
+        session = fake_session.load(FAKE_WA_ID, FAKE_BUSINESS_ID)
+        items = session["session"]["order_context"].get("items", [])
+        assert len(items) == 1
+        assert items[0]["name"] == "BARRACUDA"
+        assert items[0]["product_id"] == "prod-001"
+        assert items[0]["quantity"] == 2
+        assert session["session"]["order_context"].get("total") == 36000
+
     # Case: Add same product with different notes — creates separate line item
     # Case: Add product with quantity > 1
     # Case: Product not found by name → returns ❌ error

@@ -66,8 +66,8 @@ class Business(Base):
     business_type = Column(String(50), default='barberia')
     settings = Column(JSONB, default={})
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     whatsapp_numbers = relationship("WhatsappNumber", back_populates="business", cascade="all, delete-orphan")
@@ -116,8 +116,8 @@ class WhatsappNumber(Base):
         comment='Optional friendly name to identify this WhatsApp number (e.g., "Main Line", "Support Line")',
     )
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     business = relationship("Business", back_populates="whatsapp_numbers")
@@ -156,8 +156,8 @@ class User(Base):
         comment='User role: super_admin (full access), admin (org admin), staff (read-only)',
     )
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     user_businesses = relationship("UserBusiness", back_populates="user", cascade="all, delete-orphan")
@@ -187,7 +187,7 @@ class UserBusiness(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     role = Column(String(50), default='member')  # 'admin' for business owners/admins, 'member' for employees
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     # Relationships
     user = relationship("User", back_populates="user_businesses")
@@ -219,7 +219,7 @@ class AgentType(Base):
     type = Column(String(50), nullable=False, unique=True)
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     def to_dict(self):
         return {
@@ -242,8 +242,8 @@ class BusinessAgent(Base):
     priority = Column(Integer, default=100)
     config = Column(JSONB, default={})
     created_by = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -272,8 +272,8 @@ class ConversationSession(Base):
     agent_contexts = Column(JSONB, default={})
     last_order_id = Column(String(50), nullable=True)
     last_booking_id = Column(String(50), nullable=True)
-    last_activity_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    last_activity_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -299,8 +299,8 @@ class ConversationAgentSetting(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     whatsapp_id = Column(String(50), nullable=False, index=True)
     agent_enabled = Column(Boolean, default=True, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -328,8 +328,8 @@ class ConversationAttachment(Base):
     duration_sec = Column(Numeric(10, 2), nullable=True)
     transcript = Column(Text, nullable=True)
     provider_metadata = Column(JSONB, default={}, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     conversation = relationship("Conversation", back_populates="attachments")
 
@@ -363,8 +363,8 @@ class Conversation(Base):
     message_type = Column(String(20), default='text', nullable=True)  # text | audio | image | document
     role = Column(String(20), nullable=False)  # 'user' or 'assistant'
     agent_type = Column(String(50), nullable=True)  # Future-proofing for per-agent history
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    timestamp = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     # Relationships
     business = relationship("Business", back_populates="conversations")
@@ -405,8 +405,8 @@ class Customer(Base):
     address = Column(Text, nullable=True)
     phone = Column(String(50), nullable=True)
     payment_method = Column(String(100), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def __repr__(self):
         return f"<Customer(id={self.id}, whatsapp_id='{self.whatsapp_id}', name='{self.name}')>"
@@ -446,8 +446,8 @@ class Product(Base):
     tags = Column(ARRAY(Text), nullable=False, server_default="{}")
     product_metadata = Column("metadata", JSONB, nullable=False, server_default="{}")
     embedding = Column(Vector(1536), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     __table_args__ = (
         Index("idx_products_business_sku", "business_id", "sku"),
@@ -497,8 +497,8 @@ class Service(Base):
     currency = Column(String(10), default='COP')
     duration_minutes = Column(Integer, nullable=False, default=60)
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -529,8 +529,8 @@ class Order(Base):
     delivery_address = Column(Text, nullable=True)
     contact_phone = Column(Text, nullable=True)
     payment_method = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
@@ -563,8 +563,8 @@ class BusinessAvailability(Base):
     slot_duration_minutes = Column(Integer, nullable=False, default=60)
     is_active = Column(Boolean, default=True)
     staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='CASCADE'), nullable=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -596,8 +596,8 @@ class Booking(Base):
     notes = Column(Text, nullable=True)
     created_via = Column(String(20), default='whatsapp')  # whatsapp/admin/api
     staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='SET NULL'), nullable=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     customer = relationship("Customer", backref="bookings")
     service = relationship("Service", backref="bookings")
@@ -631,7 +631,7 @@ class OrderItem(Base):
     unit_price = Column(Numeric(12, 2), nullable=False)
     line_total = Column(Numeric(12, 2), nullable=False)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     order = relationship("Order", back_populates="order_items")
     product = relationship("Product", backref="order_items")
@@ -659,8 +659,8 @@ class StaffMember(Base):
     role = Column(String(100), nullable=False)  # e.g., 'barber', 'hairdresser', 'stylist'
     is_active = Column(Boolean, default=True, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=_utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     business = relationship("Business", backref="staff_members")
