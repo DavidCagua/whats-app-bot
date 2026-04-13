@@ -11,43 +11,15 @@ context.
 
 ---
 
-## [Unreleased]
+## 2026-04-13 (carta + denver)
 
-- Two production bug fixes from the Biela 2026-04-13 transcript +
-  regression evals for both:
-  - **fix(search): exact-match for "[category] [name]" phrasings.**
-    `"un perro caliente denver"` was being disambiguated against all
-    four hot-dog options because `DENVER` is a single-word product name
-    and every hot dog shares the `perro caliente` tag — so the scorer
-    couldn't reach the 2x ratio threshold to declare a winner. Added a
-    fourth exact-match rule in `_score_product`: when a single-word
-    product name appears as a query token AND every other query token
-    matches that product's category or tags, treat it as an exact
-    match. Doesn't fire on incidental mentions because of the tag/cat
-    gate.
-  - **fix(menu): include menu URL in MENU_CATEGORIES responses.** When
-    user asks for the menu/carta, the bot was narrating category names
-    as text and silently dropping `business.settings.menu_url`. The
-    `MENU_CATEGORIES` response branch now extracts the URL from the
-    business context and the prompt instructs the LLM to: lead with the
-    URL when the user explicitly asked to be sent the menu/carta/link;
-    otherwise lead with categories and offer the URL at the end. Single
-    adaptive response, no new intent.
-  - Two new eval scenarios in `tests/evals/test_regression.py`:
-    `test_perro_caliente_denver_no_disambiguation` and
-    `test_menu_link_sent_when_user_asks_for_carta`.
-  - Eval harness improvements: `_FakeProductService.get_product` now
-    routes through the scenario's `stub_search_products`, patched
-    `app.services.order_tools.{product_order_service,session_state_service}`
-    so `@tool` calls go through the fakes, and added
-    `tool_args_match_mode` to `AgentScenario` for scenarios where the
-    planner has multiple valid arg shapes for the same intent.
-  - Dropped reference trajectories from the pizza/sushi scenarios
-    because the planner routes `"hay pizza?"` inconsistently between
-    `LIST_PRODUCTS` and `SEARCH_PRODUCTS` across runs — both produce
-    identical behavior, response-text + LLM judge cover them. New
-    convention: trajectory match only for stable routings.
-  - Commit `<pending>`.
+- `8ca5523` fix(search,menu): denver disambiguation + menu link in carta
+  replies. Fourth exact-match rule in `_score_product` for Spanish
+  `"[category] [name]"` phrasings (Biela "un perro caliente denver" no
+  longer disambiguates). MENU_CATEGORIES response branch now includes
+  `business.settings.menu_url` and adapts shape based on whether the
+  user explicitly asked for the link. Two new eval scenarios pin
+  both. Convention: trajectory match only for stable routings.
 
 ## 2026-04-13 (evals)
 
