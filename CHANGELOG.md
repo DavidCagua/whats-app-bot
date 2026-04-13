@@ -11,30 +11,16 @@ context.
 
 ---
 
-## [Unreleased]
+## 2026-04-13 (evals)
 
-- End-to-end eval harness in `tests/evals/` following the LangChain docs
-  pattern (https://docs.langchain.com/oss/python/langchain/test/evals).
-  Uses `agentevals.trajectory.match.create_trajectory_match_evaluator`
-  in superset mode for deterministic "planner must have called X with
-  these args" assertions, and `create_trajectory_llm_as_judge` with the
-  tuned `TRAJECTORY_ACCURACY_PROMPT(_WITH_REFERENCE)` for prose nuance.
-  Kept a third response-text regex layer for prose guardrails trajectory
-  matching can't express (e.g. "response must not say 'disculpa'").
-  Because `OrderAgent` is not a LangGraph `create_agent` agent,
-  `run_scenario` SYNTHESIZES a 4-message trajectory from the pipeline
-  run (HumanMessage → AIMessage with planner tool_call → ToolMessage
-  with executor result → AIMessage with final reply) — `agentevals`
-  evaluators don't care who built the trajectory, only its shape.
-  Scenarios run with hermetic service stubs (session, product catalog,
-  conversation, booking, place_order tool) so no DB or real API calls
-  are made; only the planner + response LLMs are real. Populated
-  `test_regression.py` with 6 scenarios (pizza / sushi / denver /
-  picante-preservation / Procedemos / LLM-judge pizza) and one xfail
-  capability case in `test_capability.py` for the bare attribute-query
-  planner routing gap. New `eval` pytest marker deselected by default;
-  gated on `OPENAI_API_KEY`. `agentevals` added to requirements.txt.
-  Commit `<pending>`.
+- `a2b1c4f` test(evals): adopt LangChain agentevals trajectory pattern.
+  `tests/evals/_harness.py` synthesizes a LangChain-shaped trajectory
+  from each hermetic pipeline run and asserts via
+  `create_trajectory_match_evaluator` (deterministic, superset mode) +
+  `create_trajectory_llm_as_judge` (prose) + a response-text regex
+  layer for guardrails trajectory match can't express. 6 regression
+  scenarios + 1 capability xfail. New `eval` pytest marker, gated on
+  `OPENAI_API_KEY`.
 
 ## 2026-04-13 (later)
 
