@@ -93,6 +93,15 @@ class AgentScenario:
     trajectory_match_mode: str = "superset"
     """strict | unordered | subset | superset — see agentevals docs."""
 
+    tool_args_match_mode: str = "exact"
+    """
+    exact | ignore | subset | superset — controls how tool_call args are
+    compared. Use "ignore" when the planner has multiple valid arg
+    shapes for the same intent (e.g. ADD_TO_CART with single product_name
+    vs ADD_TO_CART with items list) — the match then only checks the
+    tool NAME and leaves args flexible.
+    """
+
     # --- LLM-as-judge (agentevals) ---------------------------------------
     llm_judge_rubric: Optional[str] = None
     """
@@ -197,6 +206,16 @@ class _FakeProductService:
         return list(self.scenario.stub_list_categories(business_id) or [])
 
     def get_product(self, product_id=None, product_name=None, business_id=None):
+        # Route name-based lookup through the scenario's search stub so
+        # scenarios that declare stub_search_products also cover the
+        # add_to_cart → get_product(product_name=...) path without
+        # having to stub each method individually.
+        if product_name and self.scenario.stub_search_products is not None:
+            results = list(self.scenario.stub_search_products(business_id, product_name) or [])
+            if len(results) == 1:
+                return results[0]
+            # Ambiguous or empty — let the caller handle it.
+            return results[0] if results else None
         return None
 
 
@@ -340,6 +359,11 @@ def run_scenario(scenario: AgentScenario) -> ScenarioRun:
         patch("app.orchestration.order_flow.session_state_service", fake_session),
         patch("app.orchestration.order_flow.product_order_service", fake_product),
         patch("app.database.product_order_service.product_order_service", fake_product),
+        # order_tools imports both singletons into its own module namespace;
+        # without these patches the @tool-decorated add_to_cart / search_products
+        # bypass the fakes and hit the real DB.
+        patch("app.services.order_tools.product_order_service", fake_product),
+        patch("app.services.order_tools.session_state_service", fake_session),
         patch("app.agents.order_agent.conversation_service.store_conversation_message",
               side_effect=_capture_store),
         patch("app.agents.order_agent.booking_service.get_availability", return_value=[]),
@@ -425,6 +449,7 @@ def assert_scenario(scenario: AgentScenario, run: ScenarioRun) -> None:
         from agentevals.trajectory.match import create_trajectory_match_evaluator
         evaluator = create_trajectory_match_evaluator(
             trajectory_match_mode=scenario.trajectory_match_mode,  # type: ignore[arg-type]
+            tool_args_match_mode=scenario.tool_args_match_mode,  # type: ignore[arg-type]
         )
         verdict = evaluator(
             outputs=run.trajectory,

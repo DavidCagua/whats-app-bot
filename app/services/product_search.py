@@ -401,6 +401,32 @@ def _score_product(
         exact_match = True
     elif len(tokens) == 1 and name_norm == tokens[0]:
         exact_match = True
+    elif " " not in name_norm and name_norm and name_norm in tokens:
+        # Multi-token query where a single-word product name appears as
+        # one of the tokens, and every OTHER token is a descriptor of
+        # this same product's category or tags. Handles Spanish
+        # "[category] [name]" phrasings:
+        #
+        #   "un perro caliente denver"  → DENVER (category: HOT DOGS,
+        #                                 tags include "perro caliente")
+        #   "una hamburguesa barracuda" → BARRACUDA (category: BURGERS)
+        #
+        # Without this rule the scorer falls through to decisive rule 2,
+        # which can't distinguish DENVER from NAIROBI/PEGORETTI/SPECIAL
+        # DOG because all four share the "perro caliente" tag — so tag
+        # hits fire equally on all of them and DENVER's name-substring
+        # lead (~30) isn't enough to clear the 2× ratio threshold.
+        #
+        # Gating on "other tokens fit category/tags" prevents this from
+        # firing on coincidental mentions (e.g. "denver hamburguesa"
+        # where the user is asking for a burger named Denver but DENVER
+        # is actually a hot dog — the rule won't fire because
+        # "hamburguesa" is not in DENVER's tags).
+        other_query_tokens = [t for t in tokens if t != name_norm]
+        if other_query_tokens:
+            tag_blob = " ".join(tags_norm) + " " + (cat_norm or "")
+            if all(tok in tag_blob for tok in other_query_tokens):
+                exact_match = True
     if exact_match:
         score += _SCORE_EXACT_NAME
         has_lexical_hit = True

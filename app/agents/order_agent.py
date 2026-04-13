@@ -276,15 +276,41 @@ class OrderAgent(BaseAgent):
         if result_kind == RESULT_KIND_MENU_CATEGORIES:
             categories = exec_result.get("categories") or []
             cats_lines = "\n".join(f"- {c}" for c in categories)
-            system = base_system + (
-                "\n\nSITUACIÓN: El cliente preguntó qué hay en el menú. Tienes las categorías disponibles. "
+            menu_url = ""
+            if business_context and business_context.get("business"):
+                settings = business_context["business"].get("settings") or {}
+                if isinstance(settings, dict):
+                    menu_url = (settings.get("menu_url") or "").strip()
+
+            rules = (
+                "\n\nSITUACIÓN: El cliente preguntó por el menú. Tienes las categorías disponibles. "
                 "REGLAS:\n"
                 "- Presenta las categorías de forma amigable (puedes traducirlas al español natural, ej. HAMBURGUESAS → hamburguesas).\n"
-                "- Invítalo a elegir una categoría para ver los productos (ej. '¿quieres ver las hamburguesas o las bebidas?').\n"
                 "- NO listes productos individuales — solo categorías.\n"
-                "- 1-3 líneas."
+                "- Termina invitando al cliente a elegir una categoría o a pedir si ya sabe qué quiere.\n"
+                "- Tono cálido, no robótico. Máx 5-6 líneas."
             )
-            inp = f"Cliente dijo: {message_body}\nCategorías disponibles:\n{cats_lines}"
+            if menu_url:
+                rules += (
+                    "\n- MENU URL disponible: úsalo SIEMPRE en la respuesta.\n"
+                    "- Si el cliente pidió explícitamente que LE ENVÍES la carta/menú/link "
+                    "(verbos: 'envías', 'mandas', 'pasas', 'compartes', 'me puedes enviar', "
+                    "'mándame', 'envíame', 'pásame', 'dame'; o sustantivos: 'el link', 'la carta' "
+                    "como objeto directo), LIDERA con el URL en su propia línea, luego menciona "
+                    "las categorías brevemente como referencia.\n"
+                    "- Si el cliente solo preguntó qué hay (ej. 'qué tienen', 'qué hay en el menú'), "
+                    "LIDERA con las categorías y pon el URL al final como oferta suave "
+                    "(ej. 'si quieres ver la carta completa: <url>')."
+                )
+            system = base_system + rules
+
+            inp_parts = [
+                f"Cliente dijo: {message_body}",
+                f"Categorías disponibles:\n{cats_lines}",
+            ]
+            if menu_url:
+                inp_parts.append(f"URL de la carta: {menu_url}")
+            inp = "\n".join(inp_parts)
             return system, inp
 
         if result_kind == RESULT_KIND_PRODUCTS_LIST:
