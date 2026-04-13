@@ -455,14 +455,30 @@ def execute_order_intent(
 
     allowed = ALLOWED_INTENTS_BY_STATE.get(current_state, ())
     if intent not in allowed:
-        logger.warning(
-            "[ORDER_FLOW] Intent rejected: intent=%s state=%s allowed=%s",
-            intent, current_state, list(allowed),
-        )
-        return _user_error_result(
-            current_state, wa_id, business_id,
-            f"Esa acción no se puede hacer en este momento ({current_state}).",
-        )
+        if (
+            current_state == ORDER_STATE_READY_TO_PLACE
+            and intent in CART_MUTATING_INTENTS
+        ):
+            logger.warning(
+                "[ORDER_FLOW] Re-opening cart: intent=%s state=%s -> %s",
+                intent, current_state, ORDER_STATE_ORDERING,
+            )
+            session_state_service.save(
+                wa_id, business_id,
+                {"order_context": {**order_context, "state": ORDER_STATE_ORDERING}},
+            )
+            order_context = {**order_context, "state": ORDER_STATE_ORDERING}
+            current_state = ORDER_STATE_ORDERING
+            session = {**session, "order_context": order_context}
+        else:
+            logger.warning(
+                "[ORDER_FLOW] Intent rejected: intent=%s state=%s allowed=%s",
+                intent, current_state, list(allowed),
+            )
+            return _user_error_result(
+                current_state, wa_id, business_id,
+                f"Esa acción no se puede hacer en este momento ({current_state}).",
+            )
 
     # Pending disambiguation is one-shot: the planner already consumed it
     # (via the prompt context). Clear it now; if THIS intent raises another

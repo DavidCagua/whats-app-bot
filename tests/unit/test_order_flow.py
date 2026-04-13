@@ -88,6 +88,61 @@ class TestIntentGuards:
     # Case: PLACE_ORDER allowed in READY_TO_PLACE state
     # Case: Menu browsing intents (GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS) allowed in GREETING and ORDERING
 
+    def test_add_to_cart_reopens_cart_from_ready_to_place(
+        self, fake_session, wa_id, business_context
+    ):
+        """
+        A cart-mutating intent while in READY_TO_PLACE must not be rejected: the
+        flow should transition back to ORDERING and execute the intent. Guards
+        against the prod bug where users stuck in READY_TO_PLACE could not add
+        more items to their order.
+        """
+        business_id = business_context["business_id"]
+        fake_session.save(
+            wa_id, business_id,
+            {"order_context": {
+                "items": [{"product_id": "prod-001", "name": "BARRACUDA", "quantity": 1, "price": 18000}],
+                "total": 18000,
+                "delivery_info": {
+                    "name": "Luis", "address": "Calle 1", "phone": "+573001234567",
+                    "payment_method": "efectivo",
+                },
+                "state": ORDER_STATE_READY_TO_PLACE,
+            }},
+        )
+        session = fake_session.load(wa_id, business_id)["session"]
+
+        fake_tool = MagicMock()
+        fake_tool.invoke = MagicMock(return_value=None)
+
+        with patch("app.orchestration.order_flow.session_state_service", fake_session), \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", return_value=fake_tool), \
+             patch("app.orchestration.order_flow._get_cart_for_logging") as mock_cart_log, \
+             patch("app.orchestration.order_flow._build_cart_change",
+                   return_value={"action": "added", "items": [], "total": 36000}):
+            mock_cart_log.side_effect = [
+                {"items": [{"name": "BARRACUDA", "quantity": 1}], "total": 18000},
+                {"items": [{"name": "BARRACUDA", "quantity": 1}, {"name": "LIMONADA", "quantity": 1}], "total": 23000},
+            ]
+            mock_tools._cart_from_session.return_value = {"items": [], "total": 23000}
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_ADD_TO_CART,
+                params={"product_name": "LIMONADA", "quantity": 1},
+            )
+
+        assert result["success"] is True
+        assert result["result_kind"] == "cart_change"
+        # State was re-opened, not stuck in READY_TO_PLACE
+        stored = fake_session.load(wa_id, business_id)["session"]
+        assert stored["order_context"]["state"] == ORDER_STATE_ORDERING
+        fake_tool.invoke.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # State transitions
