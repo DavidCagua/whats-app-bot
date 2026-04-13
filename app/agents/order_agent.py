@@ -67,6 +67,7 @@ Otras reglas:
 - Si dice "listo", "procedamos", "confirmar": PROCEED_TO_CHECKOUT.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY): usa GET_CUSTOMER_INFO cuando necesites saber qué tenemos o qué falta (ej. usuario dice "listo", "ok", o para mostrar confirmación). Usa SUBMIT_DELIVERY_INFO cuando el usuario proporcione uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
+- Si el usuario indica que su teléfono es el MISMO desde el que está escribiendo (ej. "este número", "este mismo", "el mismo", "mi whatsapp", "con este mismo", "el de whatsapp", "al que te estoy escribiendo"): usa SUBMIT_DELIVERY_INFO con `phone` igual al marcador literal `<SENDER>`. Ejemplo: {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"phone": "<SENDER>"}}}}. El backend sustituirá el marcador por el número real del remitente. NUNCA inventes un número.
 - Si ya tienen todos los datos y confirman pedido: PLACE_ORDER.
 - Si solo conversa: CHAT.
 

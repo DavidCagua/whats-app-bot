@@ -76,8 +76,42 @@ class TestProductsListResponsePrompt:
         assert "INCLÚYELA SIEMPRE" in system
 
 
+class TestPhoneFormatFromWaId:
+    """Unit tests for wa_id → phone normalization used by <SENDER> substitution."""
+
+    def test_meta_style_digits_only(self):
+        from app.orchestration.order_flow import _format_phone_from_wa_id
+        assert _format_phone_from_wa_id("573001234567") == "+573001234567"
+
+    def test_twilio_style_with_plus(self):
+        from app.orchestration.order_flow import _format_phone_from_wa_id
+        assert _format_phone_from_wa_id("+573001234567") == "+573001234567"
+
+    def test_twilio_prefix_stripped(self):
+        from app.orchestration.order_flow import _format_phone_from_wa_id
+        assert _format_phone_from_wa_id("whatsapp:+573001234567") == "+573001234567"
+
+    def test_empty(self):
+        from app.orchestration.order_flow import _format_phone_from_wa_id
+        assert _format_phone_from_wa_id("") == ""
+        assert _format_phone_from_wa_id(None) == ""
+
+
 class TestPlannerPromptRules:
     """Verify planner prompt contains the rules that route intents correctly."""
+
+    def test_planner_prompt_has_sender_phone_rule(self):
+        """
+        Regression: when the user says "este número" / "este mismo" while the bot is
+        collecting delivery info, the planner must emit SUBMIT_DELIVERY_INFO with
+        phone="<SENDER>" (a literal marker) so the backend can substitute the
+        actual wa_id. Previously the bot kept asking for the phone because the
+        planner emitted params={} with no phone at all.
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        assert "<SENDER>" in prompt, "Planner prompt must describe the <SENDER> marker"
+        assert "este número" in prompt or "este mismo" in prompt
+        assert "SUBMIT_DELIVERY_INFO" in prompt
 
     def test_planner_prompt_has_plural_details_rule(self):
         """

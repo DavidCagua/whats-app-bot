@@ -206,6 +206,23 @@ def _clean_cart_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
+def _format_phone_from_wa_id(wa_id: str) -> str:
+    """
+    Format a wa_id (raw WhatsApp sender ID) as an E.164 phone number.
+    Twilio wa_ids already include a leading '+'; Meta wa_ids are digits only.
+    """
+    if not wa_id:
+        return ""
+    raw = str(wa_id).strip()
+    if raw.startswith("whatsapp:"):
+        raw = raw[len("whatsapp:"):].strip()
+    import re as _re
+    digits = _re.sub(r"[^\d]", "", raw)
+    if not digits:
+        return ""
+    return "+" + digits
+
+
 def _get_delivery_fee(business_context: Optional[Dict]) -> float:
     if not business_context:
         return 5000.0
@@ -815,11 +832,14 @@ def execute_order_intent(
             tool_fn = _find_tool("submit_delivery_info")
             if not tool_fn:
                 return _internal_error_result(current_state, wa_id, business_id, "Tool submit_delivery_info no encontrada")
+            phone_param = (params.get("phone") or "").strip()
+            if phone_param == "<SENDER>":
+                phone_param = _format_phone_from_wa_id(wa_id)
             tool_fn.invoke({
                 "injected_business_context": ctx,
                 "address": params.get("address") or "",
                 "payment_method": params.get("payment_method") or "",
-                "phone": params.get("phone") or "",
+                "phone": phone_param,
                 "name": params.get("name") or "",
             })
             delivery_status = _build_delivery_status(wa_id, business_id)
