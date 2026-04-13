@@ -88,14 +88,18 @@ class TestIntentGuards:
     # Case: PLACE_ORDER allowed in READY_TO_PLACE state
     # Case: Menu browsing intents (GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS) allowed in GREETING and ORDERING
 
-    def test_add_to_cart_reopens_cart_from_ready_to_place(
-        self, fake_session, wa_id, business_context
+    @pytest.mark.parametrize(
+        "starting_state",
+        [ORDER_STATE_READY_TO_PLACE, ORDER_STATE_COLLECTING_DELIVERY],
+    )
+    def test_add_to_cart_reopens_cart_from_post_cart_states(
+        self, starting_state, fake_session, wa_id, business_context
     ):
         """
-        A cart-mutating intent while in READY_TO_PLACE must not be rejected: the
-        flow should transition back to ORDERING and execute the intent. Guards
-        against the prod bug where users stuck in READY_TO_PLACE could not add
-        more items to their order.
+        A cart-mutating intent arriving after the user has moved past ORDERING
+        (into COLLECTING_DELIVERY or READY_TO_PLACE) must not be rejected: the
+        flow should drop back to ORDERING and execute the intent. Guards against
+        the prod bug where users couldn't add items after starting checkout.
         """
         business_id = business_context["business_id"]
         fake_session.save(
@@ -107,7 +111,7 @@ class TestIntentGuards:
                     "name": "Luis", "address": "Calle 1", "phone": "+573001234567",
                     "payment_method": "efectivo",
                 },
-                "state": ORDER_STATE_READY_TO_PLACE,
+                "state": starting_state,
             }},
         )
         session = fake_session.load(wa_id, business_id)["session"]
@@ -138,7 +142,7 @@ class TestIntentGuards:
 
         assert result["success"] is True
         assert result["result_kind"] == "cart_change"
-        # State was re-opened, not stuck in READY_TO_PLACE
+        # State was re-opened, not stuck post-ORDERING
         stored = fake_session.load(wa_id, business_id)["session"]
         assert stored["order_context"]["state"] == ORDER_STATE_ORDERING
         fake_tool.invoke.assert_called_once()

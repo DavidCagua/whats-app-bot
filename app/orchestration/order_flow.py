@@ -456,7 +456,7 @@ def execute_order_intent(
     allowed = ALLOWED_INTENTS_BY_STATE.get(current_state, ())
     if intent not in allowed:
         if (
-            current_state == ORDER_STATE_READY_TO_PLACE
+            current_state in (ORDER_STATE_READY_TO_PLACE, ORDER_STATE_COLLECTING_DELIVERY)
             and intent in CART_MUTATING_INTENTS
         ):
             logger.warning(
