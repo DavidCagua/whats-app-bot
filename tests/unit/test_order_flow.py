@@ -59,7 +59,13 @@ class TestIntentGuards:
     """Test that intents are only allowed in the correct states."""
 
     def test_place_order_blocked_in_greeting(self, fake_session, wa_id, business_context):
-        """PLACE_ORDER should be rejected when state is GREETING."""
+        """
+        PLACE_ORDER in GREETING is an invariant violation — it should not be
+        reachable by the planner now that CONFIRM owns confirmation verbs.
+        If it happens anyway (planner drift), the executor must return a
+        soft recovery result (CHAT), not a user-facing error. The old
+        behavior dead-ended users with "Esa acción no se puede hacer..."
+        """
         session = {"order_context": {"state": ORDER_STATE_GREETING}}
 
         with patch("app.orchestration.order_flow.session_state_service", fake_session), \
@@ -72,10 +78,9 @@ class TestIntentGuards:
                 intent=INTENT_PLACE_ORDER,
             )
 
-        assert result["success"] is False
-        assert result.get("result_kind") == "user_error"
-        assert result.get("error_kind") == "user_visible"
-        assert result.get("error")  # some user-facing message exists
+        # Recovery semantics: never surface rejections as user_error.
+        assert result.get("result_kind") == "chat"
+        assert result.get("error_kind") != "user_visible"
         assert result["state_after"] == ORDER_STATE_GREETING
 
     # Case: PROCEED_TO_CHECKOUT blocked in GREETING state

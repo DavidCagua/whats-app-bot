@@ -41,6 +41,11 @@ INTENT_GET_CUSTOMER_INFO = "GET_CUSTOMER_INFO"
 INTENT_SUBMIT_DELIVERY_INFO = "SUBMIT_DELIVERY_INFO"
 INTENT_PLACE_ORDER = "PLACE_ORDER"
 INTENT_CHAT = "CHAT"
+# Semantic intent: user expressed confirmation ("listo", "procedamos", "sí",
+# "dale", "ok"). Not a transition — the executor resolves it to the concrete
+# action that makes sense for the current state. This keeps the planner out
+# of state-machine decisions it can't see.
+INTENT_CONFIRM = "CONFIRM"
 
 # Result kinds — routing signal for the response generator.
 # Every execute_order_intent return carries exactly one of these so the
@@ -81,6 +86,7 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_SEARCH_PRODUCTS,
         INTENT_GET_PRODUCT,
         INTENT_ADD_TO_CART,
+        INTENT_CONFIRM,
         INTENT_CHAT,
     ),
     ORDER_STATE_ORDERING: (
@@ -93,12 +99,14 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_UPDATE_CART_ITEM,
         INTENT_REMOVE_FROM_CART,
         INTENT_PROCEED_TO_CHECKOUT,
+        INTENT_CONFIRM,
         INTENT_CHAT,
     ),
     ORDER_STATE_COLLECTING_DELIVERY: (
         INTENT_GET_CUSTOMER_INFO,
         INTENT_SUBMIT_DELIVERY_INFO,
         INTENT_PROCEED_TO_CHECKOUT,
+        INTENT_CONFIRM,
         INTENT_CHAT,
     ),
     ORDER_STATE_READY_TO_PLACE: (
@@ -106,8 +114,20 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_VIEW_CART,
         INTENT_GET_CUSTOMER_INFO,
         INTENT_SUBMIT_DELIVERY_INFO,
+        INTENT_CONFIRM,
         INTENT_CHAT,
     ),
+}
+
+
+# Semantic-intent resolution: CONFIRM is the only semantic (non-transitional)
+# intent today. Keeping this table small and explicit — the executor, not the
+# planner, owns state-machine decisions.
+CONFIRM_RESOLUTION: Dict[str, str] = {
+    ORDER_STATE_GREETING: INTENT_CHAT,
+    ORDER_STATE_ORDERING: INTENT_PROCEED_TO_CHECKOUT,
+    ORDER_STATE_COLLECTING_DELIVERY: INTENT_GET_CUSTOMER_INFO,
+    ORDER_STATE_READY_TO_PLACE: INTENT_PLACE_ORDER,
 }
 
 CART_MUTATING_INTENTS = (
@@ -459,6 +479,26 @@ def _user_error_result(state_after: str, wa_id: str, business_id: str, message: 
     }
 
 
+def _recovery_result(state_after: str, wa_id: str, business_id: str) -> Dict[str, Any]:
+    """
+    Build a 'soft' result when the planner emits a state-illegal intent.
+    The allowlist rejection used to surface as a user-facing USER_ERROR
+    ("En este momento no podemos proceder con eso."), which dead-ends the
+    customer — we saw Biela orders abandoned this way. Instead, re-render
+    a state-appropriate prompt so the conversation keeps moving.
+    """
+    if state_after in (ORDER_STATE_COLLECTING_DELIVERY, ORDER_STATE_READY_TO_PLACE):
+        # Re-emit the confirmation/collection prompt the user was responding to.
+        delivery_status = _build_delivery_status(wa_id, business_id)
+        return _base_result(
+            state_after, wa_id, business_id,
+            RESULT_KIND_DELIVERY_STATUS,
+            delivery_status=delivery_status,
+        )
+    # ORDERING / GREETING: a neutral CHAT turn is safer than a USER_ERROR.
+    return _base_result(state_after, wa_id, business_id, RESULT_KIND_CHAT)
+
+
 def _internal_error_result(state_after: str, wa_id: str, business_id: str, message: str) -> Dict[str, Any]:
     return {
         "success": False,
@@ -542,6 +582,28 @@ def execute_order_intent(
     # against the saved options without re-triggering ambiguity.
     pending_disamb: Optional[Dict[str, Any]] = order_context.get("pending_disambiguation") or None
 
+    # --- Semantic intent resolution ---------------------------------------
+    # CONFIRM is a user-intent, not a transition. Translate it here so the
+    # rest of the executor only ever sees concrete intents.
+    if intent == INTENT_CONFIRM:
+        resolved = CONFIRM_RESOLUTION.get(current_state, INTENT_CHAT)
+        logger.warning(
+            "[ORDER_FLOW] CONFIRM resolved: state=%s -> intent=%s",
+            current_state, resolved,
+        )
+        intent = resolved
+
+    # --- Safety coercion --------------------------------------------------
+    # If the planner still emits PROCEED_TO_CHECKOUT while in READY_TO_PLACE
+    # (it shouldn't, now that CONFIRM exists — but we saw this in prod), the
+    # user meant "place the order," not "re-enter checkout." Coerce instead
+    # of rejecting. Logged as [COERCE] so we can watch for planner drift.
+    if current_state == ORDER_STATE_READY_TO_PLACE and intent == INTENT_PROCEED_TO_CHECKOUT:
+        logger.warning(
+            "[ORDER_FLOW] [COERCE] PROCEED_TO_CHECKOUT in READY_TO_PLACE -> PLACE_ORDER",
+        )
+        intent = INTENT_PLACE_ORDER
+
     allowed = ALLOWED_INTENTS_BY_STATE.get(current_state, ())
     if intent not in allowed:
         if (
@@ -560,14 +622,15 @@ def execute_order_intent(
             current_state = ORDER_STATE_ORDERING
             session = {**session, "order_context": order_context}
         else:
-            logger.warning(
-                "[ORDER_FLOW] Intent rejected: intent=%s state=%s allowed=%s",
+            # INVARIANT: a planner-emitted intent should never fail the
+            # allowlist now that (a) CONFIRM handles confirmation verbs and
+            # (b) cart mutations auto re-open. If we land here it's planner
+            # drift; log loudly but recover instead of dead-ending the user.
+            logger.error(
+                "[ORDER_FLOW] [INVARIANT] Intent rejected: intent=%s state=%s allowed=%s",
                 intent, current_state, list(allowed),
             )
-            return _user_error_result(
-                current_state, wa_id, business_id,
-                f"Esa acción no se puede hacer en este momento ({current_state}).",
-            )
+            return _recovery_result(current_state, wa_id, business_id)
 
     # Pending disambiguation is one-shot: the planner already consumed it
     # (via the prompt context). Clear it now; if THIS intent raises another

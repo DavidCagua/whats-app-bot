@@ -20,6 +20,7 @@ from ..orchestration.order_flow import (
     execute_order_intent,
     INTENT_CHAT,
     INTENT_GREET,
+    INTENT_CONFIRM,
     RESULT_KIND_CHAT,
     RESULT_KIND_MENU_CATEGORIES,
     RESULT_KIND_PRODUCTS_LIST,
@@ -48,7 +49,7 @@ PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de p
 Estado actual: {order_state}
 Productos YA en el pedido (NO los incluyas en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad): {cart_summary}
 
-Intenciones válidas: GREET, GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CHAT.
+Intenciones válidas: GREET, GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, CHAT.
 
 Reglas de menú y búsqueda (importante):
 - GET_MENU_CATEGORIES: cuando el usuario pregunta qué hay, qué tienes en general, o qué categorías hay (ej. "qué tienes", "qué hay en el menú"). Sin params.
@@ -65,11 +66,10 @@ Otras reglas:
 - MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al pedido (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en el pedido y "notes" con la instrucción. Ejemplo: pedido tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente.
 - REEMPLAZO POR VARIANTE / SABOR / TIPO de un producto YA en el pedido (ej. "la soda que sea de frutos rojos", "mejor la hamburguesa doble", "cámbiala por la de pollo", "que sea la Corona", "la cerveza que sea Poker"): usa UPDATE_CART_ITEM con "product_name" = nombre del producto ACTUAL en el carrito, y "new_product_name" = nombre completo del producto NUEVO combinando el nombre actual con la variante. Ejemplo: carrito tiene "Soda" y usuario dice "la soda que sea de frutos rojos" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Soda", "new_product_name": "Soda Frutos rojos"}}}}. Ejemplo: carrito tiene "Michelada" y usuario dice "que sea con Corona" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Michelada", "new_product_name": "Corona michelada"}}}}. Distingue de `notes`: usa `notes` SOLO para exclusiones/añadidos de ingredientes (ej. "sin morcilla", "extra salsa"), NUNCA para elegir otra variante del producto. NUNCA uses ADD_TO_CART para un reemplazo: UPDATE_CART_ITEM con new_product_name maneja la sustitución atómica.
 - Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
-- Si dice "listo", "procedamos", "confirmar": PROCEED_TO_CHECKOUT.
-- Si ya están en recolección de datos (COLLECTING_DELIVERY): usa GET_CUSTOMER_INFO cuando necesites saber qué tenemos o qué falta (ej. usuario dice "listo", "ok", o para mostrar confirmación). Usa SUBMIT_DELIVERY_INFO cuando el usuario proporcione uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}.
+- CONFIRMACIÓN (regla única, muy importante): si el mensaje del usuario es una confirmación pura — "listo", "procedamos", "procedemos", "confirmar", "confirmo", "dale", "sí", "si", "ok", "okay", "perfecto", "ya", "vale", "de acuerdo" — SIN nombrar producto, dirección, teléfono ni medio de pago, usa SIEMPRE `{{"intent": "CONFIRM", "params": {{}}}}`. No decidas tú si significa "proceder al checkout" o "colocar el pedido": el backend lo resuelve según el estado actual. NUNCA uses PROCEED_TO_CHECKOUT ni PLACE_ORDER directamente para palabras de confirmación. Si además de confirmar el usuario provee datos de entrega (ej. "listo, mi dirección es calle 1"), usa SUBMIT_DELIVERY_INFO con los datos, no CONFIRM.
+- Si ya están en recolección de datos (COLLECTING_DELIVERY) y el usuario PROVEE datos: usa SUBMIT_DELIVERY_INFO con uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}. Si solo necesitas saber qué falta (sin que el usuario haya dado nada nuevo), usa GET_CUSTOMER_INFO.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
 - Si el usuario indica que su teléfono es el MISMO desde el que está escribiendo (ej. "este número", "este mismo", "el mismo", "mi whatsapp", "con este mismo", "el de whatsapp", "al que te estoy escribiendo"): usa SUBMIT_DELIVERY_INFO con `phone` igual al marcador literal `<SENDER>`. Ejemplo: {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"phone": "<SENDER>"}}}}. El backend sustituirá el marcador por el número real del remitente. NUNCA inventes un número.
-- Si ya tienen todos los datos y confirman pedido: PLACE_ORDER.
 - Si solo conversa: CHAT.
 
 Responde ÚNICAMENTE con un JSON válido, sin markdown ni texto extra: {{"intent": "NOMBRE", "params": {{}}}}
@@ -633,6 +633,29 @@ class OrderAgent(BaseAgent):
             )
             success = exec_result.get("success", False)
             cart_summary_after = exec_result.get("cart_summary") or cart_summary_str
+
+            # One structured event per turn — grep [ORDER_TURN] to reconstruct a
+            # user's session, or alert on rejected=true (planner drift signal).
+            state_after = exec_result.get("state_after") or order_state
+            result_kind_tag = exec_result.get("result_kind") or ""
+            planner_intent_rejected = (
+                result_kind_tag == RESULT_KIND_USER_ERROR
+                and (exec_result.get("error_kind") == "user_visible")
+            )
+            logging.warning(
+                "[ORDER_TURN] wa_id=%s turn_id=%s state_in=%s intent=%s "
+                "result_kind=%s state_out=%s success=%s rejected=%s "
+                "latency_ms=%d",
+                wa_id,
+                message_id or "-",
+                order_state,
+                intent,
+                result_kind_tag,
+                state_after,
+                success,
+                planner_intent_rejected,
+                int((time.time() - start_time) * 1000),
+            )
 
             # 3) Response: deterministic greeting for GREET, else LLM response generator
             if intent == INTENT_GREET:
