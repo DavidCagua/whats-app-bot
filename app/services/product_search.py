@@ -546,10 +546,30 @@ def search_products(
             if not scored:
                 return []
 
-            # Decisive rule 1: exactly one product has an exact name match → win
+            # Decisive rule 1: exactly one product has an exact name match → win,
+            # BUT only if no other scored candidate's name contains the full
+            # normalized query as a token. Otherwise the query is a prefix of a
+            # larger product name (e.g. "soda" matches "Soda" exactly but also
+            # "Soda Frutos rojos", "Soda Uvilla y maracuyá") and the user
+            # genuinely needs to disambiguate.
             exact_matches = [s for s in scored if s[1]]
             if len(exact_matches) == 1:
-                return [exact_matches[0][3]]
+                winner_prod = exact_matches[0][3]
+                winner_id = winner_prod.get("id")
+                query_token = query_norm  # already normalized, e.g. "soda"
+                has_prefix_rival = False
+                if query_token:
+                    for _score, _exact, _has_lex, other in scored:
+                        if other.get("id") == winner_id:
+                            continue
+                        other_name_norm = _normalize(other.get("name") or "")
+                        other_tokens = set(other_name_norm.split())
+                        if query_token in other_tokens:
+                            has_prefix_rival = True
+                            break
+                if not has_prefix_rival:
+                    return [winner_prod]
+                # Fall through to disambiguation below.
 
             if len(scored) == 1:
                 return [scored[0][3]]

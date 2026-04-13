@@ -153,6 +153,52 @@ def _resolve_product_id_by_name(wa_id: str, business_id: str, product_name: str)
     return None
 
 
+def _normalize_for_match(s: str) -> str:
+    """
+    Accent-insensitive + case-insensitive product-name normalization used by
+    the disambiguation bypass. The planner is instructed to echo exact option
+    names, but users may type without accents and models occasionally drop or
+    add them — we shouldn't re-trigger disambiguation over diacritics alone.
+    """
+    import unicodedata as _ud
+    base = _normalize_product_name(s)
+    if not base:
+        return ""
+    nfkd = _ud.normalize("NFD", base)
+    return "".join(c for c in nfkd if _ud.category(c) != "Mn")
+
+
+def _resolve_from_pending_disambiguation(
+    pending: Optional[Dict[str, Any]],
+    product_name: str,
+) -> Optional[str]:
+    """
+    If a disambiguation is pending from the previous turn and `product_name`
+    matches exactly one of the saved options by normalized name, return that
+    option's product_id. Otherwise return None. The caller can then bypass
+    search_products and use the product_id directly — breaking the infinite
+    disambiguation loop that would otherwise fire when a query word (e.g.
+    "soda") is both an exact match and a prefix of other variants.
+    """
+    if not pending or not product_name:
+        return None
+    options = pending.get("options") or []
+    if not options:
+        return None
+    want = _normalize_for_match(product_name)
+    if not want:
+        return None
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        opt_name = _normalize_for_match(opt.get("name") or "")
+        if opt_name and opt_name == want:
+            pid = opt.get("product_id") or opt.get("id")
+            if pid:
+                return str(pid)
+    return None
+
+
 def _get_cart_item_quantity(wa_id: str, business_id: str, product_id: str) -> int:
     cart = order_tools._cart_from_session(wa_id, business_id)
     for it in (cart.get("items") or []):
@@ -322,18 +368,32 @@ def _build_cart_change(before: Dict, after: Dict) -> Dict[str, Any]:
     }
 
 
-def _save_pending_disambiguation(wa_id: str, business_id: str, requested_name: str, options: List[Dict[str, Any]]) -> None:
+def _save_pending_disambiguation(
+    wa_id: str,
+    business_id: str,
+    requested_name: str,
+    options: List[Dict[str, Any]],
+    pending_replacement_product_id: Optional[str] = None,
+) -> None:
     """
     Save the options we just offered the customer so the NEXT turn's planner
     can resolve replies like 'la normal', 'la primera', 'la Corona'.
+
+    When pending_replacement_product_id is set, the disambiguation was
+    triggered by a product swap (UPDATE_CART_ITEM.new_product_name) — the
+    bypass resolver in the next turn will remove that cart item after
+    successfully adding the chosen replacement.
     """
     try:
         result = session_state_service.load(wa_id, business_id)
         oc = dict((result.get("session", {}).get("order_context") or {}))
-        oc["pending_disambiguation"] = {
+        pending_entry: Dict[str, Any] = {
             "requested_name": requested_name,
             "options": options,
         }
+        if pending_replacement_product_id:
+            pending_entry["pending_replacement_product_id"] = pending_replacement_product_id
+        oc["pending_disambiguation"] = pending_entry
         session_state_service.save(wa_id, business_id, {"order_context": oc})
     except Exception as e:
         logger.warning("[ORDER_FLOW] Failed to save pending_disambiguation: %s", e)
@@ -418,9 +478,14 @@ def _disambig_result(
     business_id: str,
     requested_name: str,
     matches: List[Dict[str, Any]],
+    pending_replacement_product_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     options = [
-        {"name": m.get("name"), "price": float(m.get("price") or 0)}
+        {
+            "name": m.get("name"),
+            "price": float(m.get("price") or 0),
+            "product_id": m.get("id") or m.get("product_id"),
+        }
         for m in matches
     ]
     logger.warning(
@@ -429,7 +494,10 @@ def _disambig_result(
     )
     # Persist the options so the NEXT turn's planner can resolve replies
     # like "la normal", "la primera", "el más barato" against them.
-    _save_pending_disambiguation(wa_id, business_id, requested_name, options)
+    _save_pending_disambiguation(
+        wa_id, business_id, requested_name, options,
+        pending_replacement_product_id=pending_replacement_product_id,
+    )
     return {
         "success": False,
         "result_kind": RESULT_KIND_NEEDS_CLARIFICATION,
@@ -469,6 +537,10 @@ def execute_order_intent(
     ctx = {**(business_context or {}), "wa_id": wa_id, "business_id": business_id}
     order_context = session.get("order_context") or {}
     current_state = order_context.get("state") or derive_order_state(order_context)
+    # Capture any pending disambiguation from the previous turn BEFORE we clear
+    # it — used by the add/swap bypass so replies like "soda" can be resolved
+    # against the saved options without re-triggering ambiguity.
+    pending_disamb: Optional[Dict[str, Any]] = order_context.get("pending_disambiguation") or None
 
     allowed = ALLOWED_INTENTS_BY_STATE.get(current_state, ())
     if intent not in allowed:
@@ -664,10 +736,13 @@ def execute_order_intent(
                             item.get("product_name"),
                         )
                         continue
+                    bypass_pid = _resolve_from_pending_disambiguation(
+                        pending_disamb, item.get("product_name") or ""
+                    )
                     args = {
                         "injected_business_context": ctx,
-                        "product_id": item.get("product_id") or "",
-                        "product_name": item.get("product_name") or "",
+                        "product_id": item.get("product_id") or bypass_pid or "",
+                        "product_name": "" if bypass_pid else (item.get("product_name") or ""),
                         "quantity": int(item.get("quantity") or 1),
                     }
                     try:
@@ -677,14 +752,45 @@ def execute_order_intent(
                     except Exception as e:
                         logger.exception("[ORDER_FLOW] add_to_cart item failed: %s", e)
             else:
+                bypass_pid = _resolve_from_pending_disambiguation(
+                    pending_disamb, params.get("product_name") or ""
+                )
+                if bypass_pid:
+                    logger.warning(
+                        "[ORDER_FLOW] bypass: resolved '%s' via pending_disambiguation → %s",
+                        params.get("product_name"), bypass_pid,
+                    )
                 args = {
                     "injected_business_context": ctx,
-                    "product_id": params.get("product_id") or "",
-                    "product_name": params.get("product_name") or "",
+                    "product_id": params.get("product_id") or bypass_pid or "",
+                    "product_name": "" if bypass_pid else (params.get("product_name") or ""),
                     "quantity": int(params.get("quantity") or 1),
                     "notes": (params.get("notes") or "").strip(),
                 }
                 tool_fn.invoke(args)
+
+                # Swap completion: if the pending disambiguation was triggered
+                # by a product swap (UPDATE_CART_ITEM.new_product_name), the
+                # old item still needs to be removed now that the replacement
+                # has been added successfully.
+                replacement_pid = (pending_disamb or {}).get("pending_replacement_product_id")
+                if replacement_pid and bypass_pid:
+                    rm_tool = _find_tool("remove_from_cart")
+                    if rm_tool:
+                        try:
+                            rm_tool.invoke({
+                                "injected_business_context": ctx,
+                                "product_id": replacement_pid,
+                                "product_name": "",
+                            })
+                            logger.warning(
+                                "[ORDER_FLOW] swap complete: removed old product_id=%s",
+                                replacement_pid,
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                "[ORDER_FLOW] swap removal failed: %s", e,
+                            )
 
             cart_after = _get_cart_for_logging(wa_id, business_id)
             _log_cart_debug(wa_id, business_id, "add_to_cart", params, cart_before, cart_after)
@@ -710,6 +816,59 @@ def execute_order_intent(
             if not tool_fn:
                 return _internal_error_result(current_state, wa_id, business_id, "Tool update_cart_item no encontrada")
             cart_before = _get_cart_for_logging(wa_id, business_id)
+
+            # ---- Variant swap path: user chose a different variant of an
+            # existing cart item (e.g. "la soda que sea de frutos rojos").
+            # Resolve the new product FIRST — if it's ambiguous, the old item
+            # stays in the cart untouched and we show disambiguation with the
+            # old product_id stashed as `pending_replacement_product_id` so
+            # the next-turn bypass can complete the swap atomically.
+            new_product_name = (params.get("new_product_name") or "").strip()
+            if new_product_name:
+                old_name = (params.get("product_name") or "").strip()
+                old_pid = _resolve_product_id_by_name(wa_id, business_id, old_name) if old_name else None
+                if not old_pid:
+                    return _user_error_result(
+                        current_state, wa_id, business_id,
+                        f"No encontré '{old_name or 'ese producto'}' en tu pedido para reemplazar.",
+                    )
+
+                add_tool = _find_tool("add_to_cart")
+                if not add_tool:
+                    return _internal_error_result(current_state, wa_id, business_id, "Tool add_to_cart no encontrada")
+                try:
+                    add_tool.invoke({
+                        "injected_business_context": ctx,
+                        "product_id": "",
+                        "product_name": new_product_name,
+                        "quantity": 1,
+                    })
+                except AmbiguousProductError as amb_e:
+                    return _disambig_result(
+                        current_state, wa_id, business_id,
+                        new_product_name, list(getattr(amb_e, "matches", []) or []),
+                        pending_replacement_product_id=old_pid,
+                    )
+
+                rm_tool = _find_tool("remove_from_cart")
+                if rm_tool:
+                    try:
+                        rm_tool.invoke({
+                            "injected_business_context": ctx,
+                            "product_id": old_pid,
+                            "product_name": "",
+                        })
+                    except Exception as e:
+                        logger.exception("[ORDER_FLOW] swap removal failed: %s", e)
+
+                cart_after = _get_cart_for_logging(wa_id, business_id)
+                _log_cart_debug(wa_id, business_id, "update_cart_item_swap", params, cart_before, cart_after)
+                cart_change = _build_cart_change(cart_before, cart_after)
+                return _base_result(
+                    current_state, wa_id, business_id,
+                    RESULT_KIND_CART_CHANGE,
+                    cart_change=cart_change,
+                )
 
             tool_args = {
                 "injected_business_context": ctx,

@@ -29,6 +29,7 @@ from app.orchestration.order_flow import (
     INTENT_SEARCH_PRODUCTS,
     ALLOWED_INTENTS_BY_STATE,
     _normalize_product_name,
+    _resolve_from_pending_disambiguation,
 )
 
 
@@ -169,6 +170,213 @@ class TestStateTransitions:
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
+class TestResolveFromPendingDisambiguation:
+    """
+    Unit tests for the bypass that resolves a product_name against saved
+    disambiguation options without hitting search_products. This is what
+    breaks the infinite disambiguation loop where "soda" is both an exact
+    match and a prefix of other variants.
+    """
+
+    @staticmethod
+    def _soda_pending(replacement: str = None):
+        pending = {
+            "requested_name": "soda",
+            "options": [
+                {"name": "Soda", "price": 4500, "product_id": "prod-soda"},
+                {"name": "Soda Frutos rojos", "price": 15000, "product_id": "prod-soda-fr"},
+                {"name": "Soda Uvilla y maracuyá", "price": 15000, "product_id": "prod-soda-uv"},
+            ],
+        }
+        if replacement:
+            pending["pending_replacement_product_id"] = replacement
+        return pending
+
+    def test_exact_name_resolves_generic_soda(self):
+        """User replies 'Soda' — must map to the generic 'Soda' product_id."""
+        pending = self._soda_pending()
+        assert _resolve_from_pending_disambiguation(pending, "Soda") == "prod-soda"
+
+    def test_case_and_accent_insensitive(self):
+        """'soda frutos rojos' (lowercase, no accents) → Soda Frutos rojos."""
+        pending = self._soda_pending()
+        assert _resolve_from_pending_disambiguation(pending, "soda frutos rojos") == "prod-soda-fr"
+        assert _resolve_from_pending_disambiguation(pending, "SODA UVILLA Y MARACUYA") == "prod-soda-uv"
+
+    def test_no_pending_returns_none(self):
+        assert _resolve_from_pending_disambiguation(None, "Soda") is None
+        assert _resolve_from_pending_disambiguation({}, "Soda") is None
+        assert _resolve_from_pending_disambiguation({"options": []}, "Soda") is None
+
+    def test_no_name_returns_none(self):
+        pending = self._soda_pending()
+        assert _resolve_from_pending_disambiguation(pending, "") is None
+        assert _resolve_from_pending_disambiguation(pending, None) is None
+
+    def test_non_matching_name_returns_none(self):
+        """'Cola' isn't in the saved soda options → fall back to search_products."""
+        pending = self._soda_pending()
+        assert _resolve_from_pending_disambiguation(pending, "Cola") is None
+
+    def test_partial_name_match_does_not_resolve(self):
+        """
+        Only exact normalized-name equality wins. 'Soda frutos' (incomplete)
+        should NOT resolve to Soda Frutos rojos — we don't want the bypass
+        guessing when the planner wasn't explicit.
+        """
+        pending = self._soda_pending()
+        assert _resolve_from_pending_disambiguation(pending, "Soda frutos") is None
+
+    def test_option_without_product_id_is_skipped(self):
+        """Legacy pending entries (no product_id) must not trigger the bypass."""
+        pending = {
+            "requested_name": "soda",
+            "options": [{"name": "Soda", "price": 4500}],  # no product_id
+        }
+        assert _resolve_from_pending_disambiguation(pending, "Soda") is None
+
+
+class TestUpdateCartItemSwap:
+    """
+    Variant swap path: UPDATE_CART_ITEM with new_product_name must atomically
+    add the replacement and remove the old item, updating cart price.
+    Regression for: "la soda que sea de frutos rojos" leaving cart at $4.500
+    with a cosmetic note instead of swapping to $15.000.
+    """
+
+    def test_swap_calls_add_then_remove(self, fake_session, wa_id, business_context):
+        from app.database.session_state_service import ORDER_STATE_ORDERING
+        business_id = business_context["business_id"]
+        fake_session.save(
+            wa_id, business_id,
+            {"order_context": {
+                "items": [{"product_id": "prod-soda", "name": "Soda", "quantity": 1, "price": 4500}],
+                "total": 4500,
+                "state": ORDER_STATE_ORDERING,
+            }},
+        )
+        session = fake_session.load(wa_id, business_id)["session"]
+
+        add_tool = MagicMock()
+        add_tool.invoke = MagicMock(return_value=None)
+        remove_tool = MagicMock()
+        remove_tool.invoke = MagicMock(return_value=None)
+        update_tool = MagicMock()
+        update_tool.invoke = MagicMock(return_value=None)
+
+        def _find_tool_mock(name):
+            return {
+                "add_to_cart": add_tool,
+                "remove_from_cart": remove_tool,
+                "update_cart_item": update_tool,
+            }.get(name)
+
+        with patch("app.orchestration.order_flow.session_state_service", fake_session), \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", side_effect=_find_tool_mock), \
+             patch("app.orchestration.order_flow._get_cart_for_logging") as mock_cart_log, \
+             patch("app.orchestration.order_flow._build_cart_change",
+                   return_value={"action": "replaced", "added": [], "removed": [], "items": [], "total": 15000}):
+            mock_cart_log.side_effect = [
+                {"items": [{"name": "Soda", "quantity": 1}], "total": 4500},
+                {"items": [{"name": "Soda Frutos rojos", "quantity": 1}], "total": 15000},
+            ]
+            mock_tools._cart_from_session.return_value = {
+                "items": [{"product_id": "prod-soda", "name": "Soda", "quantity": 1, "price": 4500}],
+                "total": 4500,
+            }
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_UPDATE_CART_ITEM,
+                params={"product_name": "Soda", "new_product_name": "Soda Frutos rojos"},
+            )
+
+        assert result["success"] is True
+        assert result["result_kind"] == "cart_change"
+        # add_to_cart was called with the new product name
+        assert add_tool.invoke.call_count == 1
+        add_args = add_tool.invoke.call_args[0][0]
+        assert add_args["product_name"] == "Soda Frutos rojos"
+        # remove_from_cart was called with the OLD product_id
+        assert remove_tool.invoke.call_count == 1
+        rm_args = remove_tool.invoke.call_args[0][0]
+        assert rm_args["product_id"] == "prod-soda"
+        # update_cart_item (notes path) was NOT called — swap branch owns the update
+        update_tool.invoke.assert_not_called()
+
+    def test_swap_with_ambiguous_new_product_stashes_replacement(self, fake_session, wa_id, business_context):
+        """
+        If the new product is ambiguous, the old item must stay in the cart and
+        the disambiguation response must carry pending_replacement_product_id
+        so the bypass can complete the swap on the next turn.
+        """
+        from app.database.session_state_service import ORDER_STATE_ORDERING
+        from app.database.product_order_service import AmbiguousProductError
+        business_id = business_context["business_id"]
+        fake_session.save(
+            wa_id, business_id,
+            {"order_context": {
+                "items": [{"product_id": "prod-soda", "name": "Soda", "quantity": 1, "price": 4500}],
+                "total": 4500,
+                "state": ORDER_STATE_ORDERING,
+            }},
+        )
+        session = fake_session.load(wa_id, business_id)["session"]
+
+        matches = [
+            {"id": "prod-soda-fr", "name": "Soda Frutos rojos", "price": 15000},
+            {"id": "prod-soda-uv", "name": "Soda Uvilla y maracuyá", "price": 15000},
+        ]
+
+        add_tool = MagicMock()
+        add_tool.invoke = MagicMock(side_effect=AmbiguousProductError(query="Soda Frutos", matches=matches))
+        remove_tool = MagicMock()
+        remove_tool.invoke = MagicMock(return_value=None)
+
+        def _find_tool_mock(name):
+            return {"add_to_cart": add_tool, "remove_from_cart": remove_tool, "update_cart_item": MagicMock()}.get(name)
+
+        saved_pending = {}
+        original_save = fake_session.save
+        def _capture_save(wa, biz, update):
+            oc = (update or {}).get("order_context") or {}
+            if "pending_disambiguation" in oc:
+                saved_pending.update(oc["pending_disambiguation"])
+            return original_save(wa, biz, update)
+
+        with patch("app.orchestration.order_flow.session_state_service") as sss, \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", side_effect=_find_tool_mock), \
+             patch("app.orchestration.order_flow._get_cart_for_logging",
+                   return_value={"items": [{"product_id": "prod-soda", "name": "Soda", "quantity": 1}], "total": 4500}), \
+             patch("app.orchestration.order_flow._clear_pending_disambiguation"):
+            sss.load = fake_session.load
+            sss.save = _capture_save
+            mock_tools._cart_from_session.return_value = {
+                "items": [{"product_id": "prod-soda", "name": "Soda", "quantity": 1, "price": 4500}],
+                "total": 4500,
+            }
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_UPDATE_CART_ITEM,
+                params={"product_name": "Soda", "new_product_name": "Soda Frutos"},
+            )
+
+        assert result["result_kind"] == "needs_clarification"
+        # remove_from_cart was NOT called — old item stays until user chooses
+        remove_tool.invoke.assert_not_called()
+        # The old product_id was stashed for the next-turn bypass
+        assert saved_pending.get("pending_replacement_product_id") == "prod-soda"
+
 
 class TestNormalizeProductName:
     """Test _normalize_product_name fuzzy matching helper."""
