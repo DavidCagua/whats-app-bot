@@ -54,7 +54,8 @@ Reglas de menú y búsqueda (importante):
 - GET_MENU_CATEGORIES: cuando el usuario pregunta qué hay, qué tienes en general, o qué categorías hay (ej. "qué tienes", "qué hay en el menú"). Sin params.
 - LIST_PRODUCTS con category: cuando pregunta qué tienes EN UNA CATEGORÍA (ej. "qué tienes de bebidas", "qué hamburguesas tienes", "qué bebidas hay"). Siempre pasa params: {{"category": "bebidas"}} o "hamburguesas", "BEBIDAS", etc. category vacío = menú completo.
 - SEARCH_PRODUCTS con query: cuando el usuario NOMBRA un producto o ingrediente (ej. "quiero barracuda", "tienes coca cola", "algo con queso azul"). No uses para preguntas de categoría; para "qué tienes de X" usa LIST_PRODUCTS con category.
-- GET_PRODUCT con product_name: cuando pregunta qué trae o qué tiene un producto (ej. "qué trae la barracuda", "qué tiene la montesa").
+- GET_PRODUCT con product_name: cuando pregunta qué trae o qué tiene UN producto específico en singular (ej. "qué trae la barracuda", "qué tiene la montesa").
+- LIST_PRODUCTS (con la última categoría mostrada) cuando el usuario pide detalles de VARIOS/TODOS los productos ya listados — en plural o colectivo (ej. "qué tienen cada una", "qué trae cada una de esas hamburguesas", "dame los detalles de todas", "qué ingredientes tiene cada una"). NO uses GET_PRODUCT en estos casos: el usuario quiere ver todo el grupo, no uno solo.
 
 Otras reglas:
 - REGLA DE PRIORIDAD (más importante que las demás): si el mensaje NOMBRA uno o más productos del menú (aunque esté acompañado de un saludo, de la palabra "domicilio", "pedido", "por favor", o de una lista con saltos de línea), SIEMPRE clasifica como ADD_TO_CART con los items correspondientes. El saludo y palabras como "domicilio"/"pedido" son contexto, NO intención — se ignoran para la clasificación cuando hay productos nombrados. CHAT y GREET se usan SOLO cuando NO hay ningún producto en el mensaje.
@@ -310,11 +311,11 @@ class OrderAgent(BaseAgent):
                 "\n\nSITUACIÓN: El cliente pidió ver una lista de productos. "
                 "REGLAS:\n"
                 "- Presenta los productos de forma clara con nombre y precio.\n"
-                "- Si son muchos (>6), puedes agrupar o resumir; si son pocos, lístalos todos.\n"
+                "- Si el producto trae descripción en los datos, INCLÚYELA SIEMPRE (1 línea breve por producto). Nunca omitas descripciones aunque la lista sea larga.\n"
+                "- Si NO hay descripciones disponibles, lista solo nombre y precio.\n"
                 "- Si hay descripciones y el cliente preguntó por un ingrediente, menciona primero el producto cuya descripción coincide.\n"
                 "- Termina invitando a ordenar o a preguntar por alguno en particular.\n"
-                "- NUNCA muestres IDs ni códigos internos.\n"
-                "- Máximo ~8 líneas."
+                "- NUNCA muestres IDs ni códigos internos."
             )
             inp = f"Cliente dijo: {message_body}\n{context_label}\nProductos disponibles:\n{prods_lines}"
             return system, inp
