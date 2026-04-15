@@ -222,10 +222,15 @@ def debounce_message(
         # Atomic Lua: RPUSH + SET NX in one script so no other client can
         # slip between them. Returns 1 if this caller won the flusher lock.
         buf = r.register_script(_LUA_BUFFER)
-        is_flusher = bool(buf(
+        lua_result = buf(
             keys=[key_msgs, key_flusher],
             args=[payload, _MSG_TTL, _FLUSHER_TTL],
-        ))
+        )
+        logging.warning(
+            "[DEBOUNCE] %s: key_flusher=%s lua_result=%s",
+            phone, key_flusher, lua_result,
+        )
+        is_flusher = bool(lua_result)
         if is_flusher:
             t = threading.Thread(
                 target=_flush,
