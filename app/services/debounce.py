@@ -81,14 +81,15 @@ return msgs
 """
 
 
-def _flush(phone: str, business_context: dict, flask_app) -> None:
+def _flush(phone: str, to_number: str, flask_app) -> None:
     """
     Background thread: sleep for the debounce window, then atomically
     drain the buffer and hand off to process_whatsapp_message.
 
-    Uses a fixed sleep (not a sliding window) to avoid key_last races.
-    The Lua drain (LRANGE + DEL in one round trip) ensures no message
-    can slip between reading the list and clearing it.
+    Business lookup happens here — *after* the debounce sleep — so the
+    webhook thread can return immediately and the 3 s quiet window
+    starts on message arrival, not after a ~3–5 s Supabase round trip.
+    One lookup per flush instead of one per message.
 
     flask_app must be the actual Flask app object (not a proxy), captured
     in the request thread via current_app._get_current_object() and passed
@@ -102,9 +103,11 @@ def _flush(phone: str, business_context: dict, flask_app) -> None:
     if r is None:
         return
 
-    business_id = (business_context or {}).get("business_id") or "default"
-    key_msgs = f"debounce:msgs:{business_id}:{phone}"
-    key_flusher = f"debounce:flusher:{business_id}:{phone}"
+    # Key by (to_number, phone) — each business owns a unique Twilio
+    # number, so this preserves cross-tenant isolation without needing
+    # a business_id lookup on the hot path.
+    key_msgs = f"debounce:msgs:{to_number}:{phone}"
+    key_flusher = f"debounce:flusher:{to_number}:{phone}"
 
     try:
         # ── Drain atomically via Lua (LRANGE + DEL in one round trip) ─
@@ -154,6 +157,13 @@ def _flush(phone: str, business_context: dict, flask_app) -> None:
                         phone, exc,
                     )
 
+        # ── Resolve business context inside the flusher ──────────────
+        # Done here (not in the webhook thread) so the debounce window
+        # isn't eaten by the ~3–5 s Supabase round trip. One lookup
+        # serves the whole coalesced batch.
+        from ..utils.twilio_utils import resolve_twilio_business_context
+        business_context = resolve_twilio_business_context(to_number)
+
         # ── Hand off through existing turn_lock inside an app context ─
         # Background threads don't inherit Flask's app context; push one
         # explicitly so current_app / current_app.config work in send_message.
@@ -179,19 +189,25 @@ def _flush(phone: str, business_context: dict, flask_app) -> None:
 
 def debounce_message(
     phone: str,
+    to_number: str,
     normalized_body: dict,
-    business_context: dict,
     flask_app,
 ) -> bool:
     """
     Buffer a webhook message and start a flusher thread if needed.
 
+    Called *before* business context resolution so the quiet window
+    starts on message arrival, not after a Supabase round trip. The
+    flusher resolves business context once, after the window expires.
+
     Args:
         phone: Caller's E.164 phone number (e.g. "+573001234567").
-               Used as the Redis key and turn_lock key.
+               Used as part of the Redis key and as the turn_lock key.
+        to_number: The Twilio `To` number (business-owned WhatsApp line).
+               Scopes the debounce key so messages to different
+               businesses from the same phone don't get coalesced.
         normalized_body: Meta-format payload (from normalize_twilio_to_meta
                for Twilio, or the raw Meta body for the Meta path).
-        business_context: The resolved business context dict for this number.
         flask_app: Actual Flask app object captured via
                current_app._get_current_object() in the request thread.
                Passed to the flusher so it can push an app context.
@@ -209,14 +225,10 @@ def debounce_message(
     if r is None:
         return False
 
-    business_id = (business_context or {}).get("business_id") or "default"
-    key_msgs = f"debounce:msgs:{business_id}:{phone}"
-    key_flusher = f"debounce:flusher:{business_id}:{phone}"
+    key_msgs = f"debounce:msgs:{to_number}:{phone}"
+    key_flusher = f"debounce:flusher:{to_number}:{phone}"
 
-    payload = json.dumps({
-        "normalized_body": normalized_body,
-        "business_context": business_context,
-    })
+    payload = json.dumps({"normalized_body": normalized_body})
 
     try:
         # Atomic Lua: RPUSH + SET NX in one script so no other client can
@@ -234,7 +246,7 @@ def debounce_message(
         if is_flusher:
             t = threading.Thread(
                 target=_flush,
-                args=(phone, business_context, flask_app),
+                args=(phone, to_number, flask_app),
                 daemon=True,
                 name=f"debounce-{phone}",
             )

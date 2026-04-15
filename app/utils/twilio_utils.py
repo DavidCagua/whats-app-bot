@@ -5,6 +5,7 @@ Converts Twilio form-urlencoded payloads to Meta-style structure so
 process_whatsapp_message can be reused without modification.
 """
 
+import os
 import re
 import logging
 import requests
@@ -116,6 +117,37 @@ def normalize_twilio_to_meta(form_data: dict) -> dict:
             }
         ],
     }
+
+
+def resolve_twilio_business_context(to_number: str) -> dict:
+    """
+    Resolve the business context for an inbound Twilio webhook from the
+    recipient (`To`) number. Used by both the debounce flusher and the
+    sync fallback path so that business lookup can happen *after* the
+    debounce window instead of before it.
+
+    Returns a fully populated context dict. Falls back to a synthetic
+    "twilio" placeholder context when no matching business is found.
+    """
+    from ..database.business_service import business_service
+
+    business_context = business_service.get_business_context_by_phone_number(to_number)
+    if not business_context:
+        twilio_number = os.getenv("TWILIO_WHATSAPP_NUMBER")
+        if twilio_number and not str(twilio_number).startswith("whatsapp:"):
+            twilio_number = f"whatsapp:{twilio_number}"
+        return {
+            "provider": "twilio",
+            "twilio_phone_number": twilio_number or "",
+            "business": {"name": "Twilio"},
+            "business_id": "twilio",
+        }
+
+    twilio_from = to_number if str(to_number).startswith("whatsapp:") else f"whatsapp:{to_number}"
+    business_context["provider"] = "twilio"
+    business_context["twilio_phone_number"] = twilio_from
+    business_context.pop("phone_number_id", None)  # avoid Meta API
+    return business_context
 
 
 def send_typing_indicator(

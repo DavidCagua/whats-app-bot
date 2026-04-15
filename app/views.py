@@ -23,7 +23,7 @@ from .database.booking_service import booking_service
 from .services.debounce import debounce_message
 from .services.message_deduplication import message_deduplication_service
 from .services.turn_lock import wa_id_turn_lock
-from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message, send_typing_indicator
+from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message, send_typing_indicator, resolve_twilio_business_context
 
 webhook_blueprint = Blueprint("webhook", __name__)
 
@@ -188,43 +188,22 @@ def handle_twilio_message():
             daemon=True,
         ).start()
 
-    # Look up business by receiving number (To)
+    # ── Debounce BEFORE business lookup ──────────────────────────────
+    # The business lookup takes ~3–5 s (cold SQLAlchemy session + a
+    # full-table scan of whatsapp_numbers). Doing it here would eat the
+    # entire 3 s debounce window before the first message is even
+    # buffered in Redis. Instead we key the buffer by (To, phone) —
+    # each business owns a unique Twilio number, so this preserves
+    # tenant isolation — and resolve the business context inside the
+    # flusher after the quiet window expires.
     to_number = form_data.get("To", "")
-    business_context = business_service.get_business_context_by_phone_number(to_number)
-    if not business_context:
-        twilio_number = current_app.config.get("TWILIO_WHATSAPP_NUMBER") or os.getenv("TWILIO_WHATSAPP_NUMBER")
-        if twilio_number and not str(twilio_number).startswith("whatsapp:"):
-            twilio_number = f"whatsapp:{twilio_number}"
-        business_context = {
-            "provider": "twilio",
-            "twilio_phone_number": twilio_number or "",
-            "business": {"name": "Twilio"},
-            "business_id": "twilio",
-        }
-    else:
-        # Message came via Twilio webhook - always send reply via Twilio (not Meta)
-        twilio_from = to_number if str(to_number).startswith("whatsapp:") else f"whatsapp:{to_number}"
-        business_context["provider"] = "twilio"
-        business_context["twilio_phone_number"] = twilio_from
-        business_context.pop("phone_number_id", None)  # avoid Meta API
-
     normalized_body = normalize_twilio_to_meta(form_data)
+    sender_wa_id = (form_data.get("From") or "").replace("whatsapp:", "").strip()
     logging.warning("[DEBUG] Valid Twilio message, processing...")
 
-    # Extract sender phone number (E.164, e.g. +573001234567).
-    # This is the debounce + turn_lock key — phone number is our primary
-    # conversation identifier on Twilio (no separate wa_id).
-    sender_wa_id = (form_data.get("From") or "").replace("whatsapp:", "").strip()
-
-    # ── Debounce ──────────────────────────────────────────────────────
-    # Buffer this message in Redis. If another message from the same
-    # number arrives within 3 s, both are coalesced into one LLM call.
-    # The flusher thread calls process_whatsapp_message + turn_lock
-    # after the quiet window expires.
-    # Falls back to synchronous processing if Redis is unavailable.
     try:
         flask_app = current_app._get_current_object()
-        buffered = debounce_message(sender_wa_id, normalized_body, business_context, flask_app)
+        buffered = debounce_message(sender_wa_id, to_number, normalized_body, flask_app)
         if buffered:
             # Return immediately — flusher handles the LLM call in background.
             logging.warning(
@@ -239,8 +218,10 @@ def handle_twilio_message():
         logging.error(f"[DEBOUNCE] Unexpected error, falling back to sync: {e}")
 
     # ── Sync fallback (Redis unavailable) ────────────────────────────
-    # Per-wa_id turn serialization — see app/services/turn_lock.py.
+    # Only now do we pay for the business lookup. Per-wa_id turn
+    # serialization — see app/services/turn_lock.py.
     try:
+        business_context = resolve_twilio_business_context(to_number)
         processing_start = time.time()
         with wa_id_turn_lock(sender_wa_id):
             process_whatsapp_message(normalized_body, business_context=business_context)
