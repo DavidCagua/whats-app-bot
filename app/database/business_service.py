@@ -4,12 +4,49 @@ Handles businesses, WhatsApp numbers, users, and their relationships.
 """
 
 import logging
-from typing import Optional, Dict, List
-from sqlalchemy.orm import Session
+import re
+import threading
+import time
+from typing import Optional, Dict, List, Tuple
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_
 import uuid
 from .models import Business, WhatsappNumber, User, UserBusiness, get_db_session
+
+
+# ── In-process TTL cache for phone → business_context ───────────────────
+# The tenant → Twilio-number binding is effectively immutable on the
+# webhook hot path. Hitting Supabase on every inbound message was adding
+# 3–5 s to the first reply; a simple module-level dict with a 5-minute
+# TTL eliminates the round trip for all warm requests.
+#
+# Scope: only used for `get_business_context_by_phone_number`, which is
+# the inbound routing lookup. Other calls (admin UI, business_id lookups,
+# etc.) bypass the cache and always see fresh DB state.
+_PHONE_CTX_CACHE_TTL = 300.0  # seconds
+_phone_ctx_cache: Dict[str, Tuple[float, Optional[Dict]]] = {}
+_phone_ctx_lock = threading.Lock()
+
+
+def _canonical_phone(phone: str) -> str:
+    """
+    Canonicalize a phone string to ``+<digits>`` form.
+
+    Used for both the DB write path (so stored values are consistent)
+    and the lookup path (so the incoming `To` number hits the unique
+    index on whatsapp_numbers.phone_number added in migration 024).
+    """
+    if not phone:
+        return ""
+    s = str(phone).strip().lower()
+    if s.startswith("whatsapp:"):
+        s = s[9:].strip()
+    digits = re.sub(r"[^\d]", "", s)
+    if not digits:
+        return ""
+    return "+" + digits
+
 
 class BusinessService:
     """Service for managing business operations."""
@@ -173,46 +210,45 @@ class BusinessService:
     # WHATSAPP NUMBER OPERATIONS
     # ========================================================================
 
+    # Kept for backwards compatibility with callers that expected the
+    # old helper name. New code should use the module-level
+    # _canonical_phone directly.
     def _normalize_phone_for_lookup(self, phone: str) -> str:
-        """Normalize phone for Twilio lookup (strip whatsapp: prefix, digits + leading +)."""
-        if not phone:
-            return ""
-        s = str(phone).strip().lower()
-        if s.startswith("whatsapp:"):
-            s = s[9:].strip()
-        import re
-        digits = re.sub(r"[^\d+]", "", s)
-        if digits and not digits.startswith("+"):
-            digits = "+" + digits
-        return digits
+        return _canonical_phone(phone)
 
     def get_whatsapp_number_by_phone_number(self, phone: str) -> Optional[Dict]:
         """
         Get WhatsApp number by phone number (E.164).
-        Used for routing both Meta and Twilio webhooks - single lookup key.
+        Used for routing both Meta and Twilio webhooks — single lookup key.
+
+        Indexed direct lookup: canonicalize the input, then hit the
+        partial unique index added in migration 024
+        (whatsapp_numbers_phone_number_active_unique). One round trip,
+        O(log n) regardless of tenant count.
 
         Args:
             phone: E.164 number (e.g. whatsapp:+573126783216 or +573126783216)
 
         Returns:
-            WhatsApp number info with business_id, or None if not found
+            WhatsApp number info with business_id, or None if not found.
         """
         try:
-            normalized = self._normalize_phone_for_lookup(phone)
+            normalized = _canonical_phone(phone)
             if not normalized:
                 return None
 
             session: Session = get_db_session()
-            rows = session.query(WhatsappNumber).filter(
-                WhatsappNumber.is_active == True
-            ).all()
-            session.close()
-
-            for wn in rows:
-                if self._normalize_phone_for_lookup(wn.phone_number) == normalized:
-                    return wn.to_dict()
-            logging.warning(f"No active WhatsApp number found for {phone}")
-            return None
+            try:
+                wn = session.query(WhatsappNumber).filter(
+                    WhatsappNumber.phone_number == normalized,
+                    WhatsappNumber.is_active == True,
+                ).first()
+                if not wn:
+                    logging.warning(f"No active WhatsApp number found for {phone}")
+                    return None
+                return wn.to_dict()
+            finally:
+                session.close()
 
         except Exception as e:
             logging.error(f"Error getting WhatsApp number by phone: {e}")
@@ -267,12 +303,13 @@ class BusinessService:
             Created WhatsApp number information, or None if failed
         """
         try:
+            canonical = _canonical_phone(phone_number)
             session: Session = get_db_session()
 
             whatsapp_number = WhatsappNumber(
                 business_id=uuid.UUID(business_id),
                 phone_number_id=phone_number_id,
-                phone_number=phone_number,
+                phone_number=canonical or phone_number,
                 display_name=display_name,
                 is_active=True
             )
@@ -283,7 +320,11 @@ class BusinessService:
             whatsapp_dict = whatsapp_number.to_dict()
             session.close()
 
-            logging.info(f"Created WhatsApp number {phone_number} (ID: {phone_number_id}) for business {business_id}")
+            # Invalidate any cached negative lookup for this number so
+            # the first webhook after provisioning hits the DB fresh.
+            self.invalidate_phone_cache(canonical)
+
+            logging.info(f"Created WhatsApp number {canonical} (ID: {phone_number_id}) for business {business_id}")
             return whatsapp_dict
 
         except IntegrityError as e:
@@ -327,8 +368,12 @@ class BusinessService:
                 session.close()
                 return None
 
+            # Capture the old canonical number so we can invalidate its
+            # cache entry even if the phone_number itself changes.
+            old_canonical = _canonical_phone(whatsapp_number.phone_number)
+
             if phone_number is not None:
-                whatsapp_number.phone_number = phone_number
+                whatsapp_number.phone_number = _canonical_phone(phone_number) or phone_number
             if display_name is not None:
                 whatsapp_number.display_name = display_name
             if is_active is not None:
@@ -336,7 +381,14 @@ class BusinessService:
 
             session.commit()
             whatsapp_dict = whatsapp_number.to_dict()
+            new_canonical = _canonical_phone(whatsapp_dict.get("phone_number"))
             session.close()
+
+            # Drop both old and new cache keys so deactivation / rename /
+            # reassignment takes effect immediately.
+            self.invalidate_phone_cache(old_canonical)
+            if new_canonical and new_canonical != old_canonical:
+                self.invalidate_phone_cache(new_canonical)
 
             logging.info(f"Updated WhatsApp number {whatsapp_number_id}")
             return whatsapp_dict
@@ -529,45 +581,101 @@ class BusinessService:
         Get business context by phone number (unified for Meta and Twilio).
         Infers send path from phone_number_id: if it starts with "twilio:" -> Twilio API.
 
+        Hot path optimization:
+          1. Canonicalize input and check the module-level TTL cache.
+          2. On miss, run ONE query that joins whatsapp_numbers to
+             businesses (was two sequential sessions), hitting the
+             unique index from migration 024.
+          3. Cache the result (including negative results) for 5 min.
+
         Args:
             phone: E.164 number (from Meta metadata.display_phone_number or Twilio To)
 
         Returns:
-            Context dict with business, phone_number_id or provider/twilio_phone_number
+            Context dict with business, phone_number_id or provider/twilio_phone_number.
         """
+        normalized = _canonical_phone(phone)
+        if not normalized:
+            return None
+
+        now = time.time()
+        with _phone_ctx_lock:
+            cached = _phone_ctx_cache.get(normalized)
+            if cached and (now - cached[0]) < _PHONE_CTX_CACHE_TTL:
+                return cached[1]
+
+        context: Optional[Dict] = None
         try:
-            whatsapp_number = self.get_whatsapp_number_by_phone_number(phone)
-            if not whatsapp_number:
-                return None
+            session: Session = get_db_session()
+            try:
+                # Single round trip: indexed whatsapp_numbers lookup +
+                # eager-loaded Business via SQL JOIN. Was two sequential
+                # sessions → now one.
+                wn = (
+                    session.query(WhatsappNumber)
+                    .options(joinedload(WhatsappNumber.business))
+                    .filter(
+                        WhatsappNumber.phone_number == normalized,
+                        WhatsappNumber.is_active == True,
+                    )
+                    .first()
+                )
+                if not wn:
+                    logging.warning(f"No active WhatsApp number found for {phone}")
+                elif not wn.business:
+                    logging.error(f"No business found for WhatsApp number {wn.id}")
+                else:
+                    whatsapp_number = wn.to_dict()
+                    business = wn.business.to_dict()
 
-            business = self.get_business(whatsapp_number['business_id'])
-            if not business:
-                logging.error(f"No business found for {whatsapp_number['business_id']}")
-                return None
+                    pnid_str = str(whatsapp_number.get("phone_number_id") or "").strip()
+                    phone_val = whatsapp_number.get("phone_number", "")
+                    is_twilio = pnid_str.startswith("twilio:") or (not pnid_str and phone_val)
 
-            pnid = whatsapp_number.get('phone_number_id') or ''
-            pnid_str = str(pnid).strip()
-            phone_val = whatsapp_number.get('phone_number', '')
-            # Twilio: explicit "twilio:..." id or no Meta id (phone_number only) -> use Twilio send path
-            is_twilio = pnid_str.startswith('twilio:') or (not pnid_str and phone_val)
+                    context = {
+                        "business": business,
+                        "whatsapp_number": whatsapp_number,
+                        "business_id": business["id"],
+                        "whatsapp_number_id": whatsapp_number["id"],
+                    }
+                    if is_twilio:
+                        context["provider"] = "twilio"
+                        context["twilio_phone_number"] = (
+                            f"whatsapp:{phone_val}"
+                            if phone_val and not str(phone_val).startswith("whatsapp:")
+                            else (phone_val or "")
+                        )
+                    else:
+                        context["phone_number_id"] = pnid_str or whatsapp_number.get("phone_number_id")
 
-            context = {
-                'business': business,
-                'whatsapp_number': whatsapp_number,
-                'business_id': business['id'],
-                'whatsapp_number_id': whatsapp_number['id'],
-            }
-            if is_twilio:
-                context['provider'] = 'twilio'
-                context['twilio_phone_number'] = f"whatsapp:{phone_val}" if phone_val and not str(phone_val).startswith('whatsapp:') else (phone_val or "")
-            else:
-                context['phone_number_id'] = pnid_str or pnid
-
-            logging.info(f"[CONTEXT] Loaded context for business: {business['name']}")
-            return context
+                    logging.info(f"[CONTEXT] Loaded context for business: {business['name']}")
+            finally:
+                session.close()
         except Exception as e:
             logging.error(f"Error getting business context by phone number: {e}")
             return None
+
+        # Cache positive AND negative results. Negatives are cheap and
+        # protect against a flood of lookups for an unconfigured number.
+        with _phone_ctx_lock:
+            _phone_ctx_cache[normalized] = (now, context)
+
+        return context
+
+    @staticmethod
+    def invalidate_phone_cache(phone: Optional[str] = None) -> None:
+        """
+        Drop cached phone→context entries. Called from the write path
+        (create/update/delete whatsapp_numbers) so admins toggling a
+        number see their change immediately instead of waiting for the
+        5 min TTL. Pass no argument to clear the entire cache.
+        """
+        with _phone_ctx_lock:
+            if phone is None:
+                _phone_ctx_cache.clear()
+                return
+            normalized = _canonical_phone(phone)
+            _phone_ctx_cache.pop(normalized, None)
 
     def get_business_context_by_business_id(self, business_id: str) -> Optional[Dict]:
         """
