@@ -1,4 +1,5 @@
 flask
+redis
 gunicorn
 python-dotenv
 openai

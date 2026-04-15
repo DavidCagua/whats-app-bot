@@ -3,6 +3,8 @@ import json
 import os
 import time
 
+import threading
+
 from flask import Blueprint, request, jsonify, current_app
 
 from .decorators.security import signature_required, twilio_signature_required, admin_api_key_required
@@ -18,6 +20,7 @@ from .utils.whatsapp_utils import (
 from .database.business_service import business_service
 from .database.conversation_service import conversation_service
 from .database.booking_service import booking_service
+from .services.debounce import debounce_message
 from .services.message_deduplication import message_deduplication_service
 from .services.turn_lock import wa_id_turn_lock
 from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message, send_typing_indicator
@@ -171,13 +174,19 @@ def handle_twilio_message():
                 {"Content-Type": "text/xml"},
             )
         message_deduplication_service.mark_as_processed(message_sid)
-        
-        # [NEW] Send typing indicator immediately to show user agent is processing
-        send_typing_indicator(
-            message_sid=message_sid,
-            twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID"),
-            twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN")
-        )
+
+        # Fire typing indicator in background — don't block the webhook.
+        # The HTTP call to Twilio takes ~5s; blocking on it delays buffering
+        # and breaks the debounce coalescing window.
+        threading.Thread(
+            target=send_typing_indicator,
+            kwargs={
+                "message_sid": message_sid,
+                "twilio_account_sid": os.getenv("TWILIO_ACCOUNT_SID"),
+                "twilio_auth_token": os.getenv("TWILIO_AUTH_TOKEN"),
+            },
+            daemon=True,
+        ).start()
 
     # Look up business by receiving number (To)
     to_number = form_data.get("To", "")
@@ -202,20 +211,41 @@ def handle_twilio_message():
     normalized_body = normalize_twilio_to_meta(form_data)
     logging.warning("[DEBUG] Valid Twilio message, processing...")
 
-    # Per-wa_id turn serialization — see app/services/turn_lock.py.
-    # Two consecutive messages from the same user (e.g. "hola" + "para
-    # hacer un pedido" 4 seconds apart) used to run two pipeline passes
-    # in parallel; the second loaded the pre-first-turn session state
-    # and produced a stale reply. The advisory lock makes the second
-    # webhook wait for the first to commit its session before running.
+    # Extract sender phone number (E.164, e.g. +573001234567).
+    # This is the debounce + turn_lock key — phone number is our primary
+    # conversation identifier on Twilio (no separate wa_id).
     sender_wa_id = (form_data.get("From") or "").replace("whatsapp:", "").strip()
 
+    # ── Debounce ──────────────────────────────────────────────────────
+    # Buffer this message in Redis. If another message from the same
+    # number arrives within 3 s, both are coalesced into one LLM call.
+    # The flusher thread calls process_whatsapp_message + turn_lock
+    # after the quiet window expires.
+    # Falls back to synchronous processing if Redis is unavailable.
+    try:
+        flask_app = current_app._get_current_object()
+        buffered = debounce_message(sender_wa_id, normalized_body, business_context, flask_app)
+        if buffered:
+            # Return immediately — flusher handles the LLM call in background.
+            logging.warning(
+                f"[TIMING] handle_twilio_message (debounced) total took {time.time() - webhook_start:.3f}s"
+            )
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200,
+                {"Content-Type": "text/xml"},
+            )
+    except Exception as e:
+        logging.error(f"[DEBOUNCE] Unexpected error, falling back to sync: {e}")
+
+    # ── Sync fallback (Redis unavailable) ────────────────────────────
+    # Per-wa_id turn serialization — see app/services/turn_lock.py.
     try:
         processing_start = time.time()
         with wa_id_turn_lock(sender_wa_id):
             process_whatsapp_message(normalized_body, business_context=business_context)
         logging.warning(
-            f"[TIMING] process_whatsapp_message (Twilio) took {time.time() - processing_start:.3f}s"
+            f"[TIMING] process_whatsapp_message (Twilio sync) took {time.time() - processing_start:.3f}s"
         )
     except Exception as e:
         logging.error(f"[TWILIO] Error processing message: {e}")
