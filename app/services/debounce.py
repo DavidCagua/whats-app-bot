@@ -62,6 +62,18 @@ def _get_redis():
 
 
 
+# Atomically push a message and try to claim the flusher lock in one round trip.
+# Returns 1 if this caller won the NX race (should start the flusher), 0 otherwise.
+# Using Lua ensures RPUSH and SET NX are never interleaved with another client's
+# commands — the only way to guarantee exactly-one-flusher-per-window.
+_LUA_BUFFER = """
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+local won = redis.call('SET', KEYS[2], '1', 'NX', 'EX', ARGV[3])
+if won then return 1 else return 0 end
+"""
+
+# Atomically drain all buffered messages and release the flusher lock.
 _LUA_DRAIN = """
 local msgs = redis.call('LRANGE', KEYS[1], 0, -1)
 redis.call('DEL', KEYS[1], KEYS[2])
@@ -205,15 +217,13 @@ def debounce_message(
     })
 
     try:
-        pipe = r.pipeline()
-        pipe.rpush(key_msgs, payload)
-        pipe.expire(key_msgs, _MSG_TTL)
-        # NX + EX: only one thread becomes the flusher per debounce window.
-        # TTL covers the sleep + processing time so the lock doesn't expire mid-flight.
-        pipe.set(key_flusher, "1", nx=True, ex=_FLUSHER_TTL)
-        results = pipe.execute()
-
-        is_flusher = bool(results[2])  # True if this call won the NX race
+        # Atomic Lua: RPUSH + SET NX in one script so no other client can
+        # slip between them. Returns 1 if this caller won the flusher lock.
+        buf = r.register_script(_LUA_BUFFER)
+        is_flusher = bool(buf(
+            keys=[key_msgs, key_flusher],
+            args=[payload, _MSG_TTL, _FLUSHER_TTL],
+        ))
         if is_flusher:
             t = threading.Thread(
                 target=_flush,
