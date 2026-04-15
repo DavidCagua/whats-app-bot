@@ -102,8 +102,9 @@ def _flush(phone: str, business_context: dict, flask_app) -> None:
     if r is None:
         return
 
-    key_msgs = f"debounce:msgs:{phone}"
-    key_flusher = f"debounce:flusher:{phone}"
+    business_id = (business_context or {}).get("business_id") or "default"
+    key_msgs = f"debounce:msgs:{business_id}:{phone}"
+    key_flusher = f"debounce:flusher:{business_id}:{phone}"
 
     try:
         # ── Drain atomically via Lua (LRANGE + DEL in one round trip) ─
@@ -208,8 +209,9 @@ def debounce_message(
     if r is None:
         return False
 
-    key_msgs = f"debounce:msgs:{phone}"
-    key_flusher = f"debounce:flusher:{phone}"
+    business_id = (business_context or {}).get("business_id") or "default"
+    key_msgs = f"debounce:msgs:{business_id}:{phone}"
+    key_flusher = f"debounce:flusher:{business_id}:{phone}"
 
     payload = json.dumps({
         "normalized_body": normalized_body,
