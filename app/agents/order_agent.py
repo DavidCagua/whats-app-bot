@@ -602,7 +602,11 @@ class OrderAgent(BaseAgent):
         # the same load result.
         if session is None:
             from ..orchestration import turn_cache
-            load_result = turn_cache.current().get_session(wa_id, str(business_id))
+            from ..database.session_state_service import session_state_service
+            load_result = turn_cache.current().get_session(
+                wa_id, str(business_id),
+                loader=lambda: session_state_service.load(wa_id, str(business_id)),
+            )
             session = load_result.get("session", {})
 
         order_context = session.get("order_context") or {}

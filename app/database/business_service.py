@@ -21,11 +21,13 @@ from .models import Business, WhatsappNumber, User, UserBusiness, get_db_session
 # 3–5 s to the first reply; a simple module-level dict with a 5-minute
 # TTL eliminates the round trip for all warm requests.
 #
-# Scope: only used for `get_business_context_by_phone_number`, which is
-# the inbound routing lookup. Other calls (admin UI, business_id lookups,
-# etc.) bypass the cache and always see fresh DB state.
+# Scope: used by `get_business_context_by_phone_number` (inbound webhook
+# routing) and `get_business_context_by_business_id` (voice-reply worker,
+# admin UI hot reads). Writes through create_whatsapp_number /
+# update_whatsapp_number invalidate both caches.
 _PHONE_CTX_CACHE_TTL = 300.0  # seconds
 _phone_ctx_cache: Dict[str, Tuple[float, Optional[Dict]]] = {}
+_business_id_ctx_cache: Dict[str, Tuple[float, Optional[Dict]]] = {}
 _phone_ctx_lock = threading.Lock()
 
 
@@ -323,6 +325,7 @@ class BusinessService:
             # Invalidate any cached negative lookup for this number so
             # the first webhook after provisioning hits the DB fresh.
             self.invalidate_phone_cache(canonical)
+            self.invalidate_business_cache(business_id)
 
             logging.info(f"Created WhatsApp number {canonical} (ID: {phone_number_id}) for business {business_id}")
             return whatsapp_dict
@@ -389,6 +392,10 @@ class BusinessService:
             self.invalidate_phone_cache(old_canonical)
             if new_canonical and new_canonical != old_canonical:
                 self.invalidate_phone_cache(new_canonical)
+            # Business_id binding may have changed (e.g. number moved
+            # between tenants) — nuke the business_id cache as well.
+            if whatsapp_dict.get("business_id"):
+                self.invalidate_business_cache(whatsapp_dict["business_id"])
 
             logging.info(f"Updated WhatsApp number {whatsapp_number_id}")
             return whatsapp_dict
@@ -668,39 +675,74 @@ class BusinessService:
         Drop cached phone→context entries. Called from the write path
         (create/update/delete whatsapp_numbers) so admins toggling a
         number see their change immediately instead of waiting for the
-        5 min TTL. Pass no argument to clear the entire cache.
+        5 min TTL. Pass no argument to clear both phone- and
+        business_id-keyed caches entirely.
         """
         with _phone_ctx_lock:
             if phone is None:
                 _phone_ctx_cache.clear()
+                _business_id_ctx_cache.clear()
                 return
             normalized = _canonical_phone(phone)
             _phone_ctx_cache.pop(normalized, None)
 
+    @staticmethod
+    def invalidate_business_cache(business_id: Optional[str] = None) -> None:
+        """
+        Drop the cached business_id→context entry. Called from any
+        write path that changes business settings / whatsapp-number
+        routing so admin updates are visible immediately. Pass no
+        argument to clear the entire business_id cache.
+        """
+        with _phone_ctx_lock:
+            if business_id is None:
+                _business_id_ctx_cache.clear()
+                return
+            _business_id_ctx_cache.pop(str(business_id), None)
+
     def get_business_context_by_business_id(self, business_id: str) -> Optional[Dict]:
         """
         Get business context using only business_id.
-        Picks an active WhatsApp number; uses phone_number_id if set, else phone_number (E.164) for lookup.
+        Picks an active WhatsApp number; uses phone_number_id if set,
+        else phone_number (E.164) for lookup.
+
+        Cached for 5 minutes in _business_id_ctx_cache because the
+        voice-reply worker and ``run_agent_and_send_reply`` both call
+        this on every transcript-ready callback — previously one DB
+        round trip per voice message.
         """
+        if not business_id:
+            return None
+
+        key = str(business_id)
+        now = time.time()
+        with _phone_ctx_lock:
+            cached = _business_id_ctx_cache.get(key)
+            if cached and (now - cached[0]) < _PHONE_CTX_CACHE_TTL:
+                return cached[1]
+
+        context: Optional[Dict] = None
         try:
             numbers = self.get_business_whatsapp_numbers(business_id)
-            if not numbers:
-                return None
-
-            # Prefer active numbers if present; fallback to first entry.
-            active = [n for n in numbers if n.get("is_active")]
-            chosen = active[0] if active else numbers[0]
-            phone_number_id = chosen.get("phone_number_id")
-            if phone_number_id:
-                return self.get_business_context(phone_number_id)
-            # When phone_number_id is null (e.g. only phone_number stored), resolve by phone number
-            phone_number = chosen.get("phone_number")
-            if phone_number:
-                return self.get_business_context_by_phone_number(phone_number)
-            return None
+            if numbers:
+                # Prefer active numbers if present; fallback to first entry.
+                active = [n for n in numbers if n.get("is_active")]
+                chosen = active[0] if active else numbers[0]
+                phone_number_id = chosen.get("phone_number_id")
+                if phone_number_id:
+                    context = self.get_business_context(phone_number_id)
+                else:
+                    # phone_number_id null (e.g. only phone_number stored) — resolve by phone number
+                    phone_number = chosen.get("phone_number")
+                    if phone_number:
+                        context = self.get_business_context_by_phone_number(phone_number)
         except Exception as e:
             logging.error(f"Error getting business context by business_id: {e}")
             return None
+
+        with _phone_ctx_lock:
+            _business_id_ctx_cache[key] = (now, context)
+        return context
 
 
 # Global instance

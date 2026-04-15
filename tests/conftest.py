@@ -7,6 +7,17 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 
+# Reset the per-turn memoization cache between tests. It lives in a
+# contextvar and would otherwise carry state across tests that share a
+# worker thread, producing spooky cross-test pollution (cart items from
+# a prior test leaking into the next one's _cart_from_session view).
+@pytest.fixture(autouse=True)
+def _reset_turn_cache():
+    from app.orchestration import turn_cache
+    turn_cache.begin_turn()
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Fake session state service (in-memory, no DB)
 # ---------------------------------------------------------------------------

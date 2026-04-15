@@ -64,7 +64,10 @@ def execute_agent(
     )
 
     if agent_type in ("order", "booking") and business_id:
-        load_result = turn_cache.current().get_session(wa_id, str(business_id))
+        load_result = turn_cache.current().get_session(
+            wa_id, str(business_id),
+            loader=lambda: session_state_service.load(wa_id, str(business_id)),
+        )
         session = load_result.get("session", {})
         kwargs["session"] = session
 

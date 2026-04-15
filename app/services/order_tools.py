@@ -9,6 +9,8 @@ from langchain.tools import tool
 
 from ..database.product_order_service import product_order_service, AmbiguousProductError
 from ..database.session_state_service import session_state_service
+from ..database.customer_service import customer_service
+from . import catalog_cache
 
 
 def _turn_cache():
@@ -84,7 +86,15 @@ def _cart_from_session(wa_id: str, business_id: str) -> Dict:
     """
     if not wa_id or not business_id:
         return {"items": [], "total": 0, "delivery_info": None, "state": None}
-    result = _turn_cache().get_session(wa_id, business_id)
+    # Pass an explicit loader that uses this module's (patchable)
+    # session_state_service reference so unit tests that
+    # ``patch("app.services.order_tools.session_state_service", ...)``
+    # still intercept the DB hit.
+    result = _turn_cache().get_session(
+        wa_id,
+        business_id,
+        loader=lambda: session_state_service.load(wa_id, business_id),
+    )
     order_context = result.get("session", {}).get("order_context") or {}
     items = order_context.get("items") or []
     total = order_context.get("total") or 0
@@ -123,10 +133,10 @@ def get_menu_categories(injected_business_context: dict = None) -> str:
         if not business_id:
             return "❌ No se pudo identificar el negocio. Intenta de nuevo."
 
-        categories = product_order_service.list_categories(business_id=business_id)
+        categories = catalog_cache.list_categories(business_id)
         if not categories:
             # No categories set — fall back to listing all products directly
-            all_products = product_order_service.list_products(business_id=business_id)
+            all_products = catalog_cache.list_products(business_id)
             if not all_products:
                 return "No hay productos disponibles en el menú por ahora."
             lines = []
@@ -158,7 +168,7 @@ def list_category_products(category: str = "", injected_business_context: dict =
         if not business_id:
             return "❌ No se pudo identificar el negocio. Intenta de nuevo."
 
-        products = product_order_service.list_products_with_fallback(
+        products = catalog_cache.list_products_with_fallback(
             business_id=business_id,
             category=category.strip() if category else "",
         )
@@ -505,7 +515,9 @@ def get_customer_info(injected_business_context: dict = None) -> str:
         cart = _cart_from_session(wa_id, business_id) if business_id else {}
         session_delivery = cart.get("delivery_info") or {}
 
-        cust = _turn_cache().get_customer(wa_id)
+        cust = _turn_cache().get_customer(
+            wa_id, loader=lambda: customer_service.get_customer(wa_id)
+        )
         db_name = (cust.get("name") or "").strip() if cust else ""
         db_address = (cust.get("address") or "").strip() if cust else ""
         db_phone = (cust.get("phone") or "").strip() if cust else ""
@@ -662,7 +674,9 @@ def place_order(injected_business_context: dict = None) -> str:
                 "Usa submit_delivery_info cuando tengas los datos."
             )
 
-        cust = _turn_cache().get_customer(wa_id)
+        cust = _turn_cache().get_customer(
+            wa_id, loader=lambda: customer_service.get_customer(wa_id)
+        )
         customer_name = delivery_name or (cust.get("name") or "").strip() if cust else delivery_name
         if not customer_name:
             customer_name = "Cliente"

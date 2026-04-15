@@ -37,7 +37,7 @@ Invalidation:
 
 import contextvars
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,17 @@ _MISSING = object()  # sentinel: distinguishes "never looked up" from "cached No
 
 
 class TurnCache:
-    """Single-turn memoization of expensive lookups."""
+    """
+    Single-turn memoization of expensive lookups.
+
+    Each ``get_*`` method accepts an optional ``loader`` callable. When
+    provided, the loader is called on a cache miss instead of the
+    default import path. This lets callers pass their own module-level
+    reference to the underlying service — which is exactly what unit
+    tests do via ``unittest.mock.patch``. Without this indirection the
+    cache would capture a fresh import reference that bypasses the
+    test's monkey patch and hit a real DB.
+    """
 
     def __init__(self) -> None:
         self._session: Dict[Tuple[str, str], Any] = {}
@@ -55,7 +65,12 @@ class TurnCache:
 
     # ── session ────────────────────────────────────────────────────
 
-    def get_session(self, wa_id: str, business_id: str):
+    def get_session(
+        self,
+        wa_id: str,
+        business_id: str,
+        loader: Optional[Callable[[], Any]] = None,
+    ):
         """
         Memoized ``session_state_service.load`` for (wa_id, business_id).
 
@@ -69,8 +84,11 @@ class TurnCache:
         cached = self._session.get(key, _MISSING)
         if cached is not _MISSING:
             return cached
-        from ..database.session_state_service import session_state_service
-        result = session_state_service.load(wa_id, str(business_id))
+        if loader is not None:
+            result = loader()
+        else:
+            from ..database.session_state_service import session_state_service
+            result = session_state_service.load(wa_id, str(business_id))
         self._session[key] = result
         return result
 
@@ -80,7 +98,11 @@ class TurnCache:
 
     # ── customer ───────────────────────────────────────────────────
 
-    def get_customer(self, wa_id: str):
+    def get_customer(
+        self,
+        wa_id: str,
+        loader: Optional[Callable[[], Any]] = None,
+    ):
         """
         Memoized ``customer_service.get_customer``. Returns None on
         lookup failure just like the underlying service. A cached None
@@ -91,9 +113,12 @@ class TurnCache:
         cached = self._customer.get(wa_id, _MISSING)
         if cached is not _MISSING:
             return cached
-        from ..database.customer_service import customer_service
         try:
-            result = customer_service.get_customer(wa_id)
+            if loader is not None:
+                result = loader()
+            else:
+                from ..database.customer_service import customer_service
+                result = customer_service.get_customer(wa_id)
         except Exception as exc:
             logger.warning("[TURN_CACHE] customer lookup failed for %s: %s", wa_id, exc)
             result = None

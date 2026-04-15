@@ -125,7 +125,9 @@ def _agent_gate_and_name(wa_id: str, business_context: Optional[dict]) -> tuple:
         # Go through the turn cache so downstream layers
         # (order_flow / order_tools) reuse this lookup instead of
         # hitting the DB again.
-        customer_data = turn_cache.current().get_customer(wa_id)
+        customer_data = turn_cache.current().get_customer(
+            wa_id, loader=lambda: customer_service.get_customer(wa_id)
+        )
         name = (customer_data or {}).get("name") or "Cliente"
     except Exception as e:
         logging.error(f"[CUSTOMER] Database lookup failed for {wa_id}: {e}")

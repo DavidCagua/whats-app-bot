@@ -23,6 +23,7 @@ from ..database.session_state_service import (
 from ..database.customer_service import customer_service
 from ..database.product_order_service import product_order_service, AmbiguousProductError
 from ..services import order_tools
+from ..services import catalog_cache
 from . import turn_cache
 
 
@@ -153,7 +154,10 @@ CART_MUTATING_INTENTS = (
 
 def _cart_summary_from_session(wa_id: str, business_id: str) -> str:
     """Short human cart summary for logging (never shown to user as-is anymore)."""
-    result = turn_cache.current().get_session(wa_id, business_id)
+    result = turn_cache.current().get_session(
+        wa_id, business_id,
+        loader=lambda: session_state_service.load(wa_id, business_id),
+    )
     oc = result.get("session", {}).get("order_context") or {}
     items = oc.get("items") or []
     total = oc.get("total") or 0
@@ -240,7 +244,10 @@ def _get_cart_item_quantity(wa_id: str, business_id: str, product_id: str) -> in
 
 
 def _get_cart_for_logging(wa_id: str, business_id: str) -> Dict:
-    result = turn_cache.current().get_session(wa_id, business_id)
+    result = turn_cache.current().get_session(
+        wa_id, business_id,
+        loader=lambda: session_state_service.load(wa_id, business_id),
+    )
     oc = result.get("session", {}).get("order_context") or {}
     return {"items": oc.get("items") or [], "total": oc.get("total") or 0}
 
@@ -321,7 +328,13 @@ def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:
     """
     cart = order_tools._cart_from_session(wa_id, business_id) if wa_id and business_id else {}
     session_di = cart.get("delivery_info") or {}
-    cust = turn_cache.current().get_customer(wa_id) if wa_id else None
+    cust = (
+        turn_cache.current().get_customer(
+            wa_id, loader=lambda: customer_service.get_customer(wa_id)
+        )
+        if wa_id
+        else None
+    )
     cust = cust or {}
 
     name = (session_di.get("name") or "").strip() or (cust.get("name") or "").strip()
@@ -423,7 +436,10 @@ def _save_pending_disambiguation(
     successfully adding the chosen replacement.
     """
     try:
-        result = turn_cache.current().get_session(wa_id, business_id)
+        result = turn_cache.current().get_session(
+            wa_id, business_id,
+            loader=lambda: session_state_service.load(wa_id, business_id),
+        )
         oc = dict((result.get("session", {}).get("order_context") or {}))
         pending_entry: Dict[str, Any] = {
             "requested_name": requested_name,
@@ -703,14 +719,14 @@ def execute_order_intent(
 
         # --- read intents (call service directly, no @tool wrapper) ---
         if intent == INTENT_GET_MENU_CATEGORIES:
-            categories = product_order_service.list_categories(business_id=business_id) or []
+            categories = catalog_cache.list_categories(business_id) or []
             if categories:
                 return _base_result(
                     current_state, wa_id, business_id,
                     RESULT_KIND_MENU_CATEGORIES,
                     categories=list(categories),
                 )
-            all_products = product_order_service.list_products(business_id=business_id) or []
+            all_products = catalog_cache.list_products(business_id) or []
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCTS_LIST,
@@ -721,7 +737,7 @@ def execute_order_intent(
 
         if intent == INTENT_LIST_PRODUCTS:
             category = (params.get("category") or "").strip()
-            products = product_order_service.list_products_with_fallback(
+            products = catalog_cache.list_products_with_fallback(
                 business_id=business_id, category=category,
             ) or []
             return _base_result(
