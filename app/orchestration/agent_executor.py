@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 # Deferring the import until first call breaks the cycle.
 from ..database.conversation_service import conversation_service
 from ..database.session_state_service import session_state_service
+from . import turn_cache
 
 
 def execute_agent(
@@ -63,7 +64,7 @@ def execute_agent(
     )
 
     if agent_type in ("order", "booking") and business_id:
-        load_result = session_state_service.load(wa_id, str(business_id))
+        load_result = turn_cache.current().get_session(wa_id, str(business_id))
         session = load_result.get("session", {})
         kwargs["session"] = session
 

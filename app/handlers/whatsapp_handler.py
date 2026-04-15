@@ -12,6 +12,7 @@ from app.database.business_service import business_service
 from app.database.conversation_agent_service import conversation_agent_service
 from app.database.conversation_service import conversation_service
 from app.database.customer_service import customer_service
+from app.orchestration import turn_cache
 from app.orchestration.conversation_manager import conversation_manager
 from app.utils.inbound_message import parse_inbound_message
 from app.utils.whatsapp_utils import (
@@ -28,6 +29,9 @@ def process_whatsapp_message(body, business_context=None):
     Voice-only messages are persisted and enqueued; reply is sent later when transcript is ready.
     """
     overall_start = time.time()
+    # Fresh per-turn memoization cache. Eliminates 2-4x redundant reads
+    # of session / customer / product search across order_flow layers.
+    turn_cache.begin_turn()
     try:
         logging.warning("[DEBUG] ========== PROCESSING MESSAGE ==========")
         provider = "twilio" if (business_context or {}).get("provider") == "twilio" else "meta"
@@ -118,7 +122,10 @@ def _agent_gate_and_name(wa_id: str, business_context: Optional[dict]) -> tuple:
     """Resolve customer name and check if agent is allowed to run. Returns (name, allowed)."""
     db_start = time.time()
     try:
-        customer_data = customer_service.get_customer(wa_id)
+        # Go through the turn cache so downstream layers
+        # (order_flow / order_tools) reuse this lookup instead of
+        # hitting the DB again.
+        customer_data = turn_cache.current().get_customer(wa_id)
         name = (customer_data or {}).get("name") or "Cliente"
     except Exception as e:
         logging.error(f"[CUSTOMER] Database lookup failed for {wa_id}: {e}")
@@ -197,6 +204,10 @@ def run_agent_and_send_reply(wa_id: str, message_text: str, business_id: str) ->
     """
     if not message_text or not message_text.strip():
         return False
+    # Voice-reply path enters from a background worker thread — give it
+    # its own fresh turn cache so it doesn't share state with whichever
+    # request was served last on this thread.
+    turn_cache.begin_turn()
     try:
         business_context = business_service.get_business_context_by_business_id(business_id)
         if not business_context:

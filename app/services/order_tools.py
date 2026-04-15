@@ -9,7 +9,18 @@ from langchain.tools import tool
 
 from ..database.product_order_service import product_order_service, AmbiguousProductError
 from ..database.session_state_service import session_state_service
-from ..database.customer_service import customer_service
+
+
+def _turn_cache():
+    """
+    Lazy import of the per-turn cache. order_tools is imported from
+    app.orchestration.order_flow at module-load time, which would make
+    a top-level `from ..orchestration import turn_cache` trigger the
+    orchestration package __init__ before it's ready. Defer the import
+    to first call; Python caches the module so it's ~free.
+    """
+    from ..orchestration import turn_cache as tc
+    return tc.current()
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +84,7 @@ def _cart_from_session(wa_id: str, business_id: str) -> Dict:
     """
     if not wa_id or not business_id:
         return {"items": [], "total": 0, "delivery_info": None, "state": None}
-    result = session_state_service.load(wa_id, business_id)
+    result = _turn_cache().get_session(wa_id, business_id)
     order_context = result.get("session", {}).get("order_context") or {}
     items = order_context.get("items") or []
     total = order_context.get("total") or 0
@@ -93,6 +104,9 @@ def _save_cart(wa_id: str, business_id: str, cart: Dict) -> None:
     if merged.get("state") is None and existing.get("state") is not None:
         merged["state"] = existing["state"]
     session_state_service.save(wa_id, business_id, {"order_context": merged})
+    # Drop the per-turn cached session so the next _cart_from_session in
+    # this turn refetches and sees the merged state.
+    _turn_cache().invalidate_session(wa_id, business_id)
 
 
 @tool
@@ -491,7 +505,7 @@ def get_customer_info(injected_business_context: dict = None) -> str:
         cart = _cart_from_session(wa_id, business_id) if business_id else {}
         session_delivery = cart.get("delivery_info") or {}
 
-        cust = customer_service.get_customer(wa_id)
+        cust = _turn_cache().get_customer(wa_id)
         db_name = (cust.get("name") or "").strip() if cust else ""
         db_address = (cust.get("address") or "").strip() if cust else ""
         db_phone = (cust.get("phone") or "").strip() if cust else ""
@@ -648,7 +662,7 @@ def place_order(injected_business_context: dict = None) -> str:
                 "Usa submit_delivery_info cuando tengas los datos."
             )
 
-        cust = customer_service.get_customer(wa_id)
+        cust = _turn_cache().get_customer(wa_id)
         customer_name = delivery_name or (cust.get("name") or "").strip() if cust else delivery_name
         if not customer_name:
             customer_name = "Cliente"
@@ -693,6 +707,7 @@ def place_order(injected_business_context: dict = None) -> str:
                 "last_order_id": order_id,
             },
         )
+        _turn_cache().invalidate_session(wa_id, business_id)
         subtotal = result.get("subtotal", 0)
         total = result.get("total", 0)
         return (

@@ -597,10 +597,12 @@ class OrderAgent(BaseAgent):
                 "state_update": {},
             }
 
-        # Load session if not provided (e.g. when executor passes it)
+        # Load session if not provided (e.g. when executor passes it).
+        # Goes through the turn cache so the rest of the flow reuses
+        # the same load result.
         if session is None:
-            from ..database.session_state_service import session_state_service
-            load_result = session_state_service.load(wa_id, str(business_id))
+            from ..orchestration import turn_cache
+            load_result = turn_cache.current().get_session(wa_id, str(business_id))
             session = load_result.get("session", {})
 
         order_context = session.get("order_context") or {}

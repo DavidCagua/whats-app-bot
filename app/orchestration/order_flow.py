@@ -23,6 +23,18 @@ from ..database.session_state_service import (
 from ..database.customer_service import customer_service
 from ..database.product_order_service import product_order_service, AmbiguousProductError
 from ..services import order_tools
+from . import turn_cache
+
+
+def _save_session_and_invalidate(wa_id: str, business_id: str, state_update: Dict) -> None:
+    """
+    Persist a session state update and drop the per-turn cached copy
+    so subsequent reads in this turn see the merged state. Every save
+    in order_flow goes through this wrapper because the service does a
+    server-side shallow merge the in-memory cache can't observe.
+    """
+    session_state_service.save(wa_id, business_id, state_update)
+    turn_cache.current().invalidate_session(wa_id, business_id)
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +153,7 @@ CART_MUTATING_INTENTS = (
 
 def _cart_summary_from_session(wa_id: str, business_id: str) -> str:
     """Short human cart summary for logging (never shown to user as-is anymore)."""
-    result = session_state_service.load(wa_id, business_id)
+    result = turn_cache.current().get_session(wa_id, business_id)
     oc = result.get("session", {}).get("order_context") or {}
     items = oc.get("items") or []
     total = oc.get("total") or 0
@@ -228,7 +240,7 @@ def _get_cart_item_quantity(wa_id: str, business_id: str, product_id: str) -> in
 
 
 def _get_cart_for_logging(wa_id: str, business_id: str) -> Dict:
-    result = session_state_service.load(wa_id, business_id)
+    result = turn_cache.current().get_session(wa_id, business_id)
     oc = result.get("session", {}).get("order_context") or {}
     return {"items": oc.get("items") or [], "total": oc.get("total") or 0}
 
@@ -309,7 +321,7 @@ def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:
     """
     cart = order_tools._cart_from_session(wa_id, business_id) if wa_id and business_id else {}
     session_di = cart.get("delivery_info") or {}
-    cust = customer_service.get_customer(wa_id) if wa_id else None
+    cust = turn_cache.current().get_customer(wa_id) if wa_id else None
     cust = cust or {}
 
     name = (session_di.get("name") or "").strip() or (cust.get("name") or "").strip()
@@ -411,7 +423,7 @@ def _save_pending_disambiguation(
     successfully adding the chosen replacement.
     """
     try:
-        result = session_state_service.load(wa_id, business_id)
+        result = turn_cache.current().get_session(wa_id, business_id)
         oc = dict((result.get("session", {}).get("order_context") or {}))
         pending_entry: Dict[str, Any] = {
             "requested_name": requested_name,
@@ -420,7 +432,8 @@ def _save_pending_disambiguation(
         if pending_replacement_product_id:
             pending_entry["pending_replacement_product_id"] = pending_replacement_product_id
         oc["pending_disambiguation"] = pending_entry
-        session_state_service.save(wa_id, business_id, {"order_context": oc})
+        _save_session_and_invalidate(wa_id, business_id, {"order_context": oc})
+        turn_cache.current().invalidate_session(wa_id, business_id)
     except Exception as e:
         logger.warning("[ORDER_FLOW] Failed to save pending_disambiguation: %s", e)
 
@@ -620,10 +633,11 @@ def execute_order_intent(
                 "[ORDER_FLOW] Re-opening cart: intent=%s state=%s -> %s",
                 intent, current_state, ORDER_STATE_ORDERING,
             )
-            session_state_service.save(
+            _save_session_and_invalidate(
                 wa_id, business_id,
                 {"order_context": {**order_context, "state": ORDER_STATE_ORDERING}},
             )
+            turn_cache.current().invalidate_session(wa_id, business_id)
             order_context = {**order_context, "state": ORDER_STATE_ORDERING}
             current_state = ORDER_STATE_ORDERING
             session = {**session, "order_context": order_context}
@@ -658,15 +672,16 @@ def execute_order_intent(
                     current_state, wa_id, business_id,
                     "Tu pedido está vacío. Agrega productos antes de continuar.",
                 )
-            session_state_service.save(
+            _save_session_and_invalidate(
                 wa_id, business_id,
                 {"order_context": {**order_context, "state": ORDER_STATE_COLLECTING_DELIVERY}},
             )
+            turn_cache.current().invalidate_session(wa_id, business_id)
             delivery_status = _build_delivery_status(wa_id, business_id)
             state_after = ORDER_STATE_COLLECTING_DELIVERY
             if delivery_status["all_present"]:
                 cart_now = order_tools._cart_from_session(wa_id, business_id)
-                session_state_service.save(
+                _save_session_and_invalidate(
                     wa_id, business_id,
                     {"order_context": {
                         **cart_now,
@@ -868,7 +883,7 @@ def execute_order_intent(
             # State transition on first add
             state_after = current_state
             if current_state == ORDER_STATE_GREETING and cart_change["action"] != CART_ACTION_NOOP:
-                session_state_service.save(
+                _save_session_and_invalidate(
                     wa_id, business_id,
                     {"order_context": {**order_tools._cart_from_session(wa_id, business_id), "state": ORDER_STATE_ORDERING}},
                 )
@@ -1075,7 +1090,7 @@ def execute_order_intent(
             state_after = current_state
             if delivery_status["all_present"]:
                 cart_now = order_tools._cart_from_session(wa_id, business_id)
-                session_state_service.save(
+                _save_session_and_invalidate(
                     wa_id, business_id,
                     {"order_context": {
                         **cart_now,
@@ -1091,7 +1106,7 @@ def execute_order_intent(
                 state_after = ORDER_STATE_READY_TO_PLACE
             else:
                 cart_now = order_tools._cart_from_session(wa_id, business_id)
-                session_state_service.save(
+                _save_session_and_invalidate(
                     wa_id, business_id,
                     {"order_context": {**cart_now, "state": ORDER_STATE_COLLECTING_DELIVERY}},
                 )
