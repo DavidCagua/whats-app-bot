@@ -166,14 +166,16 @@ def handle_twilio_message():
 
     message_sid = form_data.get("MessageSid")
     if message_sid:
-        if message_deduplication_service.is_duplicate(message_sid):
+        # Single-round-trip Redis claim: atomic check+set. The previous
+        # check-then-set path hit Supabase twice (~1–2 s total) before
+        # debounce_message ran, eating most of the 3 s quiet window.
+        if not message_deduplication_service.claim(message_sid):
             logging.info(f"[DEDUPE] Duplicate Twilio message, skipping: {message_sid}")
             return (
                 '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200,
                 {"Content-Type": "text/xml"},
             )
-        message_deduplication_service.mark_as_processed(message_sid)
 
         # Fire typing indicator in background — don't block the webhook.
         # The HTTP call to Twilio takes ~5s; blocking on it delays buffering
