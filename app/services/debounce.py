@@ -28,8 +28,6 @@ import os
 import threading
 import time
 
-logger = logging.getLogger(__name__)
-
 DEBOUNCE_SECONDS = 3.0
 _FLUSHER_TTL = 90   # safety expiry on flusher lock: sleep(3) + max LLM time
 _MSG_TTL = 120      # safety expiry on buffered messages (seconds)
@@ -57,9 +55,9 @@ def _get_redis():
             client = redis_lib.from_url(url, decode_responses=True, socket_timeout=2)
             client.ping()
             _redis_client = client
-            logger.info("[DEBOUNCE] Redis connected")
+            logging.info("[DEBOUNCE] Redis connected")
         except Exception as exc:
-            logger.warning("[DEBOUNCE] Redis unavailable (%s); debounce disabled", exc)
+            logging.warning("[DEBOUNCE] Redis unavailable (%s); debounce disabled", exc)
     return _redis_client
 
 
@@ -100,11 +98,11 @@ def _flush(phone: str, business_context: dict, flask_app) -> None:
         drain = r.register_script(_LUA_DRAIN)
         raw_msgs = drain(keys=[key_msgs, key_flusher])
 
+        logging.warning("[DEBOUNCE] %s: drained %d message(s) from Redis", phone, len(raw_msgs) if raw_msgs else 0)
         if not raw_msgs:
-            logger.info("[DEBOUNCE] %s: buffer empty after drain, skipping", phone)
             return
 
-        logger.info("[DEBOUNCE] %s: coalescing %d message(s)", phone, len(raw_msgs))
+        logging.warning("[DEBOUNCE] %s: coalescing %d message(s)", phone, len(raw_msgs))
 
         entries = []
         for raw in raw_msgs:
@@ -138,7 +136,7 @@ def _flush(phone: str, business_context: dict, flask_app) -> None:
                         "messages"
                     ][0]["text"]["body"] = "\n".join(texts)
                 except (KeyError, IndexError, TypeError) as exc:
-                    logger.warning(
+                    logging.warning(
                         "[DEBOUNCE] %s: merge failed (%s); using first message only",
                         phone, exc,
                     )
@@ -154,7 +152,7 @@ def _flush(phone: str, business_context: dict, flask_app) -> None:
                 process_whatsapp_message(combined_body, business_context=business_context)
 
     except Exception as exc:
-        logger.error("[DEBOUNCE] flush error for %s: %s", phone, exc, exc_info=True)
+        logging.error("[DEBOUNCE] flush error for %s: %s", phone, exc, exc_info=True)
     finally:
         # Belt-and-suspenders: release flusher lock even if Lua drain or
         # processing crashed before it could delete it.
@@ -224,15 +222,15 @@ def debounce_message(
                 name=f"debounce-{phone}",
             )
             t.start()
-            logger.info(
+            logging.warning(
                 "[DEBOUNCE] %s: buffered + flusher started (window=%.1fs)",
                 phone, DEBOUNCE_SECONDS,
             )
         else:
-            logger.info("[DEBOUNCE] %s: buffered (flusher already running)", phone)
+            logging.warning("[DEBOUNCE] %s: buffered (flusher already running)", phone)
 
         return True
 
     except Exception as exc:
-        logger.warning("[DEBOUNCE] Redis error, falling back to sync for %s: %s", phone, exc)
+        logging.warning("[DEBOUNCE] Redis error, falling back to sync for %s: %s", phone, exc)
         return False
