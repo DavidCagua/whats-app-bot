@@ -312,6 +312,15 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         name = product["name"]
         notes = (notes or "").strip()
 
+        # Search may have attached a derived flavor/qualifier for generic
+        # products (e.g. "jugo de mora en leche" → product "Jugos en leche"
+        # + derived_notes "mora"). Fold the derived note into the item's
+        # notes so the human at the restaurant sees the user's flavor
+        # request on the ticket.
+        derived = str(product.get("_derived_notes") or "").strip()
+        if derived:
+            notes = f"{derived}; {notes}" if notes else derived
+
         cart = _cart_from_session(wa_id, business_id)
         items: List[Dict] = list(cart.get("items") or [])
 

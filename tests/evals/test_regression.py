@@ -361,6 +361,152 @@ def test_procedemos_in_ready_to_place_places_order():
 
 
 # ---------------------------------------------------------------------------
+# Biela +573242261188 — generic-product + multi-item regression
+#
+# Incident 2026-04-15: user sent "Dame 1 jugo de mora en leche y 1 soda
+# de frutos rojos". Three bugs stacked:
+#   1. Product search returned [Jugos en leche, Hervido Mora] as a
+#      near-tie disambiguation even though the user was explicit about
+#      "en leche" (over-sensitive semantic scoring on "mora").
+#   2. The executor's multi-item loop re-raised AmbiguousProductError
+#      from the jugo and never reached the soda, silently dropping a
+#      perfectly-matchable item.
+#   3. The response generator hallucinated "Jugo de Mora en Leche" as
+#      the option name (merging the user's flavor with the real generic
+#      "Jugos en leche"), which poisoned the disambiguation bypass on
+#      the next turn because the saved options still held the real name.
+#
+# Fixes landed together:
+#   A. Multi-item executor continues past per-item AmbiguousProductError
+#      and carries pending_clarification through the cart_change result.
+#   B. search_products decisive rule: when query tokens strictly contain
+#      a generic candidate's name tokens, pick that candidate and expose
+#      leftover tokens as _derived_notes (which add_to_cart stashes on
+#      the cart item so the human at Biela sees the flavor request).
+#   C. Response-generator prompt forbids inventing/composing option
+#      names — must use exact catalog names.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_jugo_mora_en_leche_plus_soda_multi_item():
+    """
+    Pin the full cascade fix. The scenario stubs product search so
+    "jugo de mora en leche" resolves to the generic "Jugos en leche"
+    with _derived_notes="mora" (simulating Fix B), and "soda de frutos
+    rojos" resolves to "Soda Frutos rojos" exactly.
+
+    Expected reply after Fix A + B + C:
+      - cart confirms BOTH items (no silent drop)
+      - mentions the flavor "mora" (from derived_notes)
+      - uses the EXACT catalog name "Jugos en leche" (no hallucinated
+        "Jugo de Mora en Leche")
+      - does NOT list Hervido Mora as an option
+      - does NOT fall into a disambiguation loop
+    """
+    JUGOS_EN_LECHE = {
+        "id": "prod-jugos-leche",
+        "business_id": "44488756-473b-46d2-a907-9f579e98ecfd",
+        "name": "Jugos en leche",
+        "description": "",
+        "price": 7500.0,
+        "currency": "COP",
+        "category": "BEBIDAS",
+        "sku": None,
+        "is_active": True,
+        "tags": ["bebida", "jugo"],
+        "metadata": {},
+        "matched_by": "lexical",
+        # Simulates the Fix B search layer attaching the derived flavor
+        # to the generic-product winner. The add_to_cart tool reads this
+        # field and stashes it on the cart item's notes.
+        "_derived_notes": "mora",
+    }
+    SODA_FRUTOS = {
+        "id": "prod-soda-frutos",
+        "business_id": "44488756-473b-46d2-a907-9f579e98ecfd",
+        "name": "Soda Frutos rojos",
+        "description": "",
+        "price": 15000.0,
+        "currency": "COP",
+        "category": "BEBIDAS",
+        "sku": None,
+        "is_active": True,
+        "tags": ["bebida", "soda"],
+        "metadata": {},
+        "matched_by": "exact",
+    }
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        # Jugo branch: route anything mentioning jugo + (leche OR mora)
+        # to the generic Jugos en leche winner.
+        if "jugo" in q and ("leche" in q or "mora" in q):
+            return [JUGOS_EN_LECHE]
+        # Soda branch: exact catalog match for "soda (de) frutos rojos".
+        if "soda" in q and "frutos" in q:
+            return [SODA_FRUTOS]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_jugo_mora_plus_soda_multi_item",
+        user_message="Dame 1 jugo de mora en leche y 1 soda de frutos rojos",
+        initial_order_context={"state": "ORDERING", "items": [], "total": 0},
+        stub_search_products=_search_stub,
+        stub_list_products_with_fallback=lambda biz, cat: [],
+        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS", "PLATOS"],
+        must_contain_any=[
+            # The real (non-hallucinated) generic product name must appear
+            # in the cart line. The response may also echo the user's
+            # "jugo de mora en leche" phrase in the confirmation text —
+            # that's a natural echo, not a fabrication. We only assert
+            # the CART LINE uses the catalog name. "jugo en leche" also
+            # matches because the response generator is allowed to
+            # singularize plural catalog names in cart listings (the
+            # flavor still rides along as the notes "(mora)").
+            r"jugos? en leche",
+        ],
+        must_not_contain=[
+            # Hervido Mora should never surface as an option in this flow.
+            r"hervido mora",
+            # The soda must NOT land in a disambiguation prompt — there's
+            # a real exact match in the catalog.
+            r"soda.*¿cu[aá]l",
+            # Apology / failure markers — this flow must not feel broken.
+            r"\bdiscul",
+            r"\blo siento\b",
+            r"\bno pude\b",
+            r"\bfall[oó]\b",
+        ],
+        # Prose-level check: the judge verifies both items land in the
+        # cart AND the flavor is carried as a note, rather than dropped
+        # or re-prompted.
+        llm_judge_rubric=(
+            "The customer ordered two items in one message: "
+            "'1 jugo de mora en leche' and '1 soda de frutos rojos'. "
+            "The catalog has a GENERIC product 'Jugos en leche' (a $7.500 "
+            "row that accepts any flavor the kitchen stocks; the flavor "
+            "is written as a note on the ticket) and a SPECIFIC product "
+            "'Soda Frutos rojos' at $15.000. "
+            "The reply PASSES if it confirms BOTH items were added to the "
+            "order, uses the exact catalog names 'Jugos en leche' and "
+            "'Soda Frutos rojos', and either mentions that the mora flavor "
+            "will be noted on the ticket OR lists the jugo with a '(mora)' "
+            "or 'con mora' annotation. It is OK to ask 'something else or "
+            "proceed?' at the end. "
+            "The reply FAILS if it: (a) drops the soda silently or asks "
+            "to clarify the soda, (b) asks the customer to choose between "
+            "'Jugos en leche' and 'Hervido Mora' as if they were "
+            "comparable options, (c) uses a fabricated product name like "
+            "'Jugo de Mora en Leche' with each word capitalized, "
+            "(d) apologizes or says 'lo siento' / 'no pude', or "
+            "(e) adds only one of the two items and ignores the other."
+        ),
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
 # LLM-as-judge scenario — prose quality check
 # ---------------------------------------------------------------------------
 

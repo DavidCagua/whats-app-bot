@@ -71,6 +71,17 @@ BIELA_CATALOG = {
     "PERRO_DENVER":_product("p-11", "Perro Caliente Denver", category="HOT DOGS", description="Perro caliente estilo Denver.", tags=["perro", "hot dog"], price=27000),
     "NIJABOU":     _product("p-12", "NIJABOU", category="BURGERS", description="Hamburguesa estilo japonés.", tags=["hamburguesa", "burger"]),
     "NAIROBI":     _product("p-13", "NAIROBI", category="BURGERS", description="Hamburguesa estilo africano.", tags=["hamburguesa", "burger"]),
+    # Beverage generics + siblings used by the generic-product-match tests.
+    # "Jugos en leche" and "Jugos en agua" are catalog-level rows that
+    # accept any flavor the kitchen stocks that day — the flavor is
+    # passed to the staff as a note on the cart item.
+    "JUGOS_LECHE": _product("p-14", "Jugos en leche", category="BEBIDAS", description="", tags=["bebida", "jugo"], price=7500),
+    "JUGOS_AGUA":  _product("p-15", "Jugos en agua", category="BEBIDAS", description="", tags=["bebida", "jugo"], price=7500),
+    "HERVIDO_MORA":_product("p-16", "Hervido Mora", category="BEBIDAS", description="Bebida caliente preparada con mora.", tags=["bebida", "caliente"], price=9500),
+    # Corona siblings used by the regression guard that protects the
+    # existing prefix-rival disambiguation behavior.
+    "CORONA":      _product("p-17", "Corona 355ml", category="BEBIDAS", description="", tags=["bebida", "cerveza"], price=12000),
+    "CORONA_MICH": _product("p-18", "Corona michelada", category="BEBIDAS", description="", tags=["bebida", "cerveza"], price=14500),
 }
 
 
@@ -373,3 +384,151 @@ class TestCategoryExistencePreCheck:
 
         mock_semantic.assert_called_once()
         assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — generic-product token-containment rule
+#
+# The Biela "jugo de mora en leche" transcript (wa_id +573242261188,
+# 2026-04-15) uncovered a class of query where the user is specifying
+# a flavor/variant of a generic catalog row. "Jugos en leche" is one
+# DB entry that the kitchen fulfills with whichever flavor is in stock
+# that day — the flavor ("mora") travels to the ticket as a note on
+# the cart item. Before this rule the search would return both
+# "Jugos en leche" and "Hervido Mora" as near-tied disambiguation
+# candidates, trapping the conversation in an infinite "which would
+# you like?" loop.
+# ---------------------------------------------------------------------------
+
+
+class TestGenericProductContainmentMatch:
+    """
+    The decisive token-containment rule: when the query has strictly
+    more content tokens than exactly one candidate, and that candidate's
+    tokens are all present in the query, the candidate wins with the
+    leftover tokens exposed as ``_derived_notes``.
+    """
+
+    def test_jugo_de_mora_en_leche_picks_generic_jugos_en_leche(self):
+        """
+        Regression for Biela +573242261188. Query:
+            "jugo de mora en leche"
+        Lexical returns the generic "Jugos en leche" + sibling
+        "Hervido Mora" (shares the 'mora' token, semantically close).
+        Expected: Jugos en leche wins decisively with
+        ``_derived_notes="mora"``. No AmbiguousProductError.
+        """
+        lexical = {
+            "JUGOS_LECHE":  BIELA_CATALOG["JUGOS_LECHE"],
+            "HERVIDO_MORA": BIELA_CATALOG["HERVIDO_MORA"],
+        }
+        semantic = {
+            "JUGOS_LECHE":  (BIELA_CATALOG["JUGOS_LECHE"], 0.82),
+            "HERVIDO_MORA": (BIELA_CATALOG["HERVIDO_MORA"], 0.79),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            results = product_search.search_products(
+                BUSINESS_ID, "jugo de mora en leche", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "Jugos en leche"
+        assert results[0].get("_derived_notes") == "mora"
+
+    def test_jugo_de_lulo_en_agua_picks_generic_jugos_en_agua(self):
+        """
+        Parallel case for the water-based variant. Query tokens
+        {jugo, lulo, agua} → candidate {jugos, agua} after stemming
+        normalizes jugo/jugos. Leftover is 'lulo'.
+        """
+        lexical = {
+            "JUGOS_AGUA":  BIELA_CATALOG["JUGOS_AGUA"],
+            "JUGOS_LECHE": BIELA_CATALOG["JUGOS_LECHE"],
+        }
+        semantic = {
+            "JUGOS_AGUA":  (BIELA_CATALOG["JUGOS_AGUA"], 0.80),
+            "JUGOS_LECHE": (BIELA_CATALOG["JUGOS_LECHE"], 0.65),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            results = product_search.search_products(
+                BUSINESS_ID, "jugo de lulo en agua", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "Jugos en agua"
+        assert results[0].get("_derived_notes") == "lulo"
+
+    def test_ambiguous_flavor_without_milk_or_water_still_disambiguates(self):
+        """
+        Negative: "jugo de mora" (no 'en leche'/'en agua' qualifier)
+        must NOT collapse to a single winner — both generic candidates
+        are viable, user genuinely needs to pick. Guard that our rule
+        only fires when exactly one candidate is a token subset.
+        """
+        lexical = {
+            "JUGOS_LECHE": BIELA_CATALOG["JUGOS_LECHE"],
+            "JUGOS_AGUA":  BIELA_CATALOG["JUGOS_AGUA"],
+        }
+        semantic = {
+            "JUGOS_LECHE": (BIELA_CATALOG["JUGOS_LECHE"], 0.80),
+            "JUGOS_AGUA":  (BIELA_CATALOG["JUGOS_AGUA"], 0.80),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            with pytest.raises(product_search.AmbiguousProductError):
+                product_search.search_products(
+                    BUSINESS_ID, "jugo de mora", unique=True,
+                )
+
+
+class TestCoronaStillDisambiguates:
+    """
+    Regression guard: the new generic-match rule must NOT break the
+    existing Corona / Corona michelada disambiguation. These three
+    tests pin the behavior that single-token queries like "corona" and
+    "soda" never collapse to a single winner when prefix-rival siblings
+    exist in the catalog.
+    """
+
+    def test_corona_query_alone_still_forces_disambiguation(self):
+        """
+        Query "corona" has 1 content token, Corona 355ml has 2
+        ("corona", "355ml"), Corona michelada has 2 ("corona",
+        "michelada"). The generic-match rule's "query has strictly
+        more tokens than the candidate" guard should stop the rule
+        from firing, and the existing prefix-rival logic should kick
+        in and raise AmbiguousProductError.
+        """
+        lexical = {
+            "CORONA":      BIELA_CATALOG["CORONA"],
+            "CORONA_MICH": BIELA_CATALOG["CORONA_MICH"],
+        }
+        semantic = {
+            "CORONA":      (BIELA_CATALOG["CORONA"], 0.78),
+            "CORONA_MICH": (BIELA_CATALOG["CORONA_MICH"], 0.77),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            with pytest.raises(product_search.AmbiguousProductError):
+                product_search.search_products(
+                    BUSINESS_ID, "corona", unique=True,
+                )
+
+    def test_corona_michelada_exact_name_still_wins(self):
+        """
+        Query "corona michelada" matches Corona michelada exactly.
+        The generic-match rule should never run here because an exact
+        name match fires first. Tests that the new rule is ordered
+        AFTER the exact-match short-circuit.
+        """
+        lexical = {
+            "CORONA":      BIELA_CATALOG["CORONA"],
+            "CORONA_MICH": BIELA_CATALOG["CORONA_MICH"],
+        }
+        semantic = {
+            "CORONA_MICH": (BIELA_CATALOG["CORONA_MICH"], 0.90),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            results = product_search.search_products(
+                BUSINESS_ID, "corona michelada", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "Corona michelada"
+        # No derived notes on an exact name match
+        assert "_derived_notes" not in results[0] or not results[0].get("_derived_notes")

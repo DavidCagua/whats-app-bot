@@ -823,8 +823,22 @@ def execute_order_intent(
                 return _internal_error_result(current_state, wa_id, business_id, "Tool add_to_cart no encontrada")
             cart_before = _get_cart_for_logging(wa_id, business_id)
 
+            # Track the FIRST AmbiguousProductError we see in a multi-item
+            # batch so we can ask the user to clarify after processing the
+            # rest. Used by the multi-item branch below.
+            multi_ambiguity: Optional[AmbiguousProductError] = None
+            multi_ambiguity_query: str = ""
+
             if isinstance(params.get("items"), list) and len(params["items"]) > 0:
-                # Multi-item add: skip duplicates, invoke once per item
+                # Multi-item add: skip duplicates, invoke once per item.
+                # We explicitly DO NOT re-raise AmbiguousProductError here —
+                # one ambiguous item in a batch shouldn't black-hole the
+                # rest. Instead we capture the first ambiguity, keep
+                # processing the remaining items, and at the end either
+                # ask for clarification (if nothing succeeded) or return a
+                # cart_change result carrying a pending_clarification field
+                # so the response generator can mention both: "agregué la
+                # soda; del jugo tengo estas opciones …".
                 existing_names = {_normalize_product_name(it.get("name") or "") for it in (cart_before.get("items") or [])}
                 for item in params["items"]:
                     if not isinstance(item, dict):
@@ -847,8 +861,19 @@ def execute_order_intent(
                     }
                     try:
                         tool_fn.invoke(args)
-                    except AmbiguousProductError:
-                        raise
+                    except AmbiguousProductError as amb_err:
+                        if multi_ambiguity is None:
+                            multi_ambiguity = amb_err
+                            multi_ambiguity_query = (
+                                (item.get("product_name") or "").strip()
+                                or (amb_err.query or "").strip()
+                            )
+                        logger.warning(
+                            "[ORDER_FLOW] multi-item: ambiguous item '%s' (%d matches); "
+                            "continuing with remaining items",
+                            item.get("product_name"),
+                            len(amb_err.matches or []),
+                        )
                     except Exception as e:
                         logger.exception("[ORDER_FLOW] add_to_cart item failed: %s", e)
             else:
@@ -904,6 +929,41 @@ def execute_order_intent(
                     {"order_context": {**order_tools._cart_from_session(wa_id, business_id), "state": ORDER_STATE_ORDERING}},
                 )
                 state_after = ORDER_STATE_ORDERING
+
+            # Multi-item batch: resolve the captured ambiguity (if any).
+            # Three cases:
+            #   1. Nothing succeeded + ambiguity captured → raise it so
+            #      the outer handler builds a full needs_clarification
+            #      result (same UX as a single-item ambiguous add).
+            #   2. Some items succeeded + ambiguity captured → return a
+            #      cart_change result carrying pending_clarification so
+            #      the response mentions both the partial success and
+            #      the open question. Pending disamb is persisted so the
+            #      next turn's planner can resolve the reply.
+            #   3. No ambiguity → normal cart_change result.
+            if multi_ambiguity is not None:
+                if cart_change["action"] == CART_ACTION_NOOP:
+                    raise multi_ambiguity
+                options = [
+                    {
+                        "name": m.get("name"),
+                        "price": float(m.get("price") or 0),
+                        "product_id": m.get("id") or m.get("product_id"),
+                    }
+                    for m in (multi_ambiguity.matches or [])
+                ]
+                _save_pending_disambiguation(
+                    wa_id, business_id, multi_ambiguity_query, options,
+                )
+                return _base_result(
+                    state_after, wa_id, business_id,
+                    RESULT_KIND_CART_CHANGE,
+                    cart_change=cart_change,
+                    pending_clarification={
+                        "requested_name": multi_ambiguity_query,
+                        "options": options,
+                    },
+                )
 
             return _base_result(
                 state_after, wa_id, business_id,

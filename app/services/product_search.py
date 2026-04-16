@@ -646,6 +646,78 @@ def search_products(
                     return [winner_prod]
                 # Fall through to disambiguation below.
 
+            # Decisive rule 1b: generic-product-with-qualifier match.
+            #
+            # When no exact-name winner fired and the query contains
+            # strictly MORE content tokens than exactly one candidate —
+            # and that candidate's tokens are all present in the query —
+            # the user is specifying a flavor/variant of a generic
+            # catalog entry. Example: Biela has "Jugos en leche" (one
+            # generic row covering every flavor the kitchen stocks) and
+            # the user types "jugo de mora en leche". The query stems
+            # {jug, mora, lech} contain every stem of "Jugos en leche"
+            # ({jug, lech}) plus one leftover ({mora}) — that leftover
+            # is the flavor the human at the restaurant will fulfill.
+            #
+            # We promote the generic candidate to decisive winner and
+            # attach the leftover original tokens as ``_derived_notes``
+            # on the returned product dict so the add_to_cart path can
+            # stash them on the cart item.
+            #
+            # Guard rails (all must hold, in this order):
+            #   1. No exact-name match fired above.
+            #   2. Query has STRICTLY more stemmed content tokens than
+            #      the candidate (so "corona" → "Corona" and the Corona
+            #      / Corona michelada prefix-rival case stay unaffected).
+            #   3. The candidate's stemmed tokens are a subset of the
+            #      query's stemmed tokens.
+            #   4. EXACTLY ONE candidate qualifies (otherwise we don't
+            #      know which generic the user meant — disambiguate).
+            #   5. The winner is in the top 5 by score (prevents a
+            #      low-ranked semantic surprise from hijacking the path).
+            if not exact_matches:
+                query_stem_set = set(s for s in stems if s)
+                subset_matches: List[Tuple[Dict[str, Any], List[str]]] = []
+                for _score, _exact, _has_lex, cand in scored:
+                    cand_name = cand.get("name") or ""
+                    cand_norm = _normalize(cand_name)
+                    cand_tokens = _tokenize(cand_norm)
+                    if not cand_tokens:
+                        continue
+                    cand_stems = [_stem(t) for t in cand_tokens if t]
+                    cand_stem_set = set(s for s in cand_stems if s)
+                    if not cand_stem_set:
+                        continue
+                    if len(query_stem_set) <= len(cand_stem_set):
+                        continue
+                    if cand_stem_set <= query_stem_set:
+                        subset_matches.append((cand, cand_stems))
+                if len(subset_matches) == 1:
+                    winner_prod, winner_stems = subset_matches[0]
+                    top5_ids = {
+                        scored[i][3].get("id")
+                        for i in range(min(5, len(scored)))
+                    }
+                    if winner_prod.get("id") in top5_ids:
+                        used = set(winner_stems)
+                        leftover_tokens: List[str] = []
+                        for tok, st in zip(tokens, stems):
+                            if st and st not in used:
+                                leftover_tokens.append(tok)
+                                used.add(st)
+                        # Copy the product dict so we don't mutate any
+                        # shared cache entry with per-call metadata.
+                        result_prod = dict(winner_prod)
+                        if leftover_tokens:
+                            result_prod["_derived_notes"] = " ".join(leftover_tokens)
+                        logger.info(
+                            "[PRODUCT_SEARCH] generic-match: query=%r winner=%r derived_notes=%r",
+                            query,
+                            result_prod.get("name"),
+                            result_prod.get("_derived_notes") or "",
+                        )
+                        return [result_prod]
+
             if len(scored) == 1:
                 return [scored[0][3]]
 

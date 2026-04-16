@@ -252,6 +252,11 @@ class OrderAgent(BaseAgent):
                 "- PROHIBIDO: 'no se pudo', 'no pude', 'error', 'problema', 'disculpa', 'lo siento', 'falló'.\n"
                 "- PROHIBIDO: 'agregué', 'listo', 'ya está', 'añadí' — el pedido NO cambió.\n"
                 "- NO repitas el resumen del pedido actual.\n"
+                "- PROHIBIDO ABSOLUTO: inventar, traducir, especializar, o combinar los nombres de "
+                "la lista con lo que el cliente pidió. Por ejemplo, si la lista dice 'Jugos en leche' "
+                "y el cliente pidió 'jugo de mora en leche', la opción que muestras se llama "
+                "'Jugos en leche' — NUNCA la llames 'Jugo de Mora en Leche' ni similar. Copia los "
+                "nombres exactamente como aparecen en la lista, con mayúsculas y acentos idénticos.\n"
                 "- Usa SOLO los nombres y precios de la lista, exactos.\n"
                 "- 1-3 líneas total."
             )
@@ -432,13 +437,53 @@ class OrderAgent(BaseAgent):
                 situation = "Cambio en el pedido."
                 change_desc = f"Actualizado:\n{fmt_items(updated) or fmt_items(added) or fmt_items(removed)}"
 
+            pending_clarification = exec_result.get("pending_clarification") or {}
+            pending_options = pending_clarification.get("options") or []
+            pending_requested = pending_clarification.get("requested_name") or ""
+
+            if pending_options:
+                # Multi-item batch: some items were added, but one item
+                # in the same message was ambiguous. The response must
+                # confirm the partial success AND ask the open question,
+                # using the exact option names from the catalog (no
+                # hallucinated names).
+                opts_lines = "\n".join(
+                    f"- {o.get('name')} ({money(o.get('price'))})" for o in pending_options
+                )
+                system = base_system + (
+                    f"\n\nSITUACIÓN: {situation} PERO uno de los productos que el cliente pidió "
+                    "tiene varias variantes y necesitas que elija cuál quiere antes de agregarlo.\n"
+                    "REGLAS:\n"
+                    "- Primero confirma brevemente lo que SÍ se agregó (está en 'Cambio realizado').\n"
+                    "- Luego, en la misma respuesta, pregunta por el producto que quedó pendiente "
+                    f"(lo pidió como '{pending_requested or 'ese producto'}') y lista las opciones.\n"
+                    "- PROHIBIDO ABSOLUTO: inventar, traducir, especializar o combinar los nombres "
+                    "de las opciones con lo que el cliente pidió. Copia los nombres de las opciones "
+                    "EXACTAMENTE como aparecen (mayúsculas y acentos idénticos).\n"
+                    "- No digas 'error', 'no pude', 'lo siento' — es una pregunta normal.\n"
+                    "- NO sugieras proceder con el pedido todavía: falta resolver la duda.\n"
+                    "- 3-6 líneas total."
+                )
+                inp = (
+                    f"Cliente dijo: {message_body}\n"
+                    f"Cambio realizado:\n{change_desc}\n"
+                    f"Pedido actual:\n{cart_lines}\n"
+                    f"Subtotal: {money(total_after)}\n"
+                    f"Producto pendiente de aclarar: {pending_requested}\n"
+                    f"Opciones disponibles (usa exactamente estos nombres y precios):\n{opts_lines}"
+                )
+                return system, inp
+
             system = base_system + (
                 f"\n\nSITUACIÓN: {situation}\n"
                 "REGLAS:\n"
                 "- Confirma brevemente el cambio que hizo el backend (está en 'Cambio realizado').\n"
-                "- Muestra el resumen del pedido actual.\n"
+                "- Muestra el resumen del pedido actual usando los nombres EXACTOS de la lista "
+                "'Pedido actual' que te doy. Copia el nombre del producto tal cual aparece "
+                "(con mayúsculas, acentos y notas entre paréntesis). NO los reemplaces por las "
+                "palabras que usó el cliente en su mensaje.\n"
                 "- Sugiere el siguiente paso: preguntar si quiere agregar algo más (ej. bebida si no tiene una) o procedemos con el pedido.\n"
-                "- NO inventes productos ni precios — usa solo los datos dados.\n"
+                "- NO inventes productos, nombres, variantes, ni precios — usa solo los datos dados.\n"
                 "- 2-5 líneas."
             )
             inp = (

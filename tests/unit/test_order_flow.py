@@ -408,3 +408,192 @@ class TestIntentToolMapping:
     # Case: INTENT_LIST_PRODUCTS maps to "list_category_products" with category param
     # Case: INTENT_SEARCH_PRODUCTS maps to "search_products" with query param
     # Case: Unknown intent → returns error "no mapeado a herramienta"
+
+
+# ---------------------------------------------------------------------------
+# Multi-item ADD_TO_CART fault tolerance
+#
+# Regression for the Biela transcript (wa_id +573242261188, 2026-04-15):
+# "Dame 1 jugo de mora en leche y 1 soda de frutos rojos". The planner
+# emitted both items, but the executor's multi-item loop re-raised
+# AmbiguousProductError on the first item and never processed the
+# second — the soda was silently lost.
+#
+# New contract:
+# - If ONE item in the batch is ambiguous and others succeed, the cart
+#   keeps the successful adds, the ambiguity is persisted as
+#   pending_disambiguation, and the result carries a
+#   pending_clarification extra so the response generator can mention
+#   both the partial success and the open question.
+# - If nothing succeeds (every item was ambiguous or only one item was
+#   passed and it was ambiguous), fall back to the old behavior: raise
+#   out to the outer handler which builds a needs_clarification result.
+# ---------------------------------------------------------------------------
+
+
+class TestMultiItemAddToCartFaultTolerance:
+    """Regression tests for the multi-item executor loop resilience."""
+
+    @staticmethod
+    def _seed_empty_ordering(fake_session, wa_id, business_id):
+        fake_session.save(
+            wa_id, business_id,
+            {"order_context": {
+                "items": [],
+                "total": 0,
+                "state": ORDER_STATE_ORDERING,
+            }},
+        )
+        return fake_session.load(wa_id, business_id)["session"]
+
+    def test_first_item_ambiguous_second_item_exact_still_adds_second(
+        self, fake_session, wa_id, business_context,
+    ):
+        """
+        Two-item batch: first item is ambiguous (Biela "jugo de mora en
+        leche" before Fix B would hit this shape; we simulate by making
+        the add_to_cart mock raise for that name), second is an exact
+        match. Expected: cart ends with the second item, disambiguation
+        is persisted for the first, and the result_kind is cart_change
+        carrying pending_clarification.
+        """
+        from app.database.product_order_service import AmbiguousProductError
+        business_id = business_context["business_id"]
+        session = self._seed_empty_ordering(fake_session, wa_id, business_id)
+
+        ambiguous_matches = [
+            {"id": "p-jleche", "name": "Jugos en leche", "price": 7500},
+            {"id": "p-jagua",  "name": "Jugos en agua",  "price": 7500},
+        ]
+
+        add_invocations: list = []
+
+        def _add_side_effect(args):
+            add_invocations.append(args)
+            name = (args.get("product_name") or "").lower()
+            if "jugo" in name:
+                raise AmbiguousProductError(query="jugo", matches=ambiguous_matches)
+            # Anything else "succeeds" (tool would normally mutate session)
+            return None
+
+        add_tool = MagicMock()
+        add_tool.invoke.side_effect = _add_side_effect
+
+        def _find_tool_mock(name):
+            return {"add_to_cart": add_tool}.get(name)
+
+        # Capture the pending_disambiguation that gets persisted via
+        # session_state_service.save during the multi-item loop.
+        saved_pending: dict = {}
+        original_save = fake_session.save
+        def _capture_save(wa, biz, update):
+            oc = (update or {}).get("order_context") or {}
+            if "pending_disambiguation" in oc:
+                saved_pending.update(oc["pending_disambiguation"])
+            return original_save(wa, biz, update)
+
+        with patch("app.orchestration.order_flow.session_state_service") as sss, \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", side_effect=_find_tool_mock), \
+             patch("app.orchestration.order_flow._get_cart_for_logging") as mock_cart_log, \
+             patch("app.orchestration.order_flow._build_cart_change",
+                   return_value={"action": "added",
+                                 "added": [{"name": "Soda Frutos rojos", "quantity": 1}],
+                                 "removed": [], "updated": [], "cart_after": [],
+                                 "total_after": 15000}), \
+             patch("app.orchestration.order_flow._clear_pending_disambiguation"):
+            sss.load = fake_session.load
+            sss.save = _capture_save
+            mock_tools._cart_from_session.return_value = {
+                "items": [{"product_id": "p-soda-fr", "name": "Soda Frutos rojos", "quantity": 1, "price": 15000}],
+                "total": 15000,
+            }
+            mock_cart_log.side_effect = [
+                {"items": [], "total": 0},                                             # cart_before
+                {"items": [{"name": "Soda Frutos rojos", "quantity": 1}], "total": 15000},  # cart_after
+            ]
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_ADD_TO_CART,
+                params={"items": [
+                    {"product_name": "jugo de mora en leche", "quantity": 1},
+                    {"product_name": "Soda Frutos rojos",     "quantity": 1},
+                ]},
+            )
+
+        # Both items were attempted (ambiguous first did NOT black-hole the second)
+        attempted_names = [a.get("product_name") for a in add_invocations]
+        assert "jugo de mora en leche" in attempted_names
+        assert "Soda Frutos rojos" in attempted_names
+
+        # cart_change came through (soda succeeded) with a pending_clarification
+        # extra so the response generator can confirm + ask in one message.
+        assert result["success"] is True
+        assert result["result_kind"] == "cart_change"
+        pending = result.get("pending_clarification") or {}
+        option_names = [o.get("name") for o in (pending.get("options") or [])]
+        assert "Jugos en leche" in option_names
+        assert "Jugos en agua" in option_names
+        assert pending.get("requested_name") == "jugo de mora en leche"
+
+        # Pending disambiguation was persisted for the next-turn bypass resolver.
+        assert [o.get("name") for o in saved_pending.get("options") or []] == [
+            "Jugos en leche", "Jugos en agua",
+        ]
+
+    def test_all_items_ambiguous_falls_back_to_needs_clarification(
+        self, fake_session, wa_id, business_context,
+    ):
+        """
+        Two-item batch where EVERY item is ambiguous. Nothing succeeds,
+        so the executor re-raises the first ambiguity and the outer
+        handler builds a standard needs_clarification result. Guards
+        the "at least one success" contract from above.
+        """
+        from app.database.product_order_service import AmbiguousProductError
+        business_id = business_context["business_id"]
+        session = self._seed_empty_ordering(fake_session, wa_id, business_id)
+
+        add_tool = MagicMock()
+        add_tool.invoke = MagicMock(side_effect=AmbiguousProductError(
+            query="jugo",
+            matches=[
+                {"id": "p-jleche", "name": "Jugos en leche", "price": 7500},
+                {"id": "p-jagua",  "name": "Jugos en agua",  "price": 7500},
+            ],
+        ))
+
+        def _find_tool_mock(name):
+            return {"add_to_cart": add_tool}.get(name)
+
+        with patch("app.orchestration.order_flow.session_state_service", fake_session), \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", side_effect=_find_tool_mock), \
+             patch("app.orchestration.order_flow._get_cart_for_logging",
+                   return_value={"items": [], "total": 0}), \
+             patch("app.orchestration.order_flow._build_cart_change",
+                   return_value={"action": "noop", "added": [], "removed": [],
+                                 "updated": [], "cart_after": [], "total_after": 0}), \
+             patch("app.orchestration.order_flow._clear_pending_disambiguation"):
+            mock_tools._cart_from_session.return_value = {"items": [], "total": 0}
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_ADD_TO_CART,
+                params={"items": [
+                    {"product_name": "jugo de mora",   "quantity": 1},
+                    {"product_name": "jugo de lulo",   "quantity": 1},
+                ]},
+            )
+
+        # Both items tried; both raised. Outer handler builds the
+        # needs_clarification result from the FIRST ambiguity.
+        assert result["result_kind"] == "needs_clarification"
+        assert add_tool.invoke.call_count == 2
