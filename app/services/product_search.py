@@ -80,6 +80,11 @@ Rules:
 - "jugo" (juice) ≠ "hervido" (hot fruit drink). They are different product categories.
 - "soda" (Italian soda) ≠ "gaseosa" / "Coca-Cola". Different product types.
 - Generic products like "Jugos en leche" accept any flavor — the flavor goes in "notes".
+- CRITICAL: when two or more candidates differ only by a sub-type the customer did NOT specify
+  (water vs milk, size, color, material), ALWAYS return FILTERED — never auto-pick a default.
+  Example: query "jugo de mora" with candidates [Jugos en agua, Jugos en leche] → the customer
+  did NOT say water or milk, so return FILTERED with both. Do NOT guess that "jugo" defaults to
+  "en agua". The customer must choose.
 - Respond ONLY with valid JSON, no markdown, no explanation.
 
 Response format — exactly one of:
