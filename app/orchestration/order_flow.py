@@ -21,7 +21,11 @@ from ..database.session_state_service import (
     ORDER_STATE_READY_TO_PLACE,
 )
 from ..database.customer_service import customer_service
-from ..database.product_order_service import product_order_service, AmbiguousProductError
+from ..database.product_order_service import (
+    product_order_service,
+    AmbiguousProductError,
+    ProductNotFoundError,
+)
 from ..services import order_tools
 from ..services import catalog_cache
 from . import turn_cache
@@ -823,11 +827,13 @@ def execute_order_intent(
                 return _internal_error_result(current_state, wa_id, business_id, "Tool add_to_cart no encontrada")
             cart_before = _get_cart_for_logging(wa_id, business_id)
 
-            # Track the FIRST AmbiguousProductError we see in a multi-item
-            # batch so we can ask the user to clarify after processing the
-            # rest. Used by the multi-item branch below.
+            # Track per-item failures in a multi-item batch so we can
+            # ask the user to clarify / flag missing items after processing
+            # the rest. Both lists survive the loop and are consumed by
+            # the post-loop branching below.
             multi_ambiguity: Optional[AmbiguousProductError] = None
             multi_ambiguity_query: str = ""
+            multi_not_found: List[str] = []
 
             if isinstance(params.get("items"), list) and len(params["items"]) > 0:
                 # Multi-item add: skip duplicates, invoke once per item.
@@ -873,6 +879,14 @@ def execute_order_intent(
                             "continuing with remaining items",
                             item.get("product_name"),
                             len(amb_err.matches or []),
+                        )
+                    except ProductNotFoundError as nf_err:
+                        label = (item.get("product_name") or "").strip() or (nf_err.query or "")
+                        if label:
+                            multi_not_found.append(label)
+                        logger.warning(
+                            "[ORDER_FLOW] multi-item: item '%s' not found; continuing",
+                            item.get("product_name"),
                         )
                     except Exception as e:
                         logger.exception("[ORDER_FLOW] add_to_cart item failed: %s", e)
@@ -930,19 +944,35 @@ def execute_order_intent(
                 )
                 state_after = ORDER_STATE_ORDERING
 
-            # Multi-item batch: resolve the captured ambiguity (if any).
-            # Three cases:
-            #   1. Nothing succeeded + ambiguity captured → raise it so
-            #      the outer handler builds a full needs_clarification
-            #      result (same UX as a single-item ambiguous add).
-            #   2. Some items succeeded + ambiguity captured → return a
+            # Multi-item batch: resolve captured per-item failures.
+            # Cases (precedence top → bottom):
+            #   1. Nothing succeeded + ambiguity captured → raise the
+            #      ambiguity so the outer handler builds a full
+            #      needs_clarification result (same UX as single-item).
+            #      If ``multi_not_found`` is ALSO populated, we mention
+            #      it in the disamb result via the new not_found extra.
+            #   2. Nothing succeeded + only not-found captured → raise
+            #      a ProductNotFoundError (with a combined query) so
+            #      the outer handler builds a user_error result telling
+            #      the user which items weren't found.
+            #   3. Some items succeeded + ambiguity captured → return a
             #      cart_change result carrying pending_clarification so
             #      the response mentions both the partial success and
             #      the open question. Pending disamb is persisted so the
-            #      next turn's planner can resolve the reply.
-            #   3. No ambiguity → normal cart_change result.
+            #      next turn's planner can resolve the reply. Any
+            #      not_found items ride along as a sibling extra.
+            #   4. Some items succeeded + only not-found captured →
+            #      return a cart_change result carrying not_found so
+            #      the response confirms what landed and flags what
+            #      didn't.
+            #   5. No failures → normal cart_change result.
+            batch_failed = cart_change["action"] == CART_ACTION_NOOP
             if multi_ambiguity is not None:
-                if cart_change["action"] == CART_ACTION_NOOP:
+                if batch_failed:
+                    # Nothing to confirm — fall through to the outer
+                    # handler which builds a clean needs_clarification
+                    # result. (not_found items are dropped in this case
+                    # because disamb is the blocking question.)
                     raise multi_ambiguity
                 options = [
                     {
@@ -955,14 +985,34 @@ def execute_order_intent(
                 _save_pending_disambiguation(
                     wa_id, business_id, multi_ambiguity_query, options,
                 )
+                extras: Dict[str, Any] = {
+                    "cart_change": cart_change,
+                    "pending_clarification": {
+                        "requested_name": multi_ambiguity_query,
+                        "options": options,
+                    },
+                }
+                if multi_not_found:
+                    extras["not_found"] = list(multi_not_found)
+                return _base_result(
+                    state_after, wa_id, business_id,
+                    RESULT_KIND_CART_CHANGE,
+                    **extras,
+                )
+
+            if multi_not_found:
+                if batch_failed:
+                    # Nothing succeeded and every failure was "not found".
+                    # Raise so the outer handler turns it into a user_error
+                    # result with a clear "no encontré …" message.
+                    raise ProductNotFoundError(
+                        query=", ".join(multi_not_found)
+                    )
                 return _base_result(
                     state_after, wa_id, business_id,
                     RESULT_KIND_CART_CHANGE,
                     cart_change=cart_change,
-                    pending_clarification={
-                        "requested_name": multi_ambiguity_query,
-                        "options": options,
-                    },
+                    not_found=list(multi_not_found),
                 )
 
             return _base_result(
@@ -1252,6 +1302,17 @@ def execute_order_intent(
             current_state, wa_id, business_id,
             requested_name or "ese producto",
             e.matches or [],
+        )
+    except ProductNotFoundError as nf_e:
+        # Single-item (or all-not-found multi-item re-raise) path:
+        # render as a user_error with a clear "no encontré X" message.
+        # The response generator's USER_ERROR branch picks this up and
+        # invites the customer to try another product or see the menu.
+        missing = (nf_e.query or "").strip() or "ese producto"
+        logger.warning("[ORDER_FLOW] product not found: %r", missing)
+        return _user_error_result(
+            current_state, wa_id, business_id,
+            f"No encontré '{missing}' en el menú. ¿Quieres ver las categorías o intentar con otro nombre?",
         )
     except Exception as e:
         logger.exception("[ORDER_FLOW] Intent %s failed: %s", intent, e)

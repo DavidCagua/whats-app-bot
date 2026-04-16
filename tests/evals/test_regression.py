@@ -507,6 +507,203 @@ def test_biela_jugo_mora_en_leche_plus_soda_multi_item():
 
 
 # ---------------------------------------------------------------------------
+# Biela +573177000722 — disambiguation reply with flavor qualifier
+#
+# Incident 2026-04-16. After turn 3 offered [Hervido Mora, Jugos en agua,
+# Jugos en leche], the user replied "Un jugo de mora en agua". The
+# planner mapped to 'Jugos en agua' but stripped the 'mora' qualifier,
+# adding the item to the cart without a note — the flavor disappeared.
+# Fix: deterministic `apply_disamb_reply_flavor_fallback` re-attaches
+# qualifier tokens as `notes`.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_disamb_reply_preserves_flavor_as_notes():
+    """
+    End-to-end: seed a pending disambiguation for 'jugo de mora' with
+    the three real Biela options. User replies 'Un jugo de mora en agua'.
+    Cart must end with 'Jugos en agua (mora)' — note travels through the
+    planner's safety-net post-processor and lands on the cart item.
+    """
+    JUGOS_EN_AGUA = {
+        "id": "prod-jugos-agua",
+        "business_id": "44488756-473b-46d2-a907-9f579e98ecfd",
+        "name": "Jugos en agua",
+        "description": "",
+        "price": 7500.0,
+        "currency": "COP",
+        "category": "BEBIDAS",
+        "sku": None,
+        "is_active": True,
+        "tags": ["jugo", "bebida"],
+        "metadata": {},
+        "matched_by": "exact",
+    }
+    JUGOS_EN_LECHE = {
+        **JUGOS_EN_AGUA,
+        "id": "prod-jugos-leche",
+        "name": "Jugos en leche",
+        "tags": ["jugo", "bebida", "leche"],
+    }
+    HERVIDO_MORA = {
+        **JUGOS_EN_AGUA,
+        "id": "prod-hervido-mora",
+        "name": "Hervido Mora",
+        "price": 9500.0,
+        "tags": ["hervido", "mora", "caliente"],
+    }
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        # When the planner (or fallback) emits the exact option name,
+        # return just that exact row.
+        if "jugos en agua" in q and "leche" not in q:
+            return [JUGOS_EN_AGUA]
+        if "jugos en leche" in q:
+            return [JUGOS_EN_LECHE]
+        if "hervido" in q and "mora" in q:
+            return [HERVIDO_MORA]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_disamb_reply_preserves_flavor",
+        user_message="Un jugo de mora en agua",
+        initial_order_context={
+            "state": "ORDERING",
+            "items": [{"product_id": "prod-barracuda", "name": "BARRACUDA", "quantity": 1, "price": 28000}],
+            "total": 28000,
+            "pending_disambiguation": {
+                "requested_name": "jugo de mora",
+                "options": [
+                    {"name": "Hervido Mora",  "price": 9500,  "product_id": "prod-hervido-mora"},
+                    {"name": "Jugos en agua", "price": 7500,  "product_id": "prod-jugos-agua"},
+                    {"name": "Jugos en leche","price": 7500,  "product_id": "prod-jugos-leche"},
+                ],
+            },
+        },
+        # Pre-populate the fake service's id→product index so the
+        # disamb bypass's get_product(product_id="prod-jugos-agua")
+        # call returns the real row instead of None.
+        known_products=[JUGOS_EN_AGUA, JUGOS_EN_LECHE, HERVIDO_MORA],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        must_contain_any=[
+            # Cart line must show the mora flavor as a note on Jugos en agua
+            r"jugos? en agua.*\(mora\)",
+            r"jugos? en agua.*mora",
+        ],
+        must_not_contain=[
+            # Silent flavor loss — the exact regression we're pinning
+            r"hervido mora",
+            r"\blo siento\b",
+            r"\bno pude\b",
+        ],
+        llm_judge_rubric=(
+            "The user is replying to a disambiguation prompt. The "
+            "options were 'Hervido Mora', 'Jugos en agua', 'Jugos en "
+            "leche'. The user said 'Un jugo de mora en agua'. The "
+            "correct interpretation is: the user picked 'Jugos en "
+            "agua' (a generic catalog row) AND wants the flavor "
+            "'mora' as a note on that item — the kitchen at Biela "
+            "handles which fruits are actually in stock. "
+            "The reply PASSES if it confirms that 'Jugos en agua' "
+            "was added to the cart AND mentions the mora flavor "
+            "(parenthetical '(mora)', 'con mora', 'sabor mora', etc). "
+            "The reply FAILS if it: "
+            "(a) drops the mora flavor silently, "
+            "(b) offers Hervido Mora as an alternative, "
+            "(c) re-asks the disambiguation question, "
+            "(d) apologizes / says 'lo siento' / 'no pude'."
+        ),
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
+# Biela — sad-path multi-item with one unmatchable product
+#
+# Regression for Bug 2 in the +573177000722 transcript: user said
+# "Un jugo de mango en leche y una club Colombia". There's no mango
+# product in the Biela catalog at all (not even as a generic; the
+# kitchen fulfills flavors via the generic 'Jugos en leche' row, but
+# the search path only surfaces that when a qualifier is provided
+# cleanly). Before Fix A+B the jugo was silently dropped and only
+# Club Colombia landed in the cart, with zero mention in the response.
+# After the fix, add_to_cart raises ProductNotFoundError and the
+# multi-item executor surfaces it via the `not_found` extra.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_multi_item_one_not_found_surfaces_in_response():
+    """
+    Two-item batch: Club Colombia is an exact match, pitahaya jugo
+    has no catalog row (truly unavailable). The response must confirm
+    the Club Colombia landed AND tell the user the pitahaya couldn't
+    be found — never silently drop it.
+    """
+    CLUB_COLOMBIA = {
+        "id": "prod-club",
+        "business_id": "44488756-473b-46d2-a907-9f579e98ecfd",
+        "name": "Club Colombia",
+        "description": "",
+        "price": 7500.0,
+        "currency": "COP",
+        "category": "BEBIDAS",
+        "sku": None,
+        "is_active": True,
+        "tags": ["cerveza"],
+        "metadata": {},
+        "matched_by": "exact",
+    }
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        if "club" in q:
+            return [CLUB_COLOMBIA]
+        # pitahaya has no match — search returns empty and add_to_cart
+        # raises ProductNotFoundError
+        return []
+
+    scenario = AgentScenario(
+        name="biela_multi_item_one_not_found",
+        user_message="Un jugo de pitahaya y una Club Colombia",
+        initial_order_context={"state": "ORDERING", "items": [], "total": 0},
+        known_products=[CLUB_COLOMBIA],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        must_contain_any=[
+            # Club Colombia lands in the cart
+            r"club colombia",
+        ],
+        must_not_contain=[
+            # Don't silently drop the pitahaya; don't apologize
+            r"\blo siento\b",
+            r"\bdiscul",
+            r"\bfall[oó]\b",
+        ],
+        llm_judge_rubric=(
+            "The customer asked for two items: 'un jugo de pitahaya' "
+            "(not in the menu — Biela has no pitahaya) and 'una Club "
+            "Colombia' (in the menu, exact match at $7.500). "
+            "The reply PASSES if it: "
+            "(1) confirms Club Colombia was added to the cart, AND "
+            "(2) mentions that the pitahaya wasn't found / isn't on "
+            "the menu (may suggest seeing the menu or trying a "
+            "different flavor). "
+            "The reply FAILS if it: "
+            "(a) doesn't mention the pitahaya at all (silent drop), "
+            "(b) apologizes or uses 'lo siento' / 'disculpa' / "
+            "'no pude', "
+            "(c) claims the pitahaya WAS added, "
+            "(d) forgets about the Club Colombia."
+        ),
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
 # LLM-as-judge scenario — prose quality check
 # ---------------------------------------------------------------------------
 

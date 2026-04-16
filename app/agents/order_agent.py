@@ -18,6 +18,7 @@ from .base_agent import BaseAgent, AgentOutput
 from ..services.order_tools import order_tools
 from ..orchestration.order_flow import (
     execute_order_intent,
+    INTENT_ADD_TO_CART,
     INTENT_CHAT,
     INTENT_GREET,
     INTENT_CONFIRM,
@@ -64,8 +65,10 @@ Otras reglas:
 - Si el usuario expresa intención de pedir u ordenar SIN nombrar ningún producto específico (ej. "para un domicilio", "quiero pedir", "quiero hacer un pedido", "buenas, un domicilio por favor", "me pueden atender"): usa CHAT. El usuario probablemente ya sabe qué quiere; solo invítalo a decir su pedido. NO uses ADD_TO_CART, SEARCH_PRODUCTS ni GET_MENU_CATEGORIES porque no hay producto ni pregunta por el menú. IMPORTANTE: esta regla aplica SOLO si no hay productos nombrados — si hay aunque sea un producto, gana la regla de prioridad de arriba.
 - Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}. Ejemplo saludo + pedido multi-producto: "hola buenas un domicilio por favor, 2 betas, 1 barracuda, 1 biela fries" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "BETA", "quantity": 2}}, {{"product_name": "BARRACUDA", "quantity": 1}}, {{"product_name": "BIELA FRIES", "quantity": 1}}]}}}}. Ejemplo con saltos de línea: "hola buenas tardes un domicilio por favor\\n2 betas\\n1 barracuda\\n1 biela fries" → mismo resultado (los saltos de línea son solo formato).
 - MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al pedido (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en el pedido y "notes" con la instrucción. Ejemplo: pedido tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente.
+- AÑADIR una nota / sabor / detalle a un producto YA en el pedido (ej. "el jugo también es de mora", "el jugo en agua es de lulo", "al jugo en leche agrégale mango", "hazlo de mango"): usa UPDATE_CART_ITEM con "product_name" del producto ACTUAL en el carrito y "notes" igual al nuevo detalle (ej. "mora", "lulo", "mango"). NO lo confundas con un nuevo pedido — el cliente está describiendo el producto existente, no ordenando otro. Ejemplo: carrito tiene 'Jugos en agua' y cliente dice "el jugo en agua también es de mora" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Jugos en agua", "notes": "mora"}}}}.
 - REEMPLAZO POR VARIANTE / SABOR / TIPO de un producto YA en el pedido (ej. "la soda que sea de frutos rojos", "mejor la hamburguesa doble", "cámbiala por la de pollo", "que sea la Corona", "la cerveza que sea Poker"): usa UPDATE_CART_ITEM con "product_name" = nombre del producto ACTUAL en el carrito, y "new_product_name" = nombre completo del producto NUEVO combinando el nombre actual con la variante. Ejemplo: carrito tiene "Soda" y usuario dice "la soda que sea de frutos rojos" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Soda", "new_product_name": "Soda Frutos rojos"}}}}. Ejemplo: carrito tiene "Michelada" y usuario dice "que sea con Corona" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Michelada", "new_product_name": "Corona michelada"}}}}. Distingue de `notes`: usa `notes` SOLO para exclusiones/añadidos de ingredientes (ej. "sin morcilla", "extra salsa"), NUNCA para elegir otra variante del producto. NUNCA uses ADD_TO_CART para un reemplazo: UPDATE_CART_ITEM con new_product_name maneja la sustitución atómica.
 - Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
+- Si pregunta por el ESTADO DE SU PEDIDO — no por el menú — usa VIEW_CART sin params. Frases típicas: "¿qué tengo en mi pedido?", "¿qué hay en mi pedido?", "cómo va mi pedido", "mi orden", "qué llevo", "qué he pedido", "muéstrame mi pedido", "ver mi pedido", "mi carrito", "cómo quedó mi pedido". NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar qué tiene el restaurante, VIEW_CART es para revisar lo que el cliente ya agregó al pedido.
 - CONFIRMACIÓN (regla única, muy importante): si el mensaje del usuario es una confirmación pura — "listo", "procedamos", "procedemos", "confirmar", "confirmo", "dale", "sí", "si", "ok", "okay", "perfecto", "ya", "vale", "de acuerdo" — SIN nombrar producto, dirección, teléfono ni medio de pago, usa SIEMPRE `{{"intent": "CONFIRM", "params": {{}}}}`. No decidas tú si significa "proceder al checkout" o "colocar el pedido": el backend lo resuelve según el estado actual. NUNCA uses PROCEED_TO_CHECKOUT ni PLACE_ORDER directamente para palabras de confirmación. Si además de confirmar el usuario provee datos de entrega (ej. "listo, mi dirección es calle 1"), usa SUBMIT_DELIVERY_INFO con los datos, no CONFIRM.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY) y el usuario PROVEE datos: usa SUBMIT_DELIVERY_INFO con uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}. Si solo necesitas saber qué falta (sin que el usuario haya dado nada nuevo), usa GET_CUSTOMER_INFO.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
@@ -154,6 +157,138 @@ def _format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
     if not parts:
         return "Información del negocio: (no configurada)."
     return "Información del negocio:\n" + "\n".join(parts)
+
+
+def build_pending_disambiguation_prompt_block(pending: Optional[Dict[str, Any]]) -> str:
+    """
+    Build the "CONTEXTO DE ACLARACIÓN PENDIENTE" block appended to the
+    planner system prompt when a pending disambiguation is active.
+
+    Extracted from OrderAgent.execute so integration tests (and any
+    future caller) use exactly the same text — otherwise the test
+    helper's hand-rolled copy drifts from production.
+
+    Returns an empty string when there's no active pending
+    disambiguation or no options to offer.
+    """
+    if not pending or not pending.get("options"):
+        return ""
+    opts_lines = "\n".join(
+        f"  - {o.get('name')} (${int(o.get('price') or 0):,})".replace(",", ".")
+        for o in pending.get("options", [])
+    )
+    return (
+        "\n\nCONTEXTO DE ACLARACIÓN PENDIENTE: En tu turno ANTERIOR ofreciste al cliente "
+        f"estas opciones porque preguntó por \"{pending.get('requested_name', '')}\":\n"
+        f"{opts_lines}\n"
+        "\n"
+        "REGLA 1 — MAPEO A OPCIÓN: si el mensaje actual del cliente es una elección "
+        "(ej. 'la normal', 'la primera', 'la barata', 'dame la Corona', 'la michelada', "
+        "'un jugo en agua', 'el de leche', un nombre o un número), mapea su respuesta "
+        "a UNA de estas opciones y clasifícalo como ADD_TO_CART con product_name EXACTO "
+        "de la opción elegida. Ejemplos: 'la normal' → la opción SIN modificador "
+        "(ej. \"Michelada\" no \"Corona michelada\"); 'la primera' → la primera de la "
+        "lista; 'la más barata' → la de menor precio.\n"
+        "\n"
+        "REGLA 2 — PRESERVAR SABOR / INGREDIENTE / DETALLE (MUY IMPORTANTE): si además "
+        "del mapeo de REGLA 1 el cliente menciona un sabor, fruta, ingrediente, color, "
+        "tamaño, o cualquier calificador que NO forma parte del nombre de la opción "
+        "elegida, incluye ese calificador en el campo `notes` del ADD_TO_CART. "
+        "NUNCA lo borres. Aplica incluso si el nombre de la opción parece cubrir "
+        "todos los sabores (ej. 'Jugos en agua' es una fila genérica del catálogo; "
+        "el sabor va como nota).\n"
+        "\n"
+        "Ejemplos obligatorios de REGLA 2 (úsalos como referencia exacta):\n"
+        "  • Opciones: Jugos en agua, Jugos en leche, Hervido Mora\n"
+        "    Cliente dice: 'un jugo de mora en agua'\n"
+        "    → {\"intent\":\"ADD_TO_CART\",\"params\":{\"product_name\":\"Jugos en agua\",\"notes\":\"mora\"}}\n"
+        "  • Opciones: Jugos en agua, Jugos en leche\n"
+        "    Cliente dice: 'dame uno de mango en leche'\n"
+        "    → {\"intent\":\"ADD_TO_CART\",\"params\":{\"product_name\":\"Jugos en leche\",\"notes\":\"mango\"}}\n"
+        "  • Opciones: Jugos en agua, Jugos en leche\n"
+        "    Cliente dice: 'el de lulo en agua por favor'\n"
+        "    → {\"intent\":\"ADD_TO_CART\",\"params\":{\"product_name\":\"Jugos en agua\",\"notes\":\"lulo\"}}\n"
+        "\n"
+        "Contraejemplos (REGLA 2 NO aplica):\n"
+        "  • Cliente dice 'el de agua' → notes vacío (no hay sabor mencionado).\n"
+        "  • Cliente dice 'la michelada' → notes vacío (es solo el mapeo, sin detalle).\n"
+        "\n"
+        "Si el cliente está cambiando de tema o pidiendo algo completamente distinto "
+        "a las opciones (ej. ahora quiere una hamburguesa, o pide el menú), ignora "
+        "este contexto y clasifica normalmente."
+    )
+
+
+def apply_disamb_reply_flavor_fallback(
+    parsed: Dict[str, Any],
+    message_body: str,
+    pending: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Deterministic safety net on the disambiguation-reply planner path.
+
+    The planner prompt (REGLA 2 in the pending-context block) asks the
+    LLM to carry qualifier tokens from the user's reply over into
+    ``params["notes"]`` when the chosen product is an exact option name.
+    gpt-4o-mini sometimes complies and sometimes strips the qualifier.
+    This function patches the latter case in pure Python:
+
+      1. Only runs when there's an active pending disambiguation.
+      2. Only runs on ``ADD_TO_CART`` with a single ``product_name``
+         (multi-item batches stay as-is).
+      3. Only runs when ``notes`` is missing / empty.
+      4. Only runs when the chosen ``product_name`` normalizes to one
+         of the pending option names (so we don't inject notes on a
+         "topic change" reply where the user genuinely wants a
+         different product).
+      5. Computes the set of stemmed user-message tokens NOT present
+         in the chosen product name and, if non-empty, joins them in
+         original-surface order and writes them to ``params["notes"]``.
+
+    Returns the (possibly mutated) parsed dict. Modifies in place too.
+    """
+    if not pending or not pending.get("options"):
+        return parsed
+    params = parsed.get("params") or {}
+    parsed["params"] = params
+    if (parsed.get("intent") or "").upper() != INTENT_ADD_TO_CART:
+        return parsed
+    chosen = params.get("product_name")
+    if not isinstance(chosen, str) or not chosen.strip():
+        return parsed
+    if (params.get("notes") or "").strip():
+        return parsed
+
+    from ..services import product_search as _ps
+    chosen_norm = _ps._normalize(chosen.strip())
+    option_norms = {
+        _ps._normalize(o.get("name", "") or "")
+        for o in pending.get("options", [])
+    }
+    if chosen_norm not in option_norms:
+        return parsed
+
+    chosen_stems = {
+        _ps._stem(t) for t in _ps._tokenize(chosen_norm) if t
+    }
+    user_tokens = _ps._tokenize(_ps._normalize(message_body or ""))
+    leftover: List[str] = []
+    seen_stems = set()
+    for tok in user_tokens:
+        st = _ps._stem(tok) or tok
+        if st in chosen_stems or st in seen_stems:
+            continue
+        seen_stems.add(st)
+        leftover.append(tok)
+    if leftover:
+        injected = " ".join(leftover)
+        params["notes"] = injected
+        logging.warning(
+            "[ORDER_AGENT] flavor preservation: injected notes=%r "
+            "for chosen=%r (planner stripped qualifier)",
+            injected, chosen,
+        )
+    return parsed
 
 
 def _parse_planner_response(text: str) -> Dict[str, Any]:
@@ -440,6 +575,15 @@ class OrderAgent(BaseAgent):
             pending_clarification = exec_result.get("pending_clarification") or {}
             pending_options = pending_clarification.get("options") or []
             pending_requested = pending_clarification.get("requested_name") or ""
+            not_found_items = [x for x in (exec_result.get("not_found") or []) if x]
+
+            not_found_block = ""
+            if not_found_items:
+                not_found_block = (
+                    "Productos que NO encontramos en el menú (menciónalos al cliente de "
+                    "forma breve y ofrece otra opción o ver el menú):\n"
+                    + "\n".join(f"- {n}" for n in not_found_items)
+                )
 
             if pending_options:
                 # Multi-item batch: some items were added, but one item
@@ -450,6 +594,13 @@ class OrderAgent(BaseAgent):
                 opts_lines = "\n".join(
                     f"- {o.get('name')} ({money(o.get('price'))})" for o in pending_options
                 )
+                not_found_rule = ""
+                if not_found_items:
+                    not_found_rule = (
+                        "- Si hay productos listados como NO encontrados, menciónalos en "
+                        "una sola frase breve ('X no está en el menú por ahora') antes o "
+                        "después de la lista de opciones.\n"
+                    )
                 system = base_system + (
                     f"\n\nSITUACIÓN: {situation} PERO uno de los productos que el cliente pidió "
                     "tiene varias variantes y necesitas que elija cuál quiere antes de agregarlo.\n"
@@ -457,6 +608,7 @@ class OrderAgent(BaseAgent):
                     "- Primero confirma brevemente lo que SÍ se agregó (está en 'Cambio realizado').\n"
                     "- Luego, en la misma respuesta, pregunta por el producto que quedó pendiente "
                     f"(lo pidió como '{pending_requested or 'ese producto'}') y lista las opciones.\n"
+                    + not_found_rule +
                     "- PROHIBIDO ABSOLUTO: inventar, traducir, especializar o combinar los nombres "
                     "de las opciones con lo que el cliente pidió. Copia los nombres de las opciones "
                     "EXACTAMENTE como aparecen (mayúsculas y acentos idénticos).\n"
@@ -464,13 +616,54 @@ class OrderAgent(BaseAgent):
                     "- NO sugieras proceder con el pedido todavía: falta resolver la duda.\n"
                     "- 3-6 líneas total."
                 )
+                inp_parts = [
+                    f"Cliente dijo: {message_body}",
+                    f"Cambio realizado:\n{change_desc}",
+                    f"Pedido actual:\n{cart_lines}",
+                    f"Subtotal: {money(total_after)}",
+                    f"Producto pendiente de aclarar: {pending_requested}",
+                    f"Opciones disponibles (usa exactamente estos nombres y precios):\n{opts_lines}",
+                ]
+                if not_found_block:
+                    inp_parts.append(not_found_block)
+                return system, "\n".join(inp_parts)
+
+            if not_found_items:
+                # Multi-item batch: some items were added, others weren't
+                # found at all (typo, truly unavailable). Confirm the
+                # successes AND flag the missing items — never drop them
+                # silently, and never present them as suggestions.
+                missing_list = ", ".join(f"'{m}'" for m in not_found_items)
+                system = base_system + (
+                    f"\n\nSITUACIÓN: {situation} PERO uno o más productos que el cliente "
+                    f"pidió no existen en nuestro menú (lista literal: {missing_list}). "
+                    "No pudimos agregarlos al pedido. Estos NO son sugerencias — son "
+                    "productos que el restaurante no vende.\n"
+                    "REGLAS CRÍTICAS:\n"
+                    "- Primero confirma lo que SÍ se agregó (está en 'Cambio realizado'), "
+                    "usando los nombres EXACTOS de 'Pedido actual'.\n"
+                    "- Luego, en una frase, di CLARAMENTE que los productos listados como "
+                    "'no encontrados' NO están en el menú. Usa lenguaje explícito: "
+                    "\"no tenemos [X] en el menú\", \"[X] no está disponible hoy\", "
+                    "\"[X] no lo manejamos\". NO los presentes como sugerencias para que "
+                    "el cliente los pida después.\n"
+                    "- PROHIBIDO: frases como \"¿quieres agregar [X]?\", "
+                    "\"¿te gustaría [X]?\", \"como un [X]\", que hacen parecer que el "
+                    "producto no encontrado es una opción disponible.\n"
+                    "- PROHIBIDO: 'lo siento', 'disculpa', 'no pude', 'falló', 'error'.\n"
+                    "- Puedes ofrecerle al cliente ver el menú o pedir algo diferente "
+                    "para los ítems faltantes — pero DESPUÉS de decir claramente que no "
+                    "están disponibles.\n"
+                    "- NO sugieras proceder con el pedido todavía si el cliente quería "
+                    "esos productos faltantes.\n"
+                    "- 2-5 líneas total."
+                )
                 inp = (
                     f"Cliente dijo: {message_body}\n"
                     f"Cambio realizado:\n{change_desc}\n"
                     f"Pedido actual:\n{cart_lines}\n"
                     f"Subtotal: {money(total_after)}\n"
-                    f"Producto pendiente de aclarar: {pending_requested}\n"
-                    f"Opciones disponibles (usa exactamente estos nombres y precios):\n{opts_lines}"
+                    f"{not_found_block}"
                 )
                 return system, inp
 
@@ -685,22 +878,7 @@ class OrderAgent(BaseAgent):
                 bool(pending and pending.get("options")),
                 [o.get("name") for o in (pending.get("options") or [])] if pending else [],
             )
-            if pending and pending.get("options"):
-                opts_lines = "\n".join(
-                    f"  - {o.get('name')} (${int(o.get('price') or 0):,})".replace(",", ".")
-                    for o in pending.get("options", [])
-                )
-                planner_system += (
-                    "\n\nCONTEXTO DE ACLARACIÓN PENDIENTE: En tu turno ANTERIOR ofreciste al cliente "
-                    f"estas opciones porque preguntó por \"{pending.get('requested_name', '')}\":\n"
-                    f"{opts_lines}\n"
-                    "Si el mensaje actual del cliente es una elección (ej. 'la normal', 'la primera', 'la barata', "
-                    "'dame la Corona', 'la michelada', un nombre o un número), mapea su respuesta a UNA de estas opciones y "
-                    "clasifícalo como ADD_TO_CART con product_name EXACTO de la opción elegida. "
-                    "Ejemplos: 'la normal' → la opción SIN modificador (ej. \"Michelada\" no \"Corona michelada\"); "
-                    "'la primera' → la primera de la lista; 'la más barata' → la de menor precio. "
-                    "Si el cliente está cambiando de tema o pidiendo otra cosa, ignora este contexto y clasifica normalmente."
-                )
+            planner_system += build_pending_disambiguation_prompt_block(pending)
 
             history_text = ""
             for msg in conversation_history[-6:]:
@@ -714,6 +892,12 @@ class OrderAgent(BaseAgent):
             planner_response = self.llm.invoke(planner_messages)
             planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
             parsed = _parse_planner_response(planner_text)
+            # Deterministic safety net: if the planner stripped a
+            # qualifier token (e.g. "mora") from a disamb reply that
+            # mapped to an exact option name, re-attach it as notes.
+            # See apply_disamb_reply_flavor_fallback for the full
+            # contract.
+            parsed = apply_disamb_reply_flavor_fallback(parsed, message_body, pending)
             intent = (parsed.get("intent") or INTENT_CHAT).upper().replace(" ", "_")
             params = parsed.get("params") or {}
             logging.warning("[ORDER_AGENT] Planner intent=%s params=%s", intent, params)

@@ -52,6 +52,23 @@ class AmbiguousProductError(Exception):
         super().__init__(f"Multiple products match '{query}': {names}")
 
 
+class ProductNotFoundError(Exception):
+    """
+    Raised when add_to_cart / get_product cannot find ANY product matching
+    the user's request. Distinct from AmbiguousProductError (which means
+    multiple candidates exist and we need the user to choose).
+
+    Adding this as a raised exception instead of a returned "❌ not found"
+    string lets the multi-item executor loop distinguish "the batch
+    partially failed because one item is missing" from "the batch
+    partially failed because the user needs to clarify a variant". The
+    two cases need different response prompts.
+    """
+    def __init__(self, query: str):
+        self.query = query
+        super().__init__(f"No product matches '{query}'")
+
+
 # ---------- normalization ----------
 
 _SPANISH_STOPWORDS = frozenset({

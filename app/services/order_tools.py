@@ -7,7 +7,11 @@ import logging
 from typing import Dict, List, Optional
 from langchain.tools import tool
 
-from ..database.product_order_service import product_order_service, AmbiguousProductError
+from ..database.product_order_service import (
+    product_order_service,
+    AmbiguousProductError,
+    ProductNotFoundError,
+)
 from ..database.session_state_service import session_state_service
 from ..database.customer_service import customer_service
 from . import catalog_cache
@@ -305,7 +309,13 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
             product = product_order_service.get_product(product_name=product_name, business_id=business_id)
 
         if not product:
-            return "❌ Producto no encontrado. Pregunta por el menú o una categoría para ver productos."
+            # Raise instead of returning a string so the multi-item
+            # executor loop can distinguish "this item failed because
+            # nothing matched" from "this item succeeded" and from
+            # "this item was ambiguous". The old string return was
+            # swallowed silently in the multi-item path, dropping
+            # unmatchable items without telling the user.
+            raise ProductNotFoundError(query=(product_name or product_id or "").strip())
 
         price = float(product.get("price", 0))
         pid = product["id"]
@@ -350,6 +360,12 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         notes_str = f" ({notes})" if notes else ""
         return f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. Subtotal: {_format_price(total)}"
     except AmbiguousProductError:
+        raise
+    except ProductNotFoundError:
+        # Let the executor layer decide how to report this — in a
+        # multi-item batch the loop captures it per-item and surfaces
+        # via cart_change.not_found; in a single-item call the outer
+        # handler builds a user_error result.
         raise
     except Exception as e:
         logger.error(f"[ORDER_TOOL] add_to_cart error: {e}")

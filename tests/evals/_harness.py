@@ -80,6 +80,17 @@ class AgentScenario:
     stub_list_categories: Optional[Callable[[str], List[str]]] = None
     stub_place_order_tool_result: Optional[str] = None
 
+    known_products: List[Dict[str, Any]] = field(default_factory=list)
+    """
+    Products the fake service should resolve by id AND name. Needed
+    for scenarios that exercise the disambiguation bypass, which
+    converts a chosen option name into a ``product_id`` before calling
+    add_to_cart — skipping the search path entirely. Without an
+    id→product index the harness's ``get_product`` returns None and
+    the executor raises ``ProductNotFoundError`` on what should be a
+    clean hit.
+    """
+
     # --- trajectory-level assertions (agentevals) ------------------------
     reference_trajectory: Optional[List[Any]] = None
     """
@@ -184,11 +195,26 @@ class _FakeProductService:
 
     def __init__(self, scenario: AgentScenario):
         self.scenario = scenario
+        # id → product cache populated eagerly from known_products and
+        # lazily as stub_search_products is called during the run.
+        self._by_id: Dict[str, Dict[str, Any]] = {}
+        for p in (scenario.known_products or []):
+            pid = p.get("id")
+            if pid:
+                self._by_id[pid] = p
+
+    def _cache_results(self, results):
+        for p in results or []:
+            pid = p.get("id")
+            if pid and pid not in self._by_id:
+                self._by_id[pid] = p
 
     def search_products(self, business_id, query):
         if self.scenario.stub_search_products is None:
             return []
-        return list(self.scenario.stub_search_products(business_id, query) or [])
+        results = list(self.scenario.stub_search_products(business_id, query) or [])
+        self._cache_results(results)
+        return results
 
     def list_products_with_fallback(self, business_id, category):
         if self.scenario.stub_list_products_with_fallback is None:
@@ -206,12 +232,20 @@ class _FakeProductService:
         return list(self.scenario.stub_list_categories(business_id) or [])
 
     def get_product(self, product_id=None, product_name=None, business_id=None):
-        # Route name-based lookup through the scenario's search stub so
+        # id lookup: serve from the cache (known_products + anything
+        # that already flowed through a search call this turn). This
+        # is what the disambiguation bypass path needs — it converts
+        # the chosen option name into a product_id and then calls
+        # add_to_cart with that id, skipping any search.
+        if product_id:
+            return self._by_id.get(str(product_id))
+        # Name lookup: route through the scenario's search stub so
         # scenarios that declare stub_search_products also cover the
         # add_to_cart → get_product(product_name=...) path without
         # having to stub each method individually.
         if product_name and self.scenario.stub_search_products is not None:
             results = list(self.scenario.stub_search_products(business_id, product_name) or [])
+            self._cache_results(results)
             if len(results) == 1:
                 return results[0]
             # Ambiguous or empty — let the caller handle it.

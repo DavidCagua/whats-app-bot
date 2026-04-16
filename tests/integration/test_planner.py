@@ -9,7 +9,12 @@ Delete cassettes/ and rerun when prompts or tools change.
 import pytest
 import json
 
-from app.agents.order_agent import _parse_planner_response, PLANNER_SYSTEM_TEMPLATE
+from app.agents.order_agent import (
+    _parse_planner_response,
+    PLANNER_SYSTEM_TEMPLATE,
+    apply_disamb_reply_flavor_fallback,
+    build_pending_disambiguation_prompt_block,
+)
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -36,34 +41,31 @@ def _classify_with_pending(message: str, pending_options, requested_name: str, o
     """
     Variant of _classify_intent that injects a pending_disambiguation block
     into the planner system prompt the same way OrderAgent.execute does at
-    runtime. Use to validate disambiguation-reply classification.
+    runtime, then runs the same deterministic flavor-preservation
+    post-processor. Use to validate disambiguation-reply classification
+    as a full "what would production emit" check.
     """
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, max_tokens=256)
     planner_system = PLANNER_SYSTEM_TEMPLATE.format(
         order_state=order_state,
         cart_summary="Pedido vacío.",
     )
-    opts_lines = "\n".join(
-        f"  - {o['name']} (${int(o['price']):,})".replace(",", ".")
-        for o in pending_options
-    )
-    planner_system += (
-        "\n\nCONTEXTO DE ACLARACIÓN PENDIENTE: En tu turno ANTERIOR ofreciste al cliente "
-        f"estas opciones porque preguntó por \"{requested_name}\":\n"
-        f"{opts_lines}\n"
-        "Si el mensaje actual del cliente es una elección (ej. 'la normal', 'la primera', 'la barata', "
-        "'dame la Corona', 'la michelada', un nombre o un número), mapea su respuesta a UNA de estas opciones y "
-        "clasifícalo como ADD_TO_CART con product_name EXACTO de la opción elegida. "
-        "Ejemplos: 'la normal' → la opción SIN modificador (ej. \"Michelada\" no \"Corona michelada\"); "
-        "'la primera' → la primera de la lista; 'la más barata' → la de menor precio. "
-        "Si el cliente está cambiando de tema o pidiendo otra cosa, ignora este contexto y clasifica normalmente."
-    )
+    pending = {
+        "requested_name": requested_name,
+        "options": pending_options,
+    }
+    planner_system += build_pending_disambiguation_prompt_block(pending)
     messages = [
         SystemMessage(content=planner_system),
         HumanMessage(content=f"Historial reciente:\n\nUsuario: {message}\n\nResponde solo con JSON: intent y params."),
     ]
     response = llm.invoke(messages)
-    return _parse_planner_response(response.content)
+    parsed = _parse_planner_response(response.content)
+    # Apply the same deterministic post-processor OrderAgent.execute
+    # runs in production so the integration test sees the full planner
+    # contract, not just the raw LLM output.
+    parsed = apply_disamb_reply_flavor_fallback(parsed, message, pending)
+    return parsed
 
 
 class TestPlannerIntentClassification:
@@ -187,3 +189,190 @@ class TestDisambiguationReplyClassification:
         assert "frutos" in name and "rojos" in name, \
             f"expected 'Soda Frutos rojos', got '{name}'"
         assert "uvilla" not in name, "must not pick the wrong variant"
+
+
+# ---------------------------------------------------------------------------
+# Disambiguation reply with flavor qualifier — Bug 1 from the Biela
+# +573177000722 transcript (2026-04-16).
+#
+# The pending-disamb resolver used to instruct the planner to emit just
+# `product_name` EXACTLY matching the option name. When the user's reply
+# also contained a flavor qualifier ("un jugo de mora en agua"), the
+# planner obediently stripped the flavor and emitted `Jugos en agua` with
+# no notes — the flavor was lost before reaching the cart. After the fix
+# the planner must carry the flavor over as `notes`.
+# ---------------------------------------------------------------------------
+
+
+class TestDisambiguationReplyWithFlavorQualifier:
+    """
+    When the pending options are generic products ('Jugos en agua',
+    'Jugos en leche') and the user replies with both the option choice
+    AND a flavor word, the planner must emit ADD_TO_CART with BOTH the
+    exact option name and the flavor preserved in `notes`.
+    """
+
+    JUGOS_OPTIONS = [
+        {"name": "Hervido Mora", "price": 9500},
+        {"name": "Jugos en agua", "price": 7500},
+        {"name": "Jugos en leche", "price": 7500},
+    ]
+
+    def test_jugo_de_mora_en_agua_reply_preserves_mora_flavor(self):
+        """
+        Regression: "un jugo de mora en agua" as a disamb reply must
+        NOT drop the 'mora' flavor. Two valid planner shapes survive:
+
+          A. Disamb-reply interpretation: product_name='Jugos en agua',
+             notes='mora' (new Bug 1 planner rule)
+          B. Fresh-order interpretation: product_name carries the full
+             phrase 'jugo de mora en agua' (the executor's search layer
+             then applies Fix B's token-containment rule and attaches
+             _derived_notes='mora' on the winning generic row).
+
+        Both end up with the cart line 'Jugos en agua (mora)'. This
+        test accepts either planner shape — what it pins is that the
+        flavor never disappears before reaching the executor.
+        """
+        result = _classify_with_pending(
+            message="un jugo de mora en agua",
+            pending_options=self.JUGOS_OPTIONS,
+            requested_name="jugo de mora",
+        )
+        assert result["intent"] == "ADD_TO_CART"
+        params = result.get("params") or {}
+
+        # Single-product shape
+        name = (params.get("product_name") or "").lower()
+        notes = (params.get("notes") or "").lower()
+
+        # Multi-item shape fallback (planner may decide to emit items)
+        if not name and isinstance(params.get("items"), list) and params["items"]:
+            first = params["items"][0] or {}
+            name = (first.get("product_name") or "").lower()
+            notes = (first.get("notes") or "").lower()
+
+        flavor_in_notes = "mora" in notes
+        flavor_in_name = "mora" in name
+        assert flavor_in_notes or flavor_in_name, (
+            f"'mora' must appear in either notes or product_name, "
+            f"but got name={name!r}, notes={notes!r}"
+        )
+        # Sanity: the target product is some kind of jugo en agua, not
+        # the hot-drink Hervido Mora
+        assert "hervido" not in name, f"wrong product selected: {name!r}"
+
+    def test_jugo_de_mango_en_leche_reply_preserves_mango_as_notes(self):
+        """Parallel case with a different flavor / different generic row."""
+        result = _classify_with_pending(
+            message="el de mango en leche",
+            pending_options=self.JUGOS_OPTIONS,
+            requested_name="jugo",
+        )
+        assert result["intent"] == "ADD_TO_CART"
+        params = result.get("params") or {}
+        name = (params.get("product_name") or "").lower()
+        notes = (params.get("notes") or "").lower()
+        assert "jugos en leche" in name, f"expected 'Jugos en leche', got '{name}'"
+        assert "mango" in notes, f"expected flavor 'mango' in notes, got notes='{notes}'"
+
+    def test_plain_option_reply_without_qualifier_has_no_notes_needed(self):
+        """
+        Guard: when the user's reply is JUST the option choice with no
+        extra qualifier words ("el de agua"), the planner shouldn't
+        hallucinate notes. Empty or absent notes both acceptable.
+        """
+        result = _classify_with_pending(
+            message="el de agua",
+            pending_options=self.JUGOS_OPTIONS,
+            requested_name="jugo",
+        )
+        assert result["intent"] == "ADD_TO_CART"
+        params = result.get("params") or {}
+        name = (params.get("product_name") or "").lower()
+        notes = (params.get("notes") or "").strip().lower()
+        assert "jugos en agua" in name
+        # Notes should be empty (no flavor was specified). Tolerate both
+        # absent key and empty string.
+        assert notes in ("", ""), f"unexpected notes: {notes!r}"
+
+
+# ---------------------------------------------------------------------------
+# Bug 6 — VIEW_CART routing on "qué tengo en mi pedido" variants
+# ---------------------------------------------------------------------------
+
+
+class TestViewCartRouting:
+    """
+    The Biela +573177000722 transcript: user typed "Que tengo en mi
+    pedido?" and got the full menu back instead of the cart contents.
+    The planner was classifying this as LIST_PRODUCTS / GET_MENU_CATEGORIES
+    because VIEW_CART had no keyword rules in the system prompt.
+    """
+
+    def test_que_tengo_en_mi_pedido_routes_to_view_cart(self):
+        result = _classify_intent(
+            "Que tengo en mi pedido?",
+            order_state="ORDERING",
+            cart_summary="1x BARRACUDA. Subtotal: $28.000",
+        )
+        assert result["intent"] == "VIEW_CART"
+
+    def test_como_va_mi_pedido_routes_to_view_cart(self):
+        result = _classify_intent(
+            "cómo va mi pedido",
+            order_state="ORDERING",
+            cart_summary="1x BARRACUDA. Subtotal: $28.000",
+        )
+        assert result["intent"] == "VIEW_CART"
+
+    def test_muestrame_mi_pedido_routes_to_view_cart(self):
+        result = _classify_intent(
+            "muéstrame mi pedido",
+            order_state="ORDERING",
+            cart_summary="1x BARRACUDA. Subtotal: $28.000",
+        )
+        assert result["intent"] == "VIEW_CART"
+
+
+# ---------------------------------------------------------------------------
+# Bug 7 — notes-addition UPDATE_CART_ITEM for "el X también es de Y"
+# ---------------------------------------------------------------------------
+
+
+class TestNotesAdditionUpdateCartItem:
+    """
+    When the user is describing an EXISTING cart item to add a flavor
+    / note ("el jugo en agua también es de mora"), the planner must
+    route to UPDATE_CART_ITEM with notes — NOT a fresh SEARCH_PRODUCTS
+    or ADD_TO_CART. Regression from Biela +573177000722 where the user
+    said "El jugo en agua también es de mora" and got disambiguation
+    instead of a notes update.
+    """
+
+    def test_el_jugo_tambien_es_de_mora_routes_to_update_cart_item(self):
+        result = _classify_intent(
+            "el jugo en agua también es de mora",
+            order_state="ORDERING",
+            cart_summary="1x BARRACUDA; 1x Jugos en agua. Subtotal: $35.500",
+        )
+        assert result["intent"] == "UPDATE_CART_ITEM"
+        params = result.get("params") or {}
+        name = (params.get("product_name") or "").lower()
+        notes = (params.get("notes") or "").lower()
+        # The planner should target the jugo in the cart, not the burger
+        assert "jugo" in name, f"expected target 'jugo', got {name!r}"
+        # And carry 'mora' across as notes
+        assert "mora" in notes, f"expected notes to include 'mora', got {notes!r}"
+
+    def test_agregale_mango_routes_to_update_cart_item_with_notes(self):
+        """Imperative variant."""
+        result = _classify_intent(
+            "al jugo en leche agrégale mango",
+            order_state="ORDERING",
+            cart_summary="1x Jugos en leche. Subtotal: $7.500",
+        )
+        assert result["intent"] == "UPDATE_CART_ITEM"
+        params = result.get("params") or {}
+        notes = (params.get("notes") or "").lower()
+        assert "mango" in notes, f"expected 'mango' in notes, got {notes!r}"

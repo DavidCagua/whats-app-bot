@@ -597,3 +597,170 @@ class TestMultiItemAddToCartFaultTolerance:
         # needs_clarification result from the FIRST ambiguity.
         assert result["result_kind"] == "needs_clarification"
         assert add_tool.invoke.call_count == 2
+
+    def test_first_item_not_found_second_item_exact_still_adds_second(
+        self, fake_session, wa_id, business_context,
+    ):
+        """
+        Regression for the Biela +573177000722 transcript (2026-04-16):
+        "Un jugo de mango en leche y una club Colombia" — the jugo lane
+        was not found (no mango product exists, and Fix B couldn't
+        salvage it), so add_to_cart raised ProductNotFoundError. Before
+        this fix the tool RETURNED an error STRING that the multi-item
+        loop silently swallowed; the jugo disappeared with no trace in
+        the response. After the fix, the error is raised, captured in
+        multi_not_found, and surfaced via the cart_change result's
+        `not_found` extra so the response can flag what was missing.
+        """
+        from app.database.product_order_service import ProductNotFoundError
+        business_id = business_context["business_id"]
+        session = self._seed_empty_ordering(fake_session, wa_id, business_id)
+
+        add_invocations: list = []
+
+        def _add_side_effect(args):
+            add_invocations.append(args)
+            name = (args.get("product_name") or "").lower()
+            if "mango" in name:
+                raise ProductNotFoundError(query=args.get("product_name") or "")
+            return None  # successful add for everything else
+
+        add_tool = MagicMock()
+        add_tool.invoke.side_effect = _add_side_effect
+
+        def _find_tool_mock(name):
+            return {"add_to_cart": add_tool}.get(name)
+
+        with patch("app.orchestration.order_flow.session_state_service", fake_session), \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", side_effect=_find_tool_mock), \
+             patch("app.orchestration.order_flow._get_cart_for_logging") as mock_cart_log, \
+             patch("app.orchestration.order_flow._build_cart_change",
+                   return_value={"action": "added",
+                                 "added": [{"name": "Club Colombia", "quantity": 1}],
+                                 "removed": [], "updated": [], "cart_after": [],
+                                 "total_after": 7500}), \
+             patch("app.orchestration.order_flow._clear_pending_disambiguation"):
+            mock_tools._cart_from_session.return_value = {
+                "items": [{"product_id": "p-club", "name": "Club Colombia", "quantity": 1, "price": 7500}],
+                "total": 7500,
+            }
+            mock_cart_log.side_effect = [
+                {"items": [], "total": 0},
+                {"items": [{"name": "Club Colombia", "quantity": 1}], "total": 7500},
+            ]
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_ADD_TO_CART,
+                params={"items": [
+                    {"product_name": "jugo de mango en leche", "quantity": 1},
+                    {"product_name": "Club Colombia",          "quantity": 1},
+                ]},
+            )
+
+        # Both items attempted — not_found on the first MUST NOT skip the second
+        attempted_names = [a.get("product_name") for a in add_invocations]
+        assert "jugo de mango en leche" in attempted_names
+        assert "Club Colombia" in attempted_names
+
+        # Partial success: cart_change carries not_found extra with the
+        # missing item label so the response generator can flag it.
+        assert result["success"] is True
+        assert result["result_kind"] == "cart_change"
+        assert "jugo de mango en leche" in (result.get("not_found") or [])
+
+    def test_all_items_not_found_raises_to_user_error(
+        self, fake_session, wa_id, business_context,
+    ):
+        """
+        When every item in a multi-item batch is ProductNotFoundError
+        and nothing succeeds, the executor re-raises so the outer
+        handler emits a user_error result (not a silent noop cart).
+        """
+        from app.database.product_order_service import ProductNotFoundError
+        business_id = business_context["business_id"]
+        session = self._seed_empty_ordering(fake_session, wa_id, business_id)
+
+        add_tool = MagicMock()
+
+        def _not_found(args):
+            raise ProductNotFoundError(query=args.get("product_name") or "")
+        add_tool.invoke.side_effect = _not_found
+
+        def _find_tool_mock(name):
+            return {"add_to_cart": add_tool}.get(name)
+
+        with patch("app.orchestration.order_flow.session_state_service", fake_session), \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", side_effect=_find_tool_mock), \
+             patch("app.orchestration.order_flow._get_cart_for_logging",
+                   return_value={"items": [], "total": 0}), \
+             patch("app.orchestration.order_flow._build_cart_change",
+                   return_value={"action": "noop", "added": [], "removed": [],
+                                 "updated": [], "cart_after": [], "total_after": 0}), \
+             patch("app.orchestration.order_flow._clear_pending_disambiguation"):
+            mock_tools._cart_from_session.return_value = {"items": [], "total": 0}
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_ADD_TO_CART,
+                params={"items": [
+                    {"product_name": "jugo de pitahaya", "quantity": 1},
+                    {"product_name": "jugo de mangostino", "quantity": 1},
+                ]},
+            )
+
+        assert result["success"] is False
+        assert result["result_kind"] == "user_error"
+        # Both missing items should appear in the user-visible error message
+        msg = (result.get("error_message") or "").lower()
+        assert "pitahaya" in msg
+        assert "mangostino" in msg
+        assert add_tool.invoke.call_count == 2
+
+    def test_single_item_not_found_raises_to_user_error(
+        self, fake_session, wa_id, business_context,
+    ):
+        """
+        Single-item ADD_TO_CART with a not-found product must surface
+        as a user_error, not a silent noop cart. Pinned here because
+        the new ProductNotFoundError path is the replacement for the
+        old "return '❌ Producto no encontrado'" string.
+        """
+        from app.database.product_order_service import ProductNotFoundError
+        business_id = business_context["business_id"]
+        session = self._seed_empty_ordering(fake_session, wa_id, business_id)
+
+        add_tool = MagicMock()
+        add_tool.invoke.side_effect = ProductNotFoundError(query="pitahaya con hielo")
+
+        def _find_tool_mock(name):
+            return {"add_to_cart": add_tool}.get(name)
+
+        with patch("app.orchestration.order_flow.session_state_service", fake_session), \
+             patch("app.orchestration.order_flow.order_tools") as mock_tools, \
+             patch("app.orchestration.order_flow._find_tool", side_effect=_find_tool_mock), \
+             patch("app.orchestration.order_flow._get_cart_for_logging",
+                   return_value={"items": [], "total": 0}), \
+             patch("app.orchestration.order_flow._clear_pending_disambiguation"):
+            mock_tools._cart_from_session.return_value = {"items": [], "total": 0}
+
+            result = execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_ADD_TO_CART,
+                params={"product_name": "pitahaya con hielo", "quantity": 1},
+            )
+
+        assert result["success"] is False
+        assert result["result_kind"] == "user_error"
+        assert "pitahaya" in (result.get("error_message") or "").lower()

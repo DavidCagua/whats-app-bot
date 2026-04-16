@@ -13,6 +13,7 @@ from .customer_service import customer_service
 # Re-export AmbiguousProductError from the new search module for backward compat
 from ..services.product_search import (
     AmbiguousProductError,
+    ProductNotFoundError,
     search_products as _search_products_hybrid,
 )
 
