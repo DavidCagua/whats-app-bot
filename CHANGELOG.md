@@ -11,6 +11,112 @@ context.
 
 ---
 
+## 2026-04-16 (disambiguation overhaul + perf caching)
+
+Big day. Two debug sessions on Biela wa_ids `+573242261188` and
+`+573177000722` uncovered a cascade of disambiguation failures and
+silent drops. Fixed in 4 commits + one perf bundle.
+
+### Disambiguation + search
+
+- `1f5f282` fix(order): generic-product match + multi-item fault
+  tolerance + name verbatim rule. Three-layer fix for the
+  `+573242261188` incident ("jugo de mora en leche y soda de frutos
+  rojos" → disambiguation loop + soda dropped). Fix A: multi-item
+  executor loop no longer re-raises `AmbiguousProductError` on first
+  item — captures it, continues, and surfaces partial success +
+  pending clarification in one response. Fix B: new token-containment
+  decisive rule in `search_products` for generic products with
+  qualifier (e.g. "jugo de mora en leche" → `Jugos en leche` +
+  `_derived_notes="mora"`). Fix C: response generator prompt now
+  forbids fabricating product names. 7 new unit + 1 eval.
+
+- `66de4e5` fix(search): token-set equality decisive rule (Bug 5).
+  "Una soda de frutos rojos" → `Soda Frutos rojos` wins decisively
+  even when Coca-Cola is a strong embedding neighbor. New rule 1c:
+  when stemmed content-token set of query == exactly one candidate,
+  promote it. Gated on ≥2 tokens so Corona/Michelada single-token
+  prefix-rival disambiguation stays intact. 5 unit + 1 eval.
+
+- `7807b9e` fix(order): planner/executor cleanups for 4 regressions
+  (Bugs 1/2/6/7) from the `+573177000722` session. Bug 1: flavor
+  lost on disambiguation reply — new deterministic
+  `apply_disamb_reply_flavor_fallback` post-processor extracts
+  qualifier tokens the planner dropped and injects them as `notes`.
+  Bug 2: `ProductNotFoundError` (new exception) replaces the old
+  error-string return from `add_to_cart` so multi-item batch can
+  surface "not found" items in the response. Bug 6: `VIEW_CART`
+  keyword rules in planner prompt. Bug 7: notes-addition
+  `UPDATE_CART_ITEM` rule ("el jugo también es de mora"). +3 unit,
+  +8 integration, +2 eval.
+
+- `9dd8a2c` feat(search): LLM disambiguation resolver (Bug 4).
+  When deterministic rules can't pick a winner, a ~$0.0001
+  gpt-4o-mini call resolves the ambiguity. Three outcomes: WINNER
+  (with optional derived notes), FILTERED (exclude wrong-category
+  candidates — fixes Hervido Mora leaking into "jugo de mora"
+  queries), or AMBIGUOUS (all candidates shown). Deterministic rules
+  still fire first as fast paths; LLM is the catch-all for the long
+  tail. Falls back to full disambiguation on API failure. 4 unit +
+  1 eval.
+
+- `7d05c9e` fix(search): prevent LLM resolver from auto-picking
+  sub-type defaults. "Un jugo de mora" was resolved as WINNER →
+  Jugos en agua instead of FILTERED → [agua, leche] with a prompt.
+  Added CRITICAL rule: never auto-pick when candidates differ only
+  by a sub-type the customer didn't specify.
+
+### Performance (webhook + order flow)
+
+- `4b8395e` perf(dedupe): atomic Redis claim on the webhook hot path.
+  Replaces the old two-round-trip Supabase dedupe (SELECT + INSERT)
+  with a single Redis `SET NX EX`. Drops pre-debounce webhook
+  latency from ~2s to ~50ms.
+
+- `a358fe2` perf(routing): indexed whatsapp_numbers lookup + TTL
+  cache + JOIN. Migration 024 canonicalizes `phone_number` to
+  `+<digits>` and adds a partial unique index. Service layer does one
+  query with `joinedload(Business)` instead of two sequential
+  sessions. Module-level 5-min TTL cache eliminates the round trip
+  for warm requests. Invalidated on create/update writes.
+
+- `a118232` perf(debounce): buffer before business lookup, resolve in
+  flusher. Moves the Supabase business-context lookup out of the
+  webhook thread and into the debounce flusher, so the 3s quiet
+  window starts on message arrival, not after a ~3–5s DB round trip.
+
+- `2b7ded9` perf(order-flow): Tier 1 per-turn memoization cache.
+  `app/orchestration/turn_cache.py` — `contextvars`-backed TurnCache.
+  Collapses 2–4× per-turn reads of session state, customer, and
+  product search into O(1). Explicit invalidation after every
+  `session_state_service.save`. Pre-populates customer from the
+  handler gate. 11 unit tests.
+
+- `94c9f97` perf(order-flow): Tier 2 catalog cache + business_id
+  context cache. `app/services/catalog_cache.py` — 5-min TTL process-
+  memory cache for `list_categories`, `list_products`,
+  `list_products_with_fallback`. Also extends `business_service`
+  cache to `business_id` keys. Staleness contract: admin writes live
+  in the Next.js admin console (Prisma), so TTL is the only
+  invalidation mechanism for now. 11 unit tests for both cache tiers.
+
+### Debounce
+
+- `97f1066` feat(webhook): debounce rapid messages per phone via
+  Redis. 3s quiet window keyed by `(to_number, phone)`. Lua scripts
+  for atomic RPUSH + SET NX (buffer) and LRANGE + DEL (drain).
+  Flusher thread calls `process_whatsapp_message` + `turn_lock` after
+  the window. Falls back to sync on Redis unavailable.
+
+- `e6a5e42` → `3a8624c` → `b16c52b` → `c573046` iterative fixes:
+  cross-business key scoping, atomic Lua buffer, root-logger for
+  Railway visibility, debug logging for NX return value.
+
+### Test coverage
+
+98 unit / 15 integration / 13 eval (+1 xfail). Up from 68/7/9 at
+the start of the day.
+
 ## 2026-04-14 (turn lock)
 
 - `eb8dd64` fix(views): per-wa_id turn serialization via Postgres advisory
@@ -78,13 +184,29 @@ Deferred work, priority order. Open an issue when you pick something up.
 1. **Full semantic-intent vocabulary restructure.** `CONFIRM` is the pilot;
    migrate the other 13 transitional intents (`ADD_TO_CART`, `PROCEED_TO_CHECKOUT`,
    `PLACE_ORDER`, …) to semantic ones (`ADD_ITEM`, `MODIFY_ITEM`, `PROVIDE_INFO`,
-   `QUESTION`, `CANCEL`). Blocked on item 3. See [app/orchestration/order_flow.py](app/orchestration/order_flow.py).
-2. **Offline transcript replay test harness.** Fixture-driven pipeline test
-   (planner + executor) — required safety net before item 1. First fixture
-   should be the Biela "Procedemos" session. See [tests/unit/test_order_flow_confirm.py](tests/unit/test_order_flow_confirm.py) for the current (isolated) test style.
-3. **Per-`wa_id` turn serialization.** Postgres advisory lock in
-   [app/views.py](app/views.py) `handle_twilio_message`. Fixes the double-reply race from the
-   Biela session (two messages 5s apart, parallel planner passes, stale reply).
+   `QUESTION`, `CANCEL`). See [app/orchestration/order_flow.py](app/orchestration/order_flow.py).
+2. ~~Offline transcript replay test harness.~~ **Done.** `tests/evals/` with
+   `agentevals` trajectory pattern (commit `a2b1c4f`). 13 regression evals.
+3. ~~Per-`wa_id` turn serialization.~~ **Done.** Postgres advisory lock
+   (commit `eb8dd64`) + Redis debounce (commit `97f1066`).
 4. **Multi-tenant planner prompts.** Move the hard-coded Biela phrasing out of
    `PLANNER_SYSTEM_TEMPLATE` in [app/agents/order_agent.py](app/agents/order_agent.py) into per-business
    `settings.planner_prompt_extras`. Blocked on a second tenant.
+5. **Redis-backed catalog cache invalidation.** Currently the catalog cache
+   (`app/services/catalog_cache.py`) has a 5-min TTL as the only invalidation
+   mechanism because product writes live in the Next.js admin console (Prisma).
+   If admins complain about lag, implement a Redis version-stamp: admin console
+   bumps `catalog:version:{business_id}` on write, Python cache checks version
+   on read (~1ms). Design sketch in the `catalog_cache.py` module docstring.
+6. **Sub-type correction planner rule.** When the user corrects a sub-type
+   after auto-add (e.g. "en agua no en leche"), the planner currently routes
+   to `UPDATE_CART_ITEM` with `notes="sin leche"` (ingredient exclusion) instead
+   of recognizing it as a sub-type confirmation. Low priority since the LLM
+   resolver prompt fix (`7d05c9e`) prevents the auto-add that triggers this, but
+   the correction path should be robust independently.
+7. **LLM resolver eval stability.** The resolver prompt works well on
+   gpt-4o-mini at temp=0 but the "jugo de mora" sub-type case needed a
+   follow-up prompt fix (`7d05c9e`). Monitor for more edge cases; consider
+   adding few-shot examples directly in the prompt if other sub-type patterns
+   surface. Long-term: structured output (JSON mode) would remove the
+   regex-parsing fallback.
