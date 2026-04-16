@@ -738,6 +738,57 @@ def search_products(
             if len(scored) == 1:
                 return [scored[0][3]]
 
+            # Decisive rule 1c: token-set equality winner.
+            #
+            # The full-string exact-name rule (1a) compares the raw
+            # normalized query against the product name, so stopwords
+            # in the query ("una soda de frutos rojos" vs catalog row
+            # "Soda Frutos rojos") make it miss. Score ratio (rule 2
+            # below) also misses when the runner-up scores high enough
+            # that the 2× margin collapses — exactly what happened with
+            # `"una soda de frutos rojos"` at Biela: the ranker pulled
+            # Coca-Cola / Coca-Cola Zero as semantic neighbors, and the
+            # top/second ratio didn't clear 2× so disambiguation fired
+            # with an obviously-wrong option list.
+            #
+            # This rule patches that: when no exact name match fired
+            # and exactly one scored candidate's stemmed content tokens
+            # form an EQUAL set to the query's stemmed content tokens,
+            # promote it decisively. Stopwords are stripped on both
+            # sides via `_tokenize`, so "una soda de frutos rojos" and
+            # "Soda Frutos rojos" both become `{sod, frut, rojo}`.
+            #
+            # Guard — query must have ≥ 2 content tokens. The 1-token
+            # case is already handled by rule 1a's prefix-rival check
+            # (so "corona" still disambiguates when Corona michelada
+            # exists; so "michelada" still disambiguates when
+            # Corona michelada exists). Entering rule 1c on 1-token
+            # queries would silently bypass that protection.
+            if not exact_matches and len(query_stem_set) >= 2:
+                equal_matches: List[Dict[str, Any]] = []
+                for _score, _exact, _has_lex, cand in scored:
+                    cand_name = cand.get("name") or ""
+                    cand_stem_set = {
+                        _stem(t)
+                        for t in _tokenize(_normalize(cand_name))
+                        if t
+                    }
+                    cand_stem_set.discard("")
+                    if cand_stem_set and cand_stem_set == query_stem_set:
+                        equal_matches.append(cand)
+                if len(equal_matches) == 1:
+                    winner = equal_matches[0]
+                    logger.info(
+                        "[PRODUCT_SEARCH] token-set-equal match: query=%r winner=%r",
+                        query, winner.get("name"),
+                    )
+                    return [winner]
+                # If 0 or ≥ 2 candidates have equal token sets, fall
+                # through to the score-ratio rule below. Multiple
+                # equal-set matches mean the query is genuinely
+                # ambiguous at the token level (e.g. two products with
+                # identical names after normalization).
+
             # Decisive rule 2: score ratio (top ≥ 2x second AND absolute ≥ 60)
             top_score = scored[0][0]
             second_score = scored[1][0]

@@ -532,3 +532,135 @@ class TestCoronaStillDisambiguates:
         assert results[0]["name"] == "Corona michelada"
         # No derived notes on an exact name match
         assert "_derived_notes" not in results[0] or not results[0].get("_derived_notes")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — token-set equality decisive rule (Bug 5)
+#
+# Biela incident 2026-04-16 +573177000722: "Una soda de frutos rojos"
+# triggered a disambiguation with 5 candidates — including Coca-Cola
+# and Coca-Cola Zero — instead of winning decisively on Soda Frutos
+# rojos. Root cause: the full-string exact-name rule 1a sees the
+# "una" / "de" stopwords in the query and doesn't match; the
+# score-ratio rule 2 can't clear 2× because Coca-Cola is a strong
+# embedding neighbor.
+#
+# Fix: new rule 1c that declares a decisive winner when exactly one
+# scored candidate's stemmed content-token set EQUALS the query's.
+# Gated on query having ≥ 2 content tokens so the single-token
+# prefix-rival cases (corona, michelada) keep their existing
+# disambiguation behavior.
+# ---------------------------------------------------------------------------
+
+
+class TestTokenSetEqualityDecisiveWinner:
+    """
+    Decisive rule 1c: when the user's content tokens (after stopword
+    strip + stem) equal exactly one candidate's content tokens, pick
+    that candidate without triggering disambiguation.
+    """
+
+    def _soda_lexical(self):
+        return {
+            "SODA":         _product("p-soda",   "Soda",         category="BEBIDAS", tags=["bebida", "soda"], price=4500),
+            "SODA_FRUTOS":  _product("p-sodafr", "Soda Frutos rojos", category="BEBIDAS", tags=["bebida", "soda"], price=15000),
+            "SODA_UVILLA":  _product("p-sodauv", "Soda Uvilla y maracuyá", category="BEBIDAS", tags=["bebida", "soda"], price=15000),
+            "COCA":         _product("p-coca",   "Coca-Cola",    category="BEBIDAS", tags=["bebida", "gaseosa"], price=5500),
+            "COCA_ZERO":    _product("p-cocaz",  "Coca-Cola Zero", category="BEBIDAS", tags=["bebida", "gaseosa"], price=5500),
+        }
+
+    def test_soda_de_frutos_rojos_query_picks_soda_frutos_rojos(self):
+        """
+        Regression for Biela +573177000722 turn 11. The stopwords
+        'una' and 'de' in the query stopped rule 1a from firing on
+        Soda Frutos rojos; Coca-Cola as a semantic neighbor prevented
+        rule 2 from clearing 2×. Rule 1c is the surgical fix.
+        """
+        lexical = self._soda_lexical()
+        semantic = {
+            "SODA":         (lexical["SODA"],         0.80),
+            "SODA_FRUTOS":  (lexical["SODA_FRUTOS"],  0.85),
+            "SODA_UVILLA":  (lexical["SODA_UVILLA"],  0.70),
+            "COCA":         (lexical["COCA"],         0.60),
+            "COCA_ZERO":    (lexical["COCA_ZERO"],    0.55),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            results = product_search.search_products(
+                BUSINESS_ID, "una soda de frutos rojos", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "Soda Frutos rojos"
+
+    def test_plain_exact_name_still_wins_without_stopwords(self):
+        """
+        Guard: "Soda Frutos rojos" as a bare query (no stopwords)
+        must still resolve via rule 1a exact-match, not 1c. Both
+        rules give the same answer here — this pins that rule 1a
+        fires first (so nothing regresses if 1c is later disabled).
+        """
+        lexical = self._soda_lexical()
+        with _PatchStack(_stub_search(lexical=lexical, semantic={})):
+            results = product_search.search_products(
+                BUSINESS_ID, "Soda Frutos rojos", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "Soda Frutos rojos"
+
+    def test_two_candidates_with_equal_token_set_falls_back(self):
+        """
+        Negative guard: if two candidates share the same token set as
+        the query, rule 1c abstains and the search falls through to
+        the score-ratio rule (or disambiguation). This protects
+        against accidentally picking when the catalog has duplicate
+        near-identical names.
+        """
+        dup_a = _product("p-dup-a", "Limonada natural", category="BEBIDAS", tags=["limonada"], price=6500)
+        dup_b = _product("p-dup-b", "Limonada natural", category="BEBIDAS", tags=["limonada"], price=6500)
+        lexical = {"DUP_A": dup_a, "DUP_B": dup_b}
+        # Equal scores → score ratio rule won't fire → disambiguation
+        with _PatchStack(_stub_search(lexical=lexical, semantic={})):
+            with pytest.raises(product_search.AmbiguousProductError):
+                product_search.search_products(
+                    BUSINESS_ID, "limonada natural", unique=True,
+                )
+
+    def test_corona_single_token_still_disambiguates_after_rule_1c(self):
+        """
+        Regression guard for the Corona/Corona michelada prefix-rival
+        case. Rule 1c's ≥2-tokens gate means a bare "corona" query
+        never reaches this path, so the existing rule 1a prefix-rival
+        disambiguation stays intact.
+        """
+        lexical = {
+            "CORONA":      BIELA_CATALOG["CORONA"],
+            "CORONA_MICH": BIELA_CATALOG["CORONA_MICH"],
+        }
+        semantic = {
+            "CORONA":      (BIELA_CATALOG["CORONA"],      0.78),
+            "CORONA_MICH": (BIELA_CATALOG["CORONA_MICH"], 0.77),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            with pytest.raises(product_search.AmbiguousProductError):
+                product_search.search_products(
+                    BUSINESS_ID, "corona", unique=True,
+                )
+
+    def test_michelada_single_token_still_disambiguates_after_rule_1c(self):
+        """
+        Parallel Corona guard with the other half of the prefix rival.
+        "michelada" alone must stay in the disambiguation lane because
+        it's a prefix token of "Corona michelada".
+        """
+        lexical = {
+            "MICHELADA":   BIELA_CATALOG["MICHELADA"],
+            "CORONA_MICH": BIELA_CATALOG["CORONA_MICH"],
+        }
+        semantic = {
+            "MICHELADA":   (BIELA_CATALOG["MICHELADA"],   0.85),
+            "CORONA_MICH": (BIELA_CATALOG["CORONA_MICH"], 0.80),
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic=semantic)):
+            with pytest.raises(product_search.AmbiguousProductError):
+                product_search.search_products(
+                    BUSINESS_ID, "michelada", unique=True,
+                )

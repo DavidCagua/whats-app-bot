@@ -704,6 +704,97 @@ def test_biela_multi_item_one_not_found_surfaces_in_response():
 
 
 # ---------------------------------------------------------------------------
+# Biela — token-set decisive winner (Bug 5)
+#
+# Incident 2026-04-16 +573177000722 turn 11. User said "Una soda de
+# frutos rojos". The exact-name rule (1a) missed because of the "una"
+# and "de" stopwords in the query. The score-ratio rule (2) didn't
+# clear 2× because Coca-Cola / Coca-Cola Zero came in as strong
+# embedding neighbors. The user got a disambiguation with 5 options
+# including two Coca-Colas — obviously wrong, since Soda Frutos rojos
+# is a perfect token-set match. New rule 1c fires and wins.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_soda_de_frutos_rojos_wins_decisively():
+    """
+    End-to-end: user says "Una soda de frutos rojos" at an empty
+    ORDERING cart. The search returns Soda, Soda Frutos rojos,
+    Soda Uvilla, Coca-Cola, Coca-Cola Zero as candidates (simulating
+    Biela's real catalog behavior). Rule 1c must pick Soda Frutos
+    rojos decisively — no disambiguation prompt.
+    """
+    SODA_FRUTOS = {
+        "id": "prod-soda-frutos",
+        "business_id": "44488756-473b-46d2-a907-9f579e98ecfd",
+        "name": "Soda Frutos rojos",
+        "description": "",
+        "price": 15000.0,
+        "currency": "COP",
+        "category": "BEBIDAS",
+        "sku": None,
+        "is_active": True,
+        "tags": ["bebida", "soda"],
+        "metadata": {},
+        "matched_by": "lexical",
+    }
+    SODA_PLAIN = {**SODA_FRUTOS, "id": "prod-soda", "name": "Soda", "price": 4500.0}
+    SODA_UVILLA = {
+        **SODA_FRUTOS,
+        "id": "prod-soda-uvilla",
+        "name": "Soda Uvilla y maracuyá",
+    }
+    COCA = {
+        **SODA_FRUTOS,
+        "id": "prod-coca",
+        "name": "Coca-Cola",
+        "price": 5500.0,
+        "tags": ["gaseosa"],
+    }
+    COCA_ZERO = {**COCA, "id": "prod-coca-zero", "name": "Coca-Cola Zero"}
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        # Simulate the ranker returning all 5 candidates for any
+        # soda-related query — this is what the real Biela catalog
+        # behavior looked like in the 2026-04-16 incident. Rule 1c
+        # must disambiguate structurally, not via score gap.
+        if "soda" in q or "frutos" in q:
+            return [SODA_FRUTOS, SODA_PLAIN, SODA_UVILLA, COCA, COCA_ZERO]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_soda_de_frutos_rojos_decisive",
+        user_message="Una soda de frutos rojos",
+        initial_order_context={"state": "ORDERING", "items": [], "total": 0},
+        known_products=[SODA_FRUTOS, SODA_PLAIN, SODA_UVILLA, COCA, COCA_ZERO],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        must_contain_any=[
+            # Cart should confirm the Soda Frutos rojos landing —
+            # exact catalog name required.
+            r"soda frutos rojos",
+        ],
+        must_not_contain=[
+            # No disambiguation prompt, no Coca-Cola as an option.
+            r"coca[- ]?cola",
+            r"¿cu[aá]l prefieres",
+            r"\buvilla\b",
+            r"\blo siento\b",
+            r"\bdiscul",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+    # Extra: planner classification itself — must NOT be the
+    # needs_clarification result kind.
+    assert run.exec_result.get("result_kind") == "cart_change", (
+        f"expected cart_change (decisive winner), got "
+        f"{run.exec_result.get('result_kind')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # LLM-as-judge scenario — prose quality check
 # ---------------------------------------------------------------------------
 
