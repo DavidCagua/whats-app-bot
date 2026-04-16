@@ -131,6 +131,11 @@ def _stub_search(lexical=None, semantic=None, synonyms=None):
         patch("app.services.product_search._semantic_candidates", side_effect=fake_semantic),
         patch("app.services.product_search._load_business_synonyms", side_effect=fake_load_synonyms),
         patch("app.services.product_search.get_db_session", side_effect=fake_get_session),
+        # Disable the LLM resolver by default so deterministic-rule
+        # tests can assert AmbiguousProductError without the resolver
+        # intercepting. Tests that want to exercise the LLM resolver
+        # override this with their own mock.
+        patch("app.services.product_search._llm_resolve_disambiguation", return_value=None),
     ]
 
 
@@ -664,3 +669,160 @@ class TestTokenSetEqualityDecisiveWinner:
                 product_search.search_products(
                     BUSINESS_ID, "michelada", unique=True,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — LLM disambiguation resolver
+#
+# When deterministic rules can't pick a winner, a cheap LLM call
+# resolves the ambiguity with semantic understanding. Three outcomes:
+#   WINNER   → one clear best match (optionally with derived notes)
+#   FILTERED → genuinely ambiguous, but some candidates excluded
+#   AMBIGUOUS → all candidates plausible
+#
+# These tests mock _llm_resolve_disambiguation to verify the wiring
+# without hitting the real API.
+# ---------------------------------------------------------------------------
+
+
+def _stub_search_with_llm(lexical=None, semantic=None, synonyms=None, llm_result=None):
+    """
+    Like _stub_search but lets the caller control the LLM resolver's
+    return value. Passes llm_result=None to disable (same as the
+    default stub), or a dict to simulate a specific LLM response.
+    """
+    base_patches = _stub_search(lexical=lexical, semantic=semantic, synonyms=synonyms)
+    # Replace the last patch (which disables the LLM resolver) with
+    # one that returns our test-specific result.
+    base_patches[-1] = patch(
+        "app.services.product_search._llm_resolve_disambiguation",
+        return_value=llm_result,
+    )
+    return base_patches
+
+
+class TestLLMDisambiguationResolver:
+    """
+    Integration point tests: verify that the search_products wiring
+    correctly uses the LLM resolver's output to pick a winner, filter
+    candidates, or fall through to AmbiguousProductError.
+    """
+
+    @staticmethod
+    def _jugo_candidates():
+        return {
+            "JUGOS_LECHE":  BIELA_CATALOG["JUGOS_LECHE"],
+            "JUGOS_AGUA":   BIELA_CATALOG["JUGOS_AGUA"],
+            "HERVIDO_MORA": BIELA_CATALOG["HERVIDO_MORA"],
+        }
+
+    def test_llm_winner_returns_single_product(self):
+        """
+        LLM says WINNER → search_products returns a single-element list
+        with the winning product.
+        """
+        cands = self._jugo_candidates()
+        llm_result = {
+            "result": "WINNER",
+            "product": dict(cands["JUGOS_LECHE"], _derived_notes="mora"),
+        }
+        with _PatchStack(_stub_search_with_llm(
+            lexical=cands,
+            semantic={k: (v, 0.80) for k, v in cands.items()},
+            llm_result=llm_result,
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "jugo de mora en leche", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "Jugos en leche"
+        assert results[0].get("_derived_notes") == "mora"
+
+    def test_llm_filtered_excludes_wrong_category(self):
+        """
+        LLM says FILTERED → AmbiguousProductError is still raised but
+        only with the filtered candidates. Hervido Mora (a hot drink)
+        should be excluded from a "jugo" disambiguation.
+        """
+        cands = self._jugo_candidates()
+        filtered_products = [cands["JUGOS_AGUA"], cands["JUGOS_LECHE"]]
+        llm_result = {
+            "result": "FILTERED",
+            "products": filtered_products,
+        }
+        with _PatchStack(_stub_search_with_llm(
+            lexical=cands,
+            semantic={k: (v, 0.80) for k, v in cands.items()},
+            llm_result=llm_result,
+        )):
+            with pytest.raises(product_search.AmbiguousProductError) as exc_info:
+                product_search.search_products(
+                    BUSINESS_ID, "jugo de mora", unique=True,
+                )
+        names = {m.get("name") for m in exc_info.value.matches}
+        assert "Jugos en agua" in names
+        assert "Jugos en leche" in names
+        assert "Hervido Mora" not in names
+
+    def test_llm_ambiguous_raises_with_all_candidates(self):
+        """
+        LLM says AMBIGUOUS → AmbiguousProductError raised with the
+        original candidates (same as if no LLM resolver existed).
+
+        Uses the Corona pair because deterministic rules reach the LLM
+        resolver when one candidate has an exact match but a prefix
+        rival exists — rule 1a falls through, and the score gap isn't
+        big enough for rule 2.
+
+        Wait — actually Corona "corona" does reach AmbiguousProductError
+        via the prefix-rival fallthrough. But the LLM resolver is
+        disabled in the default stub. Here we ENABLE it and make it
+        return AMBIGUOUS to verify the wiring.
+        """
+        lexical = {
+            "CORONA":      BIELA_CATALOG["CORONA"],
+            "CORONA_MICH": BIELA_CATALOG["CORONA_MICH"],
+        }
+        semantic = {
+            "CORONA":      (BIELA_CATALOG["CORONA"],      0.78),
+            "CORONA_MICH": (BIELA_CATALOG["CORONA_MICH"], 0.77),
+        }
+        llm_result = {"result": "AMBIGUOUS"}
+        with _PatchStack(_stub_search_with_llm(
+            lexical=lexical,
+            semantic=semantic,
+            llm_result=llm_result,
+        )):
+            with pytest.raises(product_search.AmbiguousProductError) as exc_info:
+                product_search.search_products(
+                    BUSINESS_ID, "corona", unique=True,
+                )
+        names = {m.get("name") for m in exc_info.value.matches}
+        assert "Corona 355ml" in names
+        assert "Corona michelada" in names
+
+    def test_llm_failure_falls_back_to_full_disambiguation(self):
+        """
+        When the LLM resolver returns None (API failure, no key, parse
+        error), the search falls back to the deterministic path: raise
+        AmbiguousProductError with all lexical candidates.
+        """
+        lexical = {
+            "CORONA":      BIELA_CATALOG["CORONA"],
+            "CORONA_MICH": BIELA_CATALOG["CORONA_MICH"],
+        }
+        semantic = {
+            "CORONA":      (BIELA_CATALOG["CORONA"],      0.78),
+            "CORONA_MICH": (BIELA_CATALOG["CORONA_MICH"], 0.77),
+        }
+        # llm_result=None simulates failure
+        with _PatchStack(_stub_search_with_llm(
+            lexical=lexical,
+            semantic=semantic,
+            llm_result=None,
+        )):
+            with pytest.raises(product_search.AmbiguousProductError) as exc_info:
+                product_search.search_products(
+                    BUSINESS_ID, "corona", unique=True,
+                )
+        assert len(exc_info.value.matches) >= 2

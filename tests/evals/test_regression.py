@@ -716,6 +716,57 @@ def test_biela_multi_item_one_not_found_surfaces_in_response():
 # ---------------------------------------------------------------------------
 
 
+def test_biela_jugo_de_mora_disamb_excludes_hervido_mora():
+    """
+    Bug 4 — the LLM disambiguation resolver. User says "un jugo de mora"
+    at Biela. The ranker returns [Jugos en agua, Jugos en leche, Hervido Mora].
+    The deterministic rules can't resolve (no exact match, no containment,
+    no token-set equality, no score gap). The LLM resolver sees that
+    "jugo" ≠ "hervido" and either:
+      A. Filters Hervido Mora out → disambiguation shows only the two jugos.
+      B. Returns AMBIGUOUS → all three shown (acceptable but not ideal).
+
+    What MUST NOT happen: the bot should NOT present Hervido Mora as
+    equal to the jugos, or silently pick Hervido Mora as the winner.
+    """
+    JUGOS_EN_AGUA = product("Jugos en agua", 7500, category="BEBIDAS",
+                            tags=["jugo", "natural", "agua", "bebida fria"])
+    JUGOS_EN_LECHE = product("Jugos en leche", 7500, category="BEBIDAS",
+                             tags=["jugo", "natural", "leche", "bebida fria"])
+    HERVIDO_MORA = product("Hervido Mora", 9500, category="BEBIDAS",
+                           description="Bebida caliente preparada con mora.",
+                           tags=["hervido", "caliente", "bebida caliente", "mora"])
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        if "jugo" in q or "mora" in q:
+            return [JUGOS_EN_AGUA, JUGOS_EN_LECHE, HERVIDO_MORA]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_jugo_de_mora_disamb_excludes_hervido",
+        user_message="Un jugo de mora",
+        initial_order_context={"state": "ORDERING", "items": [], "total": 0},
+        known_products=[JUGOS_EN_AGUA, JUGOS_EN_LECHE, HERVIDO_MORA],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        must_not_contain=[
+            # Hervido Mora must not be presented as an option for
+            # "jugo de mora" — it's a hot drink, not a juice.
+            r"hervido mora",
+            r"\blo siento\b",
+            r"\bno pude\b",
+        ],
+        must_contain_any=[
+            # The disambiguation must present at least one jugo option
+            r"jugos? en agua",
+            r"jugos? en leche",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
 def test_biela_soda_de_frutos_rojos_wins_decisively():
     """
     End-to-end: user says "Una soda de frutos rojos" at an empty

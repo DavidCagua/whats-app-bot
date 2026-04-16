@@ -29,7 +29,9 @@ Score weights (additive per product):
     stem variant bonus         5
 """
 
+import json
 import logging
+import os
 import re
 import unicodedata
 import uuid
@@ -41,6 +43,168 @@ from ..database.models import Product, Business, get_db_session
 from .embeddings import embed_text, format_vector_literal
 
 logger = logging.getLogger(__name__)
+
+
+# ── LLM disambiguation resolver ──────────────────────────────────────────
+# When the deterministic rules (exact-name, generic-containment,
+# token-set equality, score-ratio) can't pick a decisive winner, this
+# cheap LLM call resolves the ambiguity with semantic understanding
+# rather than more heuristic rules. Replaces the "always raise
+# AmbiguousProductError" fallback.
+#
+# Three possible outcomes:
+#   WINNER  — one clear best match, optionally with derived notes
+#             (e.g. "jugo de mora en leche" → Jugos en leche + notes=mora)
+#   FILTERED — genuinely ambiguous, but some candidates are wrong
+#             category and should be excluded from the options shown
+#             to the user (e.g. Hervido Mora excluded from a "jugo"
+#             disambiguation)
+#   AMBIGUOUS — all candidates are plausible, show them all
+
+_LLM_RESOLVER_SYSTEM = """You are a product-matching resolver for a Colombian restaurant's WhatsApp ordering bot.
+
+Given the customer's query and a numbered list of candidate products from the catalog, decide:
+
+1. **WINNER** — if exactly one candidate is clearly what the customer wants, return it.
+   If the customer mentioned a flavor/ingredient/detail not in the winning product's name,
+   include it in "notes" (the kitchen uses notes to fulfill flavor requests).
+
+2. **FILTERED** — if the query is genuinely ambiguous between SOME candidates (e.g. customer
+   said "jugo" but didn't specify water or milk) but other candidates are clearly the wrong
+   category/type (e.g. a hot drink when the customer asked for a juice), exclude the wrong ones.
+   Return the indices of candidates to KEEP.
+
+3. **AMBIGUOUS** — if all candidates are plausible matches, return all indices.
+
+Rules:
+- "jugo" (juice) ≠ "hervido" (hot fruit drink). They are different product categories.
+- "soda" (Italian soda) ≠ "gaseosa" / "Coca-Cola". Different product types.
+- Generic products like "Jugos en leche" accept any flavor — the flavor goes in "notes".
+- Respond ONLY with valid JSON, no markdown, no explanation.
+
+Response format — exactly one of:
+  {"result": "WINNER", "index": <0-based>, "notes": "<flavor or empty string>"}
+  {"result": "FILTERED", "keep": [<0-based indices to show user>]}
+  {"result": "AMBIGUOUS"}
+"""
+
+_llm_resolver = None
+
+
+def _get_llm_resolver():
+    global _llm_resolver
+    if _llm_resolver is not None:
+        return _llm_resolver
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from langchain_openai import ChatOpenAI
+        _llm_resolver = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0,
+            max_tokens=100,
+            api_key=api_key,
+        )
+    except Exception as exc:
+        logger.warning("[PRODUCT_SEARCH] LLM resolver init failed: %s", exc)
+    return _llm_resolver
+
+
+def _llm_resolve_disambiguation(
+    query: str,
+    candidates: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Ask a fast LLM to resolve product disambiguation.
+
+    Args:
+        query: The user's original search query.
+        candidates: Scored product dicts (name, price, tags, description).
+
+    Returns:
+        A dict with one of three shapes:
+          {"result": "WINNER", "product": <product_dict>, "notes": "..."}
+          {"result": "FILTERED", "products": [<product_dicts to keep>]}
+          {"result": "AMBIGUOUS"}  (or None on failure → caller falls back)
+    """
+    llm = _get_llm_resolver()
+    if llm is None:
+        return None
+
+    # Build a compact candidate list for the prompt
+    lines = []
+    for i, c in enumerate(candidates):
+        tags = ", ".join(c.get("tags") or [])
+        desc = (c.get("description") or "")[:80]
+        price = int(c.get("price") or 0)
+        line = f"{i}. {c.get('name')} (${price:,}) — {desc}".replace(",", ".")
+        if tags:
+            line += f" [tags: {tags}]"
+        lines.append(line)
+
+    user_msg = f"Query: \"{query}\"\n\nCandidates:\n" + "\n".join(lines)
+
+    try:
+        from langchain_core.messages import SystemMessage, HumanMessage
+        response = llm.invoke([
+            SystemMessage(content=_LLM_RESOLVER_SYSTEM),
+            HumanMessage(content=user_msg),
+        ])
+        text = (response.content if hasattr(response, "content") else str(response)).strip()
+
+        # Parse JSON — try raw first, then extract from markdown fences
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[^{}]*\}", text)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+
+        if not parsed or not isinstance(parsed, dict):
+            logger.warning("[PRODUCT_SEARCH] LLM resolver returned unparseable: %r", text)
+            return None
+
+        result_type = (parsed.get("result") or "").upper()
+
+        if result_type == "WINNER":
+            idx = parsed.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(candidates):
+                winner = dict(candidates[idx])
+                notes = (parsed.get("notes") or "").strip()
+                if notes:
+                    winner["_derived_notes"] = notes
+                logger.info(
+                    "[PRODUCT_SEARCH] LLM resolver: WINNER query=%r → %r notes=%r",
+                    query, winner.get("name"), notes,
+                )
+                return {"result": "WINNER", "product": winner}
+
+        if result_type == "FILTERED":
+            keep = parsed.get("keep") or []
+            if isinstance(keep, list) and len(keep) >= 1:
+                filtered = []
+                for idx in keep:
+                    if isinstance(idx, int) and 0 <= idx < len(candidates):
+                        filtered.append(candidates[idx])
+                if filtered and len(filtered) < len(candidates):
+                    logger.info(
+                        "[PRODUCT_SEARCH] LLM resolver: FILTERED query=%r keep=%s",
+                        query, [p.get("name") for p in filtered],
+                    )
+                    return {"result": "FILTERED", "products": filtered}
+
+        # AMBIGUOUS or unrecognized → return AMBIGUOUS explicitly
+        logger.info("[PRODUCT_SEARCH] LLM resolver: AMBIGUOUS for query=%r", query)
+        return {"result": "AMBIGUOUS"}
+
+    except Exception as exc:
+        logger.warning("[PRODUCT_SEARCH] LLM resolver failed: %s", exc)
+        return None
 
 
 class AmbiguousProductError(Exception):
@@ -801,6 +965,19 @@ def search_products(
             # products they never asked about (e.g. malteadas for "michelada").
             lexical_only = [s for s in scored if s[2]]
             close = [p for _, _, _, p in (lexical_only or scored)[:5]]
+
+            # ── LLM resolver: last chance before raising disambiguation ──
+            # All deterministic rules failed. Ask a fast LLM to either
+            # pick a winner, filter out wrong-category candidates, or
+            # confirm that the list is genuinely ambiguous.
+            llm_result = _llm_resolve_disambiguation(query, close)
+            if llm_result is not None:
+                if llm_result["result"] == "WINNER":
+                    return [llm_result["product"]]
+                if llm_result["result"] == "FILTERED":
+                    close = llm_result["products"]
+                # AMBIGUOUS → fall through to raise with (possibly filtered) close list
+
             raise AmbiguousProductError(query=query, matches=close)
 
         return ranked
