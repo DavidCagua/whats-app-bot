@@ -115,7 +115,7 @@ export function OrdersTable({ initialOrders }: { initialOrders: OrderRow[] }) {
                   {order.id.slice(0, 8)}
                 </TableCell>
 
-                 <TableCell className="text-muted-foreground">
+                <TableCell className="text-muted-foreground">
                   {order.created_at
                     ? format(new Date(order.created_at), "MMM d, yyyy HH:mm")
                     : "—"}
