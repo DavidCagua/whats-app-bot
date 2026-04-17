@@ -777,6 +777,7 @@ class OrderAgent(BaseAgent):
                 "- Celebra brevemente (ej. '¡Listo!').\n"
                 "- Muestra el número de pedido, items, subtotal, domicilio y total.\n"
                 "- Dile que pronto se comunicarán para coordinar la entrega.\n"
+                "- Indica que el pedido se demora entre 40 a 50 minutos en su entrega.\n"
                 "- 3-6 líneas."
             )
             inp = (
