@@ -1,5 +1,14 @@
+// IMPORTANT: keep `binaryTargets` set to all three platforms below.
+// Without it, `prisma generate` only downloads the engine for the build
+// host, and the deployed runtime crashes with "could not locate the
+// Query Engine for runtime ...". Removing them from a `prisma db pull`
+// is a NO-OP that this comment exists to warn you about.
+//   native               — local dev (macOS arm64 / x64)
+//   debian-openssl-3.0.x — Debian-based Linux containers (Railway default)
+//   rhel-openssl-3.0.x   — Vercel serverless runtime (Amazon Linux 2 / RHEL)
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
@@ -9,37 +18,41 @@ datasource db {
 
 /// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
 model businesses {
-  id                    String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name                  String                  @db.VarChar(255)
-  business_type         String?                 @default("barberia") @db.VarChar(50)
-  settings              Json?                   @default("{}")
-  is_active             Boolean?                @default(true)
-  created_at            DateTime?               @default(now()) @db.Timestamptz(6)
-  updated_at            DateTime?               @default(now()) @db.Timestamptz(6)
-  user_businesses       user_businesses[]
-  whatsapp_numbers      whatsapp_numbers[]
-  business_agents       business_agents[]
-  products              products[]
-  services              services[]
-  orders                orders[]
-  bookings              bookings[]
-  business_availability business_availability[]
-  staff_members         staff_members[]
+  id                          String                        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                        String                        @db.VarChar(255)
+  business_type               String?                       @default("barberia") @db.VarChar(50)
+  settings                    Json?                         @default("{}")
+  is_active                   Boolean?                      @default(true)
+  created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime                      @default(now()) @db.Timestamptz(6)
+  bookings                    bookings[]
+  business_agents             business_agents[]
+  business_availability       business_availability[]
+  conversation_agent_settings conversation_agent_settings[]
+  conversation_sessions       conversation_sessions[]
+  conversations               conversations[]
+  orders                      orders[]
+  products                    products[]
+  services                    services[]
+  staff_members               staff_members[]
+  user_businesses             user_businesses[]
+  whatsapp_numbers            whatsapp_numbers[]
 
   @@index([is_active], map: "idx_businesses_is_active")
 }
 
 model business_agents {
-  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id String    @db.Uuid
-  agent_type  String    @db.VarChar(50)
-  enabled     Boolean?  @default(true)
-  priority    Int?      @default(100)
-  config      Json?     @default("{}")
-  created_by  String?   @db.Uuid
-  created_at  DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at  DateTime? @default(now()) @db.Timestamptz(6)
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id String     @db.Uuid
+  agent_type  String     @db.VarChar(50)
+  enabled     Boolean?   @default(true)
+  priority    Int?       @default(100)
+  config      Json?      @default("{}")
+  created_by  String?    @db.Uuid
+  created_at  DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime   @default(now()) @db.Timestamptz(6)
   businesses  businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users       users?     @relation(fields: [created_by], references: [id], onUpdate: NoAction)
 
   @@unique([business_id, agent_type])
   @@index([business_id], map: "idx_business_agents_business_id")
@@ -47,12 +60,13 @@ model business_agents {
 }
 
 model conversation_agent_settings {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id   String   @db.Uuid
-  whatsapp_id   String   @db.VarChar(50)
-  agent_enabled Boolean? @default(true)
-  created_at    DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id   String     @db.Uuid
+  whatsapp_id   String     @db.VarChar(50)
+  agent_enabled Boolean    @default(true)
+  created_at    DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime   @default(now()) @db.Timestamptz(6)
+  businesses    businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([business_id, whatsapp_id])
   @@index([business_id], map: "idx_conversation_agent_settings_business_id")
@@ -61,20 +75,20 @@ model conversation_agent_settings {
 }
 
 model conversation_attachments {
-  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   conversation_id    Int
-  type               String   @db.VarChar(20)
-  content_type       String?  @db.VarChar(255)
-  provider_media_url String?  @db.Text
-  provider_media_id  String?  @db.VarChar(255)
-  url                String?  @db.Text
+  type               String        @db.VarChar(20)
+  content_type       String?       @db.VarChar(255)
+  provider_media_url String?
+  provider_media_id  String?       @db.VarChar(255)
+  url                String?
   size_bytes         BigInt?
-  duration_sec       Decimal? @db.Decimal(10, 2)
-  transcript         String?  @db.Text
-  provider_metadata  Json?    @default("{}")
-  created_at         DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at         DateTime? @default(now()) @db.Timestamptz(6)
-  conversations      conversations @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+  duration_sec       Decimal?      @db.Decimal(10, 2)
+  transcript         String?
+  provider_metadata  Json?         @default("{}")
+  created_at         DateTime      @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime      @default(now()) @db.Timestamptz(6)
+  conversations      conversations @relation(fields: [conversation_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([conversation_id], map: "idx_conversation_attachments_conversation_id")
   @@index([type], map: "idx_conversation_attachments_type")
@@ -82,32 +96,40 @@ model conversation_attachments {
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model conversations {
-  id                 Int      @id @default(autoincrement())
-  whatsapp_id        String   @db.VarChar(50)
-  message            String
-  message_type       String?  @default("text") @db.VarChar(20)
-  role               String   @db.VarChar(20)
-  timestamp          DateTime @db.Timestamp(6)
-  created_at         DateTime @db.Timestamp(6)
-  business_id        String   @db.Uuid
-  whatsapp_number_id String?  @db.Uuid
+  id                       Int                        @id @default(autoincrement())
+  whatsapp_id              String                     @db.VarChar(50)
+  message                  String
+  role                     String                     @db.VarChar(20)
+  timestamp                DateTime                   @default(now()) @db.Timestamptz(6)
+  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  business_id              String                     @db.Uuid
+  whatsapp_number_id       String?                    @db.Uuid
+  agent_type               String?                    @db.VarChar(50)
+  message_type             String?                    @default("text") @db.VarChar(20)
   conversation_attachments conversation_attachments[]
+  businesses               businesses                 @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  whatsapp_numbers         whatsapp_numbers?          @relation(fields: [whatsapp_number_id], references: [id], onUpdate: NoAction)
 
   @@index([business_id], map: "idx_conversations_business_id")
   @@index([whatsapp_number_id], map: "idx_conversations_whatsapp_number_id")
-  @@index([timestamp], map: "ix_conversations_timestamp")
-  @@index([whatsapp_id], map: "ix_conversations_whatsapp_id")
+  @@index([timestamp], map: "idx_conversations_timestamp")
+  @@index([whatsapp_id], map: "idx_conversations_whatsapp_id")
 }
 
 model customers {
-  id          Int      @id @default(autoincrement())
-  whatsapp_id String   @unique(map: "ix_customers_whatsapp_id") @db.VarChar(50)
-  name        String   @db.VarChar(100)
-  age         Int?
-  created_at  DateTime @db.Timestamp(6)
-  updated_at  DateTime @db.Timestamp(6)
-  orders      orders[]
-  bookings    bookings[]
+  id             Int        @id @default(autoincrement())
+  whatsapp_id    String     @unique @db.VarChar(50)
+  name           String     @db.VarChar(100)
+  age            Int?
+  address        String?
+  phone          String?    @db.VarChar(50)
+  payment_method String?    @db.VarChar(100)
+  created_at     DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime   @default(now()) @db.Timestamptz(6)
+  bookings       bookings[]
+  orders         orders[]
+
+  @@index([whatsapp_id], map: "idx_customers_whatsapp_id")
 }
 
 /// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
@@ -116,7 +138,7 @@ model user_businesses {
   user_id     String     @db.Uuid
   business_id String     @db.Uuid
   role        String?    @default("staff") @db.VarChar(50)
-  created_at  DateTime?  @default(now()) @db.Timestamptz(6)
+  created_at  DateTime   @default(now()) @db.Timestamptz(6)
   businesses  businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   users       users      @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
@@ -132,11 +154,12 @@ model users {
   password_hash   String
   full_name       String?           @db.VarChar(255)
   is_active       Boolean?          @default(true)
-  created_at      DateTime?         @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime?         @default(now()) @db.Timestamptz(6)
-  role            String?           @default("member") @db.VarChar(50)
-  user_businesses user_businesses[]
+  created_at      DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime          @default(now()) @db.Timestamptz(6)
+  role            String?           @default("staff") @db.VarChar(50)
+  business_agents business_agents[]
   staff_members   staff_members[]
+  user_businesses user_businesses[]
 
   @@index([email], map: "idx_users_email")
   @@index([role], map: "idx_users_role")
@@ -144,15 +167,16 @@ model users {
 
 /// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
 model whatsapp_numbers {
-  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id     String     @db.Uuid
-  phone_number_id String?    @unique(map: "whatsapp_numbers_phone_number_id_key") @db.VarChar(255)
-  phone_number    String     @db.VarChar(50)
-  display_name    String?    @db.VarChar(255)
-  is_active       Boolean?   @default(true)
-  created_at      DateTime?  @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime?  @default(now()) @db.Timestamptz(6)
-  businesses      businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id     String          @db.Uuid
+  phone_number_id String?         @db.VarChar(255)
+  phone_number    String          @db.VarChar(50)
+  is_active       Boolean?        @default(true)
+  created_at      DateTime        @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime        @default(now()) @db.Timestamptz(6)
+  display_name    String?         @db.VarChar(255)
+  conversations   conversations[]
+  businesses      businesses      @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([business_id, phone_number], map: "whatsapp_numbers_business_phone_unique")
   @@index([business_id], map: "idx_whatsapp_numbers_business_id")
@@ -161,38 +185,47 @@ model whatsapp_numbers {
 }
 
 model products {
-  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id String    @db.Uuid
-  name        String    @db.VarChar(255)
-  description String?   @db.Text
-  price       Decimal   @db.Decimal(12, 2)
-  currency    String?   @default("COP") @db.VarChar(10)
-  category    String?   @db.VarChar(50)
-  sku         String?   @db.VarChar(50)
-  is_active   Boolean?  @default(true)
-  created_at  DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at  DateTime? @default(now()) @db.Timestamptz(6)
-  businesses  businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id          String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id String                 @db.Uuid
+  name        String                 @db.VarChar(255)
+  description String?
+  price       Decimal                @db.Decimal(12, 2)
+  currency    String?                @default("COP") @db.VarChar(10)
+  sku         String?                @db.VarChar(50)
+  is_active   Boolean?               @default(true)
+  created_at  DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime               @default(now()) @db.Timestamptz(6)
+  category    String?                @db.VarChar(50)
+  tags        String[]               @default([])
+  metadata    Json                   @default("{}")
+  embedding   Unsupported("vector")?
   order_items order_items[]
+  businesses  businesses             @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([business_id], map: "idx_products_business_id")
   @@index([category], map: "idx_products_category")
   @@index([is_active], map: "idx_products_is_active")
+  @@index([embedding], map: "idx_products_embedding_cosine")
+  @@index([metadata(ops: JsonbPathOps)], map: "idx_products_metadata_gin", type: Gin)
+  @@index([tags], map: "idx_products_tags_gin", type: Gin)
 }
 
 model orders {
-  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id  String    @db.Uuid
-  customer_id  Int?      @db.Integer
-  whatsapp_id  String?   @db.VarChar(50)
-  status       String?   @default("pending") @db.VarChar(20)
-  total_amount Decimal   @default(0) @db.Decimal(12, 2)
-  notes        String?   @db.Text
-  created_at   DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at   DateTime? @default(now()) @db.Timestamptz(6)
-  businesses   businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  customers    customers? @relation(fields: [customer_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
-  order_items  order_items[]
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id      String        @db.Uuid
+  customer_id      Int?
+  whatsapp_id      String?       @db.VarChar(50)
+  status           String?       @default("pending") @db.VarChar(20)
+  total_amount     Decimal       @default(0) @db.Decimal(12, 2)
+  notes            String?
+  created_at       DateTime      @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime      @default(now()) @db.Timestamptz(6)
+  delivery_address String?
+  contact_phone    String?
+  payment_method   String?
+  order_items      order_items[]
+  businesses       businesses    @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  customers        customers?    @relation(fields: [customer_id], references: [id], onUpdate: NoAction)
 
   @@index([business_id], map: "idx_orders_business_id")
   @@index([customer_id], map: "idx_orders_customer_id")
@@ -207,48 +240,52 @@ model order_items {
   quantity   Int
   unit_price Decimal  @db.Decimal(12, 2)
   line_total Decimal  @db.Decimal(12, 2)
-  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  notes      String?
   orders     orders   @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  products   products @relation(fields: [product_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  products   products @relation(fields: [product_id], references: [id], onUpdate: NoAction)
 
   @@index([order_id], map: "idx_order_items_order_id")
   @@index([product_id], map: "idx_order_items_product_id")
 }
 
 model business_availability {
-  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id           String    @db.Uuid
-  day_of_week           Int       @db.SmallInt
-  open_time             String    @db.VarChar(5)
-  close_time            String    @db.VarChar(5)
-  slot_duration_minutes Int       @default(60)
-  is_active             Boolean?  @default(true)
-  created_at            DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at            DateTime? @default(now()) @db.Timestamptz(6)
-  businesses            businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id                    String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id           String         @db.Uuid
+  day_of_week           Int            @db.SmallInt
+  open_time             DateTime       @db.Time(6)
+  close_time            DateTime       @db.Time(6)
+  slot_duration_minutes Int            @default(60)
+  is_active             Boolean?       @default(true)
+  created_at            DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime       @default(now()) @db.Timestamptz(6)
+  staff_member_id       String?        @db.Uuid
+  businesses            businesses     @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  staff_members         staff_members? @relation(fields: [staff_member_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([business_id, day_of_week], map: "idx_business_availability_business_day")
   @@index([business_id], map: "idx_business_availability_business_id")
+  @@index([staff_member_id], map: "idx_business_availability_staff_member_id")
 }
 
 model bookings {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id       String    @db.Uuid
-  customer_id       Int?      @db.Integer
-  service_name      String?   @db.VarChar(255)
-  service_id        String?   @db.Uuid
-  start_at          DateTime  @db.Timestamptz(6)
-  end_at            DateTime  @db.Timestamptz(6)
-  status            String    @default("confirmed") @db.VarChar(20)
-  notes             String?   @db.Text
-  created_via       String?   @default("whatsapp") @db.VarChar(20)
-  staff_member_id   String?   @db.Uuid
-  created_at        DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at        DateTime? @default(now()) @db.Timestamptz(6)
-  businesses        businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  customers         customers? @relation(fields: [customer_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
-  services          services? @relation(fields: [service_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
-  staff_members     staff_members? @relation(fields: [staff_member_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id     String         @db.Uuid
+  customer_id     Int?
+  service_name    String?        @db.VarChar(255)
+  start_at        DateTime       @db.Timestamptz(6)
+  end_at          DateTime       @db.Timestamptz(6)
+  status          String         @default("confirmed") @db.VarChar(20)
+  notes           String?
+  created_via     String?        @default("whatsapp") @db.VarChar(20)
+  created_at      DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime       @default(now()) @db.Timestamptz(6)
+  staff_member_id String?        @db.Uuid
+  service_id      String?        @db.Uuid
+  businesses      businesses     @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  customers       customers?     @relation(fields: [customer_id], references: [id], onUpdate: NoAction)
+  services        services?      @relation(fields: [service_id], references: [id], onUpdate: NoAction)
+  staff_members   staff_members? @relation(fields: [staff_member_id], references: [id], onUpdate: NoAction)
 
   @@index([business_id], map: "idx_bookings_business_id")
   @@index([customer_id], map: "idx_bookings_customer_id")
@@ -257,40 +294,87 @@ model bookings {
   @@index([status], map: "idx_bookings_status")
   @@index([start_at], map: "idx_bookings_start_at")
   @@index([business_id, start_at], map: "idx_bookings_business_start")
+  @@index([staff_member_id, business_id], map: "idx_bookings_staff_business")
 }
 
 model services {
-  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id      String    @db.Uuid
-  name             String    @db.VarChar(255)
-  description      String?   @db.Text
-  price            Decimal   @db.Decimal(12, 2)
-  currency         String?   @default("COP") @db.VarChar(10)
-  duration_minutes Int       @default(60)
-  is_active        Boolean?  @default(true)
-  created_at       DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at       DateTime? @default(now()) @db.Timestamptz(6)
-  businesses       businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id      String     @db.Uuid
+  name             String     @db.VarChar(255)
+  description      String?
+  price            Decimal    @db.Decimal(12, 2)
+  currency         String?    @default("COP") @db.VarChar(10)
+  duration_minutes Int        @default(60)
+  is_active        Boolean?   @default(true)
+  created_at       DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime   @default(now()) @db.Timestamptz(6)
   bookings         bookings[]
+  businesses       businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
+  @@unique([business_id, name], map: "idx_services_business_name")
   @@index([business_id], map: "idx_services_business_id")
   @@index([is_active], map: "idx_services_is_active")
-  @@unique([business_id, name], map: "idx_services_business_name")
 }
 
 model staff_members {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  business_id     String    @db.Uuid
-  name            String    @db.VarChar(255)
-  role            String    @db.VarChar(100)
-  is_active       Boolean?  @default(true)
-  user_id         String?   @db.Uuid
-  created_at      DateTime? @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime? @default(now()) @db.Timestamptz(6)
-  businesses      businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  users           users? @relation(fields: [user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
-  bookings        bookings[]
+  id                    String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  business_id           String                  @db.Uuid
+  name                  String                  @db.VarChar(255)
+  role                  String                  @db.VarChar(100)
+  is_active             Boolean?                @default(true)
+  user_id               String?                 @db.Uuid
+  created_at            DateTime                @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime                @default(now()) @db.Timestamptz(6)
+  bookings              bookings[]
+  business_availability business_availability[]
+  businesses            businesses              @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_staff_business")
+  users                 users?                  @relation(fields: [user_id], references: [id], onUpdate: NoAction, map: "fk_staff_user")
 
-  @@index([business_id], map: "idx_staff_members_business_id")
-  @@index([user_id], map: "idx_staff_members_user_id")
+  @@index([business_id, is_active], map: "idx_staff_business_active")
+  @@index([business_id], map: "idx_staff_business_id")
+  @@index([is_active], map: "idx_staff_is_active")
+  @@index([user_id], map: "idx_staff_user_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model agent_types {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type        String   @unique @db.VarChar(50)
+  name        String   @db.VarChar(100)
+  description String?
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model conversation_sessions {
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  wa_id            String     @db.VarChar(50)
+  business_id      String     @db.Uuid
+  active_agents    Json?      @default("[]")
+  order_context    Json?      @default("{}")
+  booking_context  Json?      @default("{}")
+  agent_contexts   Json?      @default("{}")
+  last_activity_at DateTime   @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime   @default(now()) @db.Timestamptz(6)
+  last_order_id    String?    @db.VarChar(50)
+  last_booking_id  String?    @db.VarChar(50)
+  businesses       businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([wa_id, business_id])
+  @@index([last_activity_at], map: "idx_conversation_sessions_last_activity")
+  @@index([wa_id, business_id], map: "idx_conversation_sessions_wa_business")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model processed_messages {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  message_id   String   @unique @db.VarChar(255)
+  processed_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([processed_at], map: "idx_processed_at")
+  @@index([message_id], map: "idx_processed_messages_message_id")
+}
+
+model alembic_version {
+  version_num String @id(map: "alembic_version_pkc") @db.VarChar(32)
 }

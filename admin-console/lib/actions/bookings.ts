@@ -89,7 +89,16 @@ async function resolveCustomerId(
   return customer.id
 }
 
-function parseTimeToMinutes(value: string): number | null {
+/**
+ * Accepts either a "HH:MM" / "HH:MM:SS" string or a `Date` (what Prisma
+ * returns for a Postgres `TIME` column — epoch date with the clock time
+ * in UTC). Returns minutes-from-midnight, or null if the value can't
+ * be parsed.
+ */
+function parseTimeToMinutes(value: string | Date): number | null {
+  if (value instanceof Date) {
+    return value.getUTCHours() * 60 + value.getUTCMinutes()
+  }
   const [h, m] = value.split(":").map(Number)
   if (Number.isNaN(h) || Number.isNaN(m)) return null
   return h * 60 + m

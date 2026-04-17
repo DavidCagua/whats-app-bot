@@ -25,6 +25,7 @@ type OrderItem = {
   id: string
   quantity: number
   productName: string
+  notes: string | null
 }
 
 type OrderRow = {
@@ -129,6 +130,12 @@ export function OrdersTable({ initialOrders }: { initialOrders: OrderRow[] }) {
                     ? order.items.map((item) => (
                         <div key={item.id}>
                           {item.quantity}× {item.productName}
+                          {item.notes ? (
+                            <span className="text-muted-foreground italic">
+                              {" "}
+                              — {item.notes}
+                            </span>
+                          ) : null}
                         </div>
                       ))
                     : "—"}

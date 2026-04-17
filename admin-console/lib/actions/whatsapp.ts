@@ -84,9 +84,14 @@ export async function addWhatsAppNumber(data: {
     // Normalize empty string to null - multiple NULLs allowed (partial unique index), empty string would violate
     const phoneNumberId = data.phoneNumberId?.trim() || null
 
-    // Check if phone_number_id already exists (if provided)
+    // Check if phone_number_id already exists (if provided).
+    // Use findFirst because phone_number_id has a PARTIAL unique index
+    // (`UNIQUE WHERE phone_number_id IS NOT NULL`), which Prisma doesn't
+    // recognize as a full unique constraint -- so it's not in the
+    // findUnique where input. Uniqueness is still enforced at the DB
+    // level on insert; this lookup just guards the friendlier error.
     if (phoneNumberId) {
-      const existing = await prisma.whatsapp_numbers.findUnique({
+      const existing = await prisma.whatsapp_numbers.findFirst({
         where: { phone_number_id: phoneNumberId },
       })
 

@@ -5,6 +5,18 @@
 --              Anonymous and authenticated (JWT) users will have no direct table access.
 
 -- ============================================================================
+-- ENSURE service_role EXISTS (Supabase creates it automatically;
+-- plain Postgres in CI does not have it)
+-- ============================================================================
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'service_role') THEN
+    CREATE ROLE service_role NOLOGIN;
+  END IF;
+END
+$$;
+
+-- ============================================================================
 -- ENABLE RLS
 -- ============================================================================
 

@@ -3,6 +3,16 @@
     "supabase": {
       "type": "http",
       "url": "https://mcp.supabase.com/mcp"
+    },
+    "shortcut": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@shortcut/mcp@latest"
+      ],
+      "env": {
+        "SHORTCUT_API_TOKEN": "sct_rw_omnia_NjljYTg1ZTgtMDViZC00OTM0LTk1ZTctNjg2Y2ExZDYyMzY4OjY5Y2E4NWU4LTBkMTMtNDJiZS05YjA0LTQyNjdiNGM2MmJkYjpkZjk4OTVjYjYwOTk2N2JjZGE3NTM0NDcxYmUwYTY1Zg"
+      }
     }
   }
 }

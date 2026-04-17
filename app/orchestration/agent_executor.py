@@ -6,9 +6,15 @@ For order agent: loads session first and passes it so backend is single source o
 import logging
 from typing import Dict, List, Optional
 
-from ..agents import get_agent
+# NOTE: `get_agent` is imported lazily inside execute_agent() to avoid a
+# circular import at module-load time. The chain is:
+#   app.agents.__init__ -> registry -> OrderAgent -> order_flow ->
+#   orchestration/__init__ -> conversation_manager -> agent_executor ->
+#   from ..agents import get_agent  <-- app.agents not yet fully loaded
+# Deferring the import until first call breaks the cycle.
 from ..database.conversation_service import conversation_service
 from ..database.session_state_service import session_state_service
+from . import turn_cache
 
 
 def execute_agent(
@@ -33,6 +39,7 @@ def execute_agent(
     Returns:
         AgentOutput: { "agent_type", "message", "state_update" }
     """
+    from ..agents import get_agent  # lazy: breaks circular import chain
     agent = get_agent(agent_type)
     if not agent:
         logging.error(f"[AGENT_EXECUTOR] Agent not found: {agent_type}")
@@ -57,7 +64,10 @@ def execute_agent(
     )
 
     if agent_type in ("order", "booking") and business_id:
-        load_result = session_state_service.load(wa_id, str(business_id))
+        load_result = turn_cache.current().get_session(
+            wa_id, str(business_id),
+            loader=lambda: session_state_service.load(wa_id, str(business_id)),
+        )
         session = load_result.get("session", {})
         kwargs["session"] = session
 

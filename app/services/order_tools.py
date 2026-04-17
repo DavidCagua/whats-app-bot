@@ -7,9 +7,26 @@ import logging
 from typing import Dict, List, Optional
 from langchain.tools import tool
 
-from ..database.product_order_service import product_order_service
+from ..database.product_order_service import (
+    product_order_service,
+    AmbiguousProductError,
+    ProductNotFoundError,
+)
 from ..database.session_state_service import session_state_service
 from ..database.customer_service import customer_service
+from . import catalog_cache
+
+
+def _turn_cache():
+    """
+    Lazy import of the per-turn cache. order_tools is imported from
+    app.orchestration.order_flow at module-load time, which would make
+    a top-level `from ..orchestration import turn_cache` trigger the
+    orchestration package __init__ before it's ready. Defer the import
+    to first call; Python caches the module so it's ~free.
+    """
+    from ..orchestration import turn_cache as tc
+    return tc.current()
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +75,14 @@ def _products_enabled(ctx: Optional[Dict]) -> bool:
     return settings.get("products_enabled", True)
 
 
+def _get_delivery_fee(ctx: Optional[Dict]) -> float:
+    """Get delivery fee from business settings. Defaults to 5000 COP."""
+    if not ctx:
+        return 5000.0
+    settings = (ctx.get("business") or {}).get("settings") or {}
+    return float(settings.get("delivery_fee", 5000))
+
+
 def _cart_from_session(wa_id: str, business_id: str) -> Dict:
     """
     Load order_context (cart + delivery_info + state) from session.
@@ -65,7 +90,15 @@ def _cart_from_session(wa_id: str, business_id: str) -> Dict:
     """
     if not wa_id or not business_id:
         return {"items": [], "total": 0, "delivery_info": None, "state": None}
-    result = session_state_service.load(wa_id, business_id)
+    # Pass an explicit loader that uses this module's (patchable)
+    # session_state_service reference so unit tests that
+    # ``patch("app.services.order_tools.session_state_service", ...)``
+    # still intercept the DB hit.
+    result = _turn_cache().get_session(
+        wa_id,
+        business_id,
+        loader=lambda: session_state_service.load(wa_id, business_id),
+    )
     order_context = result.get("session", {}).get("order_context") or {}
     items = order_context.get("items") or []
     total = order_context.get("total") or 0
@@ -85,6 +118,9 @@ def _save_cart(wa_id: str, business_id: str, cart: Dict) -> None:
     if merged.get("state") is None and existing.get("state") is not None:
         merged["state"] = existing["state"]
     session_state_service.save(wa_id, business_id, {"order_context": merged})
+    # Drop the per-turn cached session so the next _cart_from_session in
+    # this turn refetches and sees the merged state.
+    _turn_cache().invalidate_session(wa_id, business_id)
 
 
 @tool
@@ -101,10 +137,10 @@ def get_menu_categories(injected_business_context: dict = None) -> str:
         if not business_id:
             return "❌ No se pudo identificar el negocio. Intenta de nuevo."
 
-        categories = product_order_service.list_categories(business_id=business_id)
+        categories = catalog_cache.list_categories(business_id)
         if not categories:
             # No categories set — fall back to listing all products directly
-            all_products = product_order_service.list_products(business_id=business_id)
+            all_products = catalog_cache.list_products(business_id)
             if not all_products:
                 return "No hay productos disponibles en el menú por ahora."
             lines = []
@@ -136,7 +172,7 @@ def list_category_products(category: str = "", injected_business_context: dict =
         if not business_id:
             return "❌ No se pudo identificar el negocio. Intenta de nuevo."
 
-        products = product_order_service.list_products_with_fallback(
+        products = catalog_cache.list_products_with_fallback(
             business_id=business_id,
             category=category.strip() if category else "",
         )
@@ -188,7 +224,7 @@ def search_products(query: str, injected_business_context: dict = None) -> str:
         lines = []
         for p in products:
             price_str = _format_price(p.get("price", 0), p.get("currency", "COP"))
-            line = f"• {p['name']} - {price_str} (ID: {p['id']})"
+            line = f"• {p['name']} - {price_str}"
             if include_desc:
                 desc = (p.get("description") or "").strip()
                 if desc:
@@ -235,14 +271,16 @@ def get_product_details(product_id: str = "", product_name: str = "", injected_b
 
         price_str = _format_price(product.get("price", 0), product.get("currency", "COP"))
         desc = product.get("description") or ""
-        return f"**{product['name']}** - {price_str}\n" + (f"{desc}\n" if desc else "") + f"ID: {product['id']}"
+        return f"**{product['name']}** - {price_str}\n" + (f"{desc}" if desc else "")
+    except AmbiguousProductError:
+        raise
     except Exception as e:
         logger.error(f"[ORDER_TOOL] get_product_details error: {e}")
         return f"❌ Error al buscar producto: {str(e)}"
 
 
 @tool
-def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1, injected_business_context: dict = None) -> str:
+def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1, notes: str = "", injected_business_context: dict = None) -> str:
     """
     Add a product to the cart. product_name supports flexible lookup by name or ingredients
     (e.g. "barracuda", "hamburguesa con queso azul", "coca zero").
@@ -251,8 +289,9 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         product_id: Product UUID (preferred when known)
         product_name: Product name or description (flexible search)
         quantity: Quantity to add (default 1)
+        notes: Special instructions for the item (e.g. "sin cebolla", "sin morcilla", "extra salsa")
     """
-    logger.info(f"[ORDER_TOOL] add_to_cart product_id='{product_id}' product_name='{product_name}' quantity={quantity}")
+    logger.info(f"[ORDER_TOOL] add_to_cart product_id='{product_id}' product_name='{product_name}' quantity={quantity} notes='{notes}'")
     try:
         business_id, wa_id = _get_context(injected_business_context)
         if not _products_enabled(injected_business_context):
@@ -270,38 +309,67 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
             product = product_order_service.get_product(product_name=product_name, business_id=business_id)
 
         if not product:
-            return "❌ Producto no encontrado. Pregunta por el menú o una categoría para ver productos."
+            # Raise instead of returning a string so the multi-item
+            # executor loop can distinguish "this item failed because
+            # nothing matched" from "this item succeeded" and from
+            # "this item was ambiguous". The old string return was
+            # swallowed silently in the multi-item path, dropping
+            # unmatchable items without telling the user.
+            raise ProductNotFoundError(query=(product_name or product_id or "").strip())
 
         price = float(product.get("price", 0))
         pid = product["id"]
         name = product["name"]
+        notes = (notes or "").strip()
+
+        # Search may have attached a derived flavor/qualifier for generic
+        # products (e.g. "jugo de mora en leche" → product "Jugos en leche"
+        # + derived_notes "mora"). Fold the derived note into the item's
+        # notes so the human at the restaurant sees the user's flavor
+        # request on the ticket.
+        derived = str(product.get("_derived_notes") or "").strip()
+        if derived:
+            notes = f"{derived}; {notes}" if notes else derived
 
         cart = _cart_from_session(wa_id, business_id)
         items: List[Dict] = list(cart.get("items") or [])
 
-        # Update or add item
+        # Update or add item; if notes provided, always add as new line item
         found = False
-        for it in items:
-            if it.get("product_id") == pid:
-                it["quantity"] = it.get("quantity", 0) + quantity
-                found = True
-                break
+        if not notes:
+            for it in items:
+                if it.get("product_id") == pid and not it.get("notes"):
+                    it["quantity"] = it.get("quantity", 0) + quantity
+                    found = True
+                    break
         if not found:
-            items.append({
+            new_item: Dict = {
                 "product_id": pid,
                 "name": name,
                 "price": price,
                 "quantity": quantity,
-            })
+            }
+            if notes:
+                new_item["notes"] = notes
+            items.append(new_item)
 
         total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
         new_cart = {"items": items, "total": total}
         _save_cart(wa_id, business_id, new_cart)
 
-        return f"✅ Agregado {quantity}x {name} al carrito. Total: {_format_price(total)}"
+        notes_str = f" ({notes})" if notes else ""
+        return f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. Subtotal: {_format_price(total)}"
+    except AmbiguousProductError:
+        raise
+    except ProductNotFoundError:
+        # Let the executor layer decide how to report this — in a
+        # multi-item batch the loop captures it per-item and surfaces
+        # via cart_change.not_found; in a single-item call the outer
+        # handler builds a user_error result.
+        raise
     except Exception as e:
         logger.error(f"[ORDER_TOOL] add_to_cart error: {e}")
-        return f"❌ Error al agregar al carrito: {str(e)}"
+        return f"❌ Error al agregar a tu pedido: {str(e)}"
 
 
 @tool
@@ -317,34 +385,45 @@ def view_cart(injected_business_context: dict = None) -> str:
 
         cart = _cart_from_session(wa_id, business_id)
         items = cart.get("items") or []
-        total = cart.get("total") or 0
+        subtotal = cart.get("total") or 0
 
         if not items:
-            return "Tu carrito está vacío. ¿Qué te gustaría ordenar? Pregunta por el menú o una categoría (ej. qué tienes de bebidas)."
+            return "Tu pedido está vacío. ¿Qué te gustaría ordenar? Pregunta por el menú o una categoría (ej. qué tienes de bebidas)."
 
         lines = []
         for it in items:
             price_str = _format_price(it.get("price", 0) * it.get("quantity", 0))
-            pid = it.get("product_id", "")
-            lines.append(f"• {it.get('quantity', 0)}x {it.get('name', '')} - {price_str} (ID: {pid})")
+            notes_str = f" ({it['notes']})" if it.get("notes") else ""
+            lines.append(f"• {it.get('quantity', 0)}x {it.get('name', '')}{notes_str} - {price_str}")
 
-        return "Tu carrito:\n\n" + "\n".join(lines) + f"\n\n**Total: {_format_price(total)}**"
+        delivery_fee = _get_delivery_fee(injected_business_context)
+        grand_total = subtotal + delivery_fee
+        summary = (
+            "Tu pedido:\n\n"
+            + "\n".join(lines)
+            + f"\n\nSubtotal: {_format_price(subtotal)}"
+            + f"\n🛵 Domicilio: {_format_price(delivery_fee)}"
+            + f"\n**Total: {_format_price(grand_total)}**"
+        )
+        return summary
     except Exception as e:
         logger.error(f"[ORDER_TOOL] view_cart error: {e}")
-        return f"❌ Error al ver el carrito: {str(e)}"
+        return f"❌ Error al ver el pedido: {str(e)}"
 
 
 @tool
-def update_cart_item(product_id: str = "", quantity: int = 0, injected_business_context: dict = None) -> str:
+def update_cart_item(product_id: str = "", quantity: int = 0, notes: str = "", injected_business_context: dict = None) -> str:
     """
-    Update the quantity of an item in the cart. Use when the customer wants to change how many of something they want.
-    If quantity is 0, the item is removed from the cart.
+    Update the quantity or notes of an item in the cart. Use when the customer wants to change how many of something
+    they want, or add special instructions (e.g. "sin cebolla", "sin morcilla"). If quantity is 0 and no notes are
+    provided, the item is removed from the cart.
 
     Args:
         product_id: Product UUID to update
-        quantity: New quantity (0 to remove)
+        quantity: New quantity (0 to remove; leave 0 if only updating notes)
+        notes: Special instructions for the item (e.g. "sin cebolla", "extra salsa"). Pass empty string to clear.
     """
-    logger.info(f"[ORDER_TOOL] update_cart_item product_id='{product_id}' quantity={quantity}")
+    logger.info(f"[ORDER_TOOL] update_cart_item product_id='{product_id}' quantity={quantity} notes='{notes}'")
     try:
         business_id, wa_id = _get_context(injected_business_context)
         if not business_id or not wa_id:
@@ -353,60 +432,129 @@ def update_cart_item(product_id: str = "", quantity: int = 0, injected_business_
         if not product_id:
             return "❌ Indica el producto a modificar (product_id)."
 
+        notes = (notes or "").strip()
         cart = _cart_from_session(wa_id, business_id)
-        items: List[Dict] = [it for it in (cart.get("items") or []) if it.get("product_id") != product_id]
+        original_items = cart.get("items") or []
 
-        if quantity > 0:
-            # Find original item to keep price/name
-            for it in (cart.get("items") or []):
-                if it.get("product_id") == product_id:
-                    items.append({
-                        "product_id": product_id,
-                        "name": it.get("name", ""),
-                        "price": it.get("price", 0),
-                        "quantity": quantity,
-                    })
-                    break
+        # Find the item being updated
+        target_item = next((it for it in original_items if it.get("product_id") == product_id), None)
+
+        # Determine effective quantity: keep existing if caller passes 0 and there are notes to set
+        effective_quantity = quantity
+        if effective_quantity == 0 and target_item and notes:
+            effective_quantity = target_item.get("quantity", 1)
+
+        items: List[Dict] = [it for it in original_items if it.get("product_id") != product_id]
+
+        if effective_quantity > 0:
+            original = target_item or {}
+            updated: Dict = {
+                "product_id": product_id,
+                "name": original.get("name", ""),
+                "price": original.get("price", 0),
+                "quantity": effective_quantity,
+            }
+            if notes:
+                updated["notes"] = notes
+            items.append(updated)
 
         total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
         new_cart = {"items": items, "total": total}
         _save_cart(wa_id, business_id, new_cart)
 
-        if quantity == 0:
-            return "✅ Producto eliminado del carrito."
-        return f"✅ Cantidad actualizada. Total: {_format_price(total)}"
+        if effective_quantity == 0:
+            return "✅ Producto quitado de tu pedido."
+        notes_str = f" ({notes})" if notes else ""
+        return f"✅ Ítem actualizado{notes_str}. Subtotal: {_format_price(total)}"
     except Exception as e:
         logger.error(f"[ORDER_TOOL] update_cart_item error: {e}")
-        return f"❌ Error al actualizar el carrito: {str(e)}"
+        return f"❌ Error al actualizar tu pedido: {str(e)}"
 
 
 @tool
-def remove_from_cart(product_id: str = "", injected_business_context: dict = None) -> str:
+def remove_from_cart(product_id: str = "", product_name: str = "", injected_business_context: dict = None) -> str:
     """
-    Remove a product from the cart. Use when the customer corrects an item ("no de cereza", "quita eso").
-    Get product_id from view_cart output (each item shows ID).
+    Remove a product from the cart. Use when the customer corrects an item ("no de cereza", "quita eso",
+    "elimina la malteada"). Accepts either product_id (UUID) or product_name (flexible name match).
 
     Args:
-        product_id: Product UUID to remove
+        product_id: Product UUID to remove (preferred when known)
+        product_name: Product name to remove (used when product_id is not available)
     """
-    logger.info(f"[ORDER_TOOL] remove_from_cart product_id='{product_id}'")
+    logger.info(f"[ORDER_TOOL] remove_from_cart product_id='{product_id}' product_name='{product_name}'")
     try:
         business_id, wa_id = _get_context(injected_business_context)
         if not business_id or not wa_id:
             return "❌ No se pudo identificar la sesión. Intenta de nuevo."
 
-        if not product_id:
-            return "❌ Indica el producto a eliminar (product_id)."
-
         cart = _cart_from_session(wa_id, business_id)
-        items = [it for it in (cart.get("items") or []) if it.get("product_id") != product_id]
+        original_items = cart.get("items") or []
+
+        # Resolve product_id by name if not provided.
+        # Handles three planner name shapes:
+        #   "Jugos en leche"          → base-name match
+        #   "Jugos en leche (mango)"  → strip parens, match name + notes
+        #   "jugo de mango"           → qualifier match against item notes
+        resolved_id = product_id.strip() if product_id else ""
+        if not resolved_id and product_name:
+            import re as _re
+            raw = product_name.strip()
+            paren_match = _re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", raw)
+            if paren_match:
+                base_name = paren_match.group(1).strip().lower()
+                paren_notes = paren_match.group(2).strip().lower()
+            else:
+                base_name = raw.lower()
+                paren_notes = ""
+
+            # Pass 1: exact base-name match, disambiguate by notes
+            base_matches = [
+                it for it in original_items
+                if (it.get("name") or "").lower().strip() == base_name
+            ]
+            if len(base_matches) == 1:
+                resolved_id = base_matches[0].get("product_id", "")
+            elif len(base_matches) > 1 and paren_notes:
+                for it in base_matches:
+                    if (it.get("notes") or "").strip().lower() == paren_notes:
+                        resolved_id = it.get("product_id", "")
+                        break
+            if not resolved_id and base_matches:
+                resolved_id = base_matches[0].get("product_id", "")
+
+            # Pass 2: qualifier phrase — "jugo de mango" matches item
+            # "Jugos en leche" with notes="mango"
+            if not resolved_id:
+                name_tokens = set(base_name.split())
+                for it in original_items:
+                    item_name = (it.get("name") or "").lower().strip()
+                    item_notes = (it.get("notes") or "").strip().lower()
+                    if not item_notes:
+                        continue
+                    item_tokens = set(item_name.split())
+                    qualifier = name_tokens - item_tokens
+                    if qualifier and item_notes in qualifier:
+                        resolved_id = it.get("product_id", "")
+                        break
+
+            # Pass 3: partial / substring fallback
+            if not resolved_id:
+                for it in original_items:
+                    if base_name in (it.get("name") or "").lower():
+                        resolved_id = it.get("product_id", "")
+                        break
+
+        if not resolved_id:
+            return "❌ No encontré ese producto en tu pedido. ¿Puedes indicar el nombre exacto?"
+
+        items = [it for it in original_items if it.get("product_id") != resolved_id]
         total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
         new_cart = {"items": items, "total": total}
         _save_cart(wa_id, business_id, new_cart)
-        return "✅ Producto eliminado del carrito."
+        return "✅ Producto quitado de tu pedido."
     except Exception as e:
         logger.error(f"[ORDER_TOOL] remove_from_cart error: {e}")
-        return f"❌ Error al eliminar del carrito: {str(e)}"
+        return f"❌ Error al quitar el producto de tu pedido: {str(e)}"
 
 
 NO_REGISTRADO = "NO_REGISTRADO"
@@ -431,7 +579,9 @@ def get_customer_info(injected_business_context: dict = None) -> str:
         cart = _cart_from_session(wa_id, business_id) if business_id else {}
         session_delivery = cart.get("delivery_info") or {}
 
-        cust = customer_service.get_customer(wa_id)
+        cust = _turn_cache().get_customer(
+            wa_id, loader=lambda: customer_service.get_customer(wa_id)
+        )
         db_name = (cust.get("name") or "").strip() if cust else ""
         db_address = (cust.get("address") or "").strip() if cust else ""
         db_phone = (cust.get("phone") or "").strip() if cust else ""
@@ -562,19 +712,19 @@ def place_order(injected_business_context: dict = None) -> str:
         delivery_info = cart.get("delivery_info") or {}
 
         if not items:
-            return "❌ Tu carrito está vacío. Agrega productos antes de confirmar el pedido."
+            return "❌ Tu pedido está vacío. Agrega productos antes de confirmar."
 
         # Validate cart: each item must have product_id, name, price, quantity (from session only)
         for i, it in enumerate(items):
             if not it.get("product_id") or not it.get("name"):
-                return f"❌ Item en el carrito sin producto válido. Por favor revisa tu pedido."
+                return f"❌ Ítem en tu pedido sin producto válido. Por favor revisa tu pedido."
             try:
                 q = int(it.get("quantity") or 0)
                 p = float(it.get("price") or 0)
             except (TypeError, ValueError):
-                return "❌ Cantidades o precios inválidos en el carrito. Intenta de nuevo."
+                return "❌ Cantidades o precios inválidos en tu pedido. Intenta de nuevo."
             if q < 1 or p < 0:
-                return "❌ Cantidades o precios inválidos en el carrito. Intenta de nuevo."
+                return "❌ Cantidades o precios inválidos en tu pedido. Intenta de nuevo."
 
         address = (delivery_info.get("address") or "").strip()
         payment_method = (delivery_info.get("payment_method") or "").strip()
@@ -588,7 +738,9 @@ def place_order(injected_business_context: dict = None) -> str:
                 "Usa submit_delivery_info cuando tengas los datos."
             )
 
-        cust = customer_service.get_customer(wa_id)
+        cust = _turn_cache().get_customer(
+            wa_id, loader=lambda: customer_service.get_customer(wa_id)
+        )
         customer_name = delivery_name or (cust.get("name") or "").strip() if cust else delivery_name
         if not customer_name:
             customer_name = "Cliente"
@@ -599,9 +751,12 @@ def place_order(injected_business_context: dict = None) -> str:
                 "name": it.get("name"),
                 "price": it.get("price", 0),
                 "quantity": it.get("quantity", 1),
+                "notes": (it.get("notes") or "").strip() or None,
             }
             for it in items
         ]
+
+        delivery_fee = _get_delivery_fee(injected_business_context)
 
         result = product_order_service.create_order(
             business_id=business_id,
@@ -611,6 +766,7 @@ def place_order(injected_business_context: dict = None) -> str:
             contact_phone=phone,
             payment_method=payment_method,
             customer_name=customer_name,
+            delivery_fee=delivery_fee,
         )
 
         if not result.get("success"):
@@ -629,8 +785,17 @@ def place_order(injected_business_context: dict = None) -> str:
                 "last_order_id": order_id,
             },
         )
+        _turn_cache().invalidate_session(wa_id, business_id)
+        subtotal = result.get("subtotal", 0)
         total = result.get("total", 0)
-        return f"✅ ¡Pedido confirmado! Número de orden: {order_id[:8].upper()} Total: {_format_price(total)}. Nos pondremos en contacto pronto."
+        return (
+            f"✅ ¡Pedido confirmado! #{order_id[:8].upper()}\n"
+            f"Subtotal: {_format_price(subtotal)}\n"
+            f"🛵 Domicilio: {_format_price(delivery_fee)}\n"
+            f"Total: {_format_price(total)}\n"
+            f"Nos ponemos en contacto pronto para coordinar la entrega.\n"
+            f"⏱ Tiempo estimado de entrega: 40 a 50 minutos."
+        )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] place_order error: {e}")
         return f"❌ Error al confirmar el pedido: {str(e)}"

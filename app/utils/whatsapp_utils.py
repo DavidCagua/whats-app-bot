@@ -14,6 +14,37 @@ def log_http_response(response):
     logging.info(f"Body: {response.text}")
 
 
+def _split_for_twilio(text: str, limit: int = 1500) -> list:
+    """
+    Split a message into chunks at most `limit` characters each, preferring
+    natural boundaries (blank lines, newlines, sentences, spaces). Twilio's
+    WhatsApp sender rejects bodies over 1600 chars (error 21617); default
+    1500 leaves margin for any transport overhead.
+    """
+    if not text:
+        return [""]
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        split_at = -1
+        for sep in ("\n\n", "\n", ". ", " "):
+            idx = window.rfind(sep)
+            if idx > limit * 0.5:
+                split_at = idx + len(sep)
+                break
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 def get_text_message_input(recipient, text):
     # Ensure recipient is a valid phone number format
     # Remove any non-digit characters except + at the beginning
@@ -110,7 +141,15 @@ def send_message(data, business_context=None):
                 msg = client.messages.create(**create_kw)
             else:
                 body_text = (payload.get("text") or {}).get("body", "")
-                msg = client.messages.create(body=body_text, from_=from_number, to=to_whatsapp)
+                # Twilio WhatsApp enforces a 1600-char limit per message (error 21617).
+                # Split long responses at natural boundaries and send as multiple messages.
+                chunks = _split_for_twilio(body_text, limit=1500)
+                last_sid = None
+                for chunk in chunks:
+                    msg = client.messages.create(body=chunk, from_=from_number, to=to_whatsapp)
+                    last_sid = msg.sid
+                msg = type("Msg", (), {})()
+                msg.sid = last_sid or ""
 
             mock_response = type("Response", (), {})()
             mock_response.status_code = 200

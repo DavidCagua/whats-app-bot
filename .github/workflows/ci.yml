@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Tests are intentionally NOT in PR CI. Run them locally before pushing
+  # via `./scripts/test.sh [unit|integration|evals|e2e|all]`. Re-add a
+  # `test` job here when a second contributor joins.
+
+  migrations-smoke:
+    name: Alembic upgrade dry-run
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Apply raw SQL baseline + stamp + upgrade head
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          for f in migrations/*.sql; do
+            [ -f "$f" ] || continue
+            [[ "$f" == *_rollback.sql ]] && continue
+            echo "Applying $(basename "$f")"
+            psql "$DATABASE_URL" -f "$f" -v ON_ERROR_STOP=1 -q
+          done
+          alembic stamp 44a057c1f6eb
+          alembic upgrade head
+          alembic current
+
+      - name: Drift check (models vs DB schema)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          # Fails if SQLAlchemy models drift from the DB schema. Catches
+          # "forgot to add a new column to a migration" and similar bugs.
+          alembic check
