@@ -10,6 +10,7 @@ backend strings.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from ..database.session_state_service import (
@@ -849,7 +850,13 @@ def execute_order_intent(
                 for item in params["items"]:
                     if not isinstance(item, dict):
                         continue
-                    item_name = _normalize_product_name(item.get("product_name") or "")
+                    # Strip trailing parenthetical notes from the planner's
+                    # product_name before comparing — the planner sometimes
+                    # includes cart-summary notes like "(mango)" in the name
+                    # (e.g. "Jugos en leche (mango)") which won't match the
+                    # base name "Jugos en leche" in the cart.
+                    raw_name = re.sub(r"\s*\(.*?\)\s*$", "", item.get("product_name") or "")
+                    item_name = _normalize_product_name(raw_name)
                     if item_name and item_name in existing_names:
                         logger.warning(
                             "[ORDER_FLOW] Skipping duplicate add: '%s' already in cart",

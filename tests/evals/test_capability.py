@@ -24,17 +24,6 @@ pytestmark = pytest.mark.eval
 # Known planner routing gap: attribute-only queries
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "Planner unstable on attribute-only queries. 'tienen algo picante?' "
-        "gets routed to GET_MENU_CATEGORIES or CHAT depending on the run "
-        "because the prompt rule for SEARCH_PRODUCTS expects a named product "
-        "or ingredient, not a bare attribute/adjective. Graduate to the "
-        "regression suite once PLANNER_SYSTEM_TEMPLATE adds an explicit rule "
-        "for attribute queries (picante, dulce, sin gluten, vegetariano, etc.)."
-    ),
-    strict=False,
-)
 def test_attribute_only_query_picante_routes_to_search():
     """
     "tienen algo picante?" (bare attribute, no 'con X' preposition) should
