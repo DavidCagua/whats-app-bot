@@ -180,17 +180,80 @@ def _normalize_product_name(s: str) -> str:
 
 
 def _resolve_product_id_by_name(wa_id: str, business_id: str, product_name: str) -> Optional[str]:
+    """
+    Resolve a planner-emitted product_name to a product_id in the cart.
+
+    Handles three name shapes the planner can produce:
+      1. Exact base name:  "Jugos en leche"      → matches item.name
+      2. Name with notes:  "Jugos en leche (mango)" → strip parens, match name + notes
+      3. Qualifier phrase:  "jugo de mango"        → extract qualifier, match item.notes
+
+    When multiple cart items share the same base name (e.g. two Jugos en
+    leche with different notes), the qualifier/parenthetical is used to
+    disambiguate. Returns the first match or None.
+    """
     if not product_name or not wa_id or not business_id:
         return None
     cart = order_tools._cart_from_session(wa_id, business_id)
     items = cart.get("items") or []
-    want = _normalize_product_name(product_name)
+    if not items:
+        return None
+
+    raw = (product_name or "").strip()
+
+    # Extract parenthetical notes if present: "Jugos en leche (mango)" → base="Jugos en leche", paren_notes="mango"
+    paren_match = re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", raw)
+    if paren_match:
+        base_raw = paren_match.group(1).strip()
+        paren_notes = paren_match.group(2).strip().lower()
+    else:
+        base_raw = raw
+        paren_notes = ""
+
+    want = _normalize_product_name(base_raw)
+
+    # Pass 1: exact base-name match. Collect all matches.
+    matches = []
     for it in items:
-        name = (it.get("name") or "").strip()
-        if not name:
+        item_name = _normalize_product_name(it.get("name") or "")
+        if item_name and item_name == want:
+            matches.append(it)
+
+    if len(matches) == 1:
+        return matches[0].get("product_id")
+
+    if len(matches) > 1 and paren_notes:
+        # Multiple items share the base name — use parenthetical to disambiguate.
+        for it in matches:
+            if (it.get("notes") or "").strip().lower() == paren_notes:
+                return it.get("product_id")
+
+    if matches:
+        # Multiple matches, no disambiguating notes → return first (best effort)
+        return matches[0].get("product_id")
+
+    # Pass 2: the planner may have emitted a qualifier phrase instead of
+    # the catalog name, e.g. "jugo de mango" for item "Jugos en leche"
+    # with notes="mango". Try matching any item whose notes contain a
+    # word from the query that ISN'T in the item's base name.
+    want_tokens = set(want.split())
+    for it in items:
+        item_name_norm = _normalize_product_name(it.get("name") or "")
+        item_notes = (it.get("notes") or "").strip().lower()
+        if not item_notes:
             continue
-        if _normalize_product_name(name) == want:
+        name_tokens = set(item_name_norm.split())
+        # Qualifier tokens = words the user said that aren't in the product name
+        qualifier_tokens = want_tokens - name_tokens
+        if qualifier_tokens and item_notes in qualifier_tokens:
             return it.get("product_id")
+
+    # Pass 3: partial / substring match on base name (existing fallback)
+    for it in items:
+        item_name_norm = _normalize_product_name(it.get("name") or "")
+        if want and want in item_name_norm:
+            return it.get("product_id")
+
     return None
 
 

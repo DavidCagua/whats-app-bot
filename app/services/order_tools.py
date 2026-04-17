@@ -490,18 +490,57 @@ def remove_from_cart(product_id: str = "", product_name: str = "", injected_busi
         cart = _cart_from_session(wa_id, business_id)
         original_items = cart.get("items") or []
 
-        # Resolve product_id by name if not provided
+        # Resolve product_id by name if not provided.
+        # Handles three planner name shapes:
+        #   "Jugos en leche"          → base-name match
+        #   "Jugos en leche (mango)"  → strip parens, match name + notes
+        #   "jugo de mango"           → qualifier match against item notes
         resolved_id = product_id.strip() if product_id else ""
         if not resolved_id and product_name:
-            name_lower = product_name.lower().strip()
-            for it in original_items:
-                if (it.get("name") or "").lower().strip() == name_lower:
-                    resolved_id = it.get("product_id", "")
-                    break
-            # Fuzzy: partial match fallback
+            import re as _re
+            raw = product_name.strip()
+            paren_match = _re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", raw)
+            if paren_match:
+                base_name = paren_match.group(1).strip().lower()
+                paren_notes = paren_match.group(2).strip().lower()
+            else:
+                base_name = raw.lower()
+                paren_notes = ""
+
+            # Pass 1: exact base-name match, disambiguate by notes
+            base_matches = [
+                it for it in original_items
+                if (it.get("name") or "").lower().strip() == base_name
+            ]
+            if len(base_matches) == 1:
+                resolved_id = base_matches[0].get("product_id", "")
+            elif len(base_matches) > 1 and paren_notes:
+                for it in base_matches:
+                    if (it.get("notes") or "").strip().lower() == paren_notes:
+                        resolved_id = it.get("product_id", "")
+                        break
+            if not resolved_id and base_matches:
+                resolved_id = base_matches[0].get("product_id", "")
+
+            # Pass 2: qualifier phrase — "jugo de mango" matches item
+            # "Jugos en leche" with notes="mango"
+            if not resolved_id:
+                name_tokens = set(base_name.split())
+                for it in original_items:
+                    item_name = (it.get("name") or "").lower().strip()
+                    item_notes = (it.get("notes") or "").strip().lower()
+                    if not item_notes:
+                        continue
+                    item_tokens = set(item_name.split())
+                    qualifier = name_tokens - item_tokens
+                    if qualifier and item_notes in qualifier:
+                        resolved_id = it.get("product_id", "")
+                        break
+
+            # Pass 3: partial / substring fallback
             if not resolved_id:
                 for it in original_items:
-                    if name_lower in (it.get("name") or "").lower():
+                    if base_name in (it.get("name") or "").lower():
                         resolved_id = it.get("product_id", "")
                         break
 
@@ -754,7 +793,8 @@ def place_order(injected_business_context: dict = None) -> str:
             f"Subtotal: {_format_price(subtotal)}\n"
             f"🛵 Domicilio: {_format_price(delivery_fee)}\n"
             f"Total: {_format_price(total)}\n"
-            f"Nos ponemos en contacto pronto para coordinar la entrega."
+            f"Nos ponemos en contacto pronto para coordinar la entrega.\n"
+            f"⏱ Tiempo estimado de entrega: 40 a 50 minutos."
         )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] place_order error: {e}")
