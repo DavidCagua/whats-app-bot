@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import text as sql_text
 
 from ..database.models import Product, Business, get_db_session
+from . import catalog_cache
 from .embeddings import embed_text, format_vector_literal
 
 logger = logging.getLogger(__name__)
@@ -714,7 +715,12 @@ def search_products(
 
     db_session = get_db_session()
     try:
-        synonyms = _load_business_synonyms(db_session, business_id)
+        synonyms = catalog_cache.get_or_fetch(
+            business_id,
+            "search_synonyms",
+            (),
+            lambda: _load_business_synonyms(db_session, business_id),
+        )
         tokens_expanded = _expand_tokens(tokens, synonyms)
         # Also add stems as expansion tokens (so ILIKE can catch partial morphology)
         for s in stems:
@@ -731,8 +737,16 @@ def search_products(
                 pass
             lexical = {}
 
+        # Skip the expensive embedding API call when lexical already found
+        # an exact product name match — the semantic phase only adds latency
+        # (and its results get filtered out at line ~800 anyway).
+        has_exact_lexical = any(
+            _normalize(p.get("name") or "") == query_norm
+            for p in lexical.values()
+        )
+
         semantic_map: Dict[str, Tuple[Dict[str, Any], float]] = {}
-        if alpha > 0:
+        if alpha > 0 and not has_exact_lexical:
             semantic_map = _semantic_candidates(db_session, business_id, query, limit * 2)
 
         merged: Dict[str, Dict[str, Any]] = dict(lexical)
