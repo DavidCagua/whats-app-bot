@@ -260,39 +260,26 @@ class ProductOrderService:
         List products by category with normalization and bounded fallback.
 
         1) Normalize category (e.g. hamburguesas -> BURGERS), list by category.
-        2) If no rows AND the raw input actually overlaps some existing
-           category at this business, fall back to hybrid search. We check
-           category existence first so that "pizza" at a burger shop returns
-           empty instead of pivoting to semantically-adjacent burgers.
+        2) If no rows, fall back to the hybrid search. The hybrid search's
+           pure-embedding filter (in search_products) already handles the
+           "pizza at a burger shop" case — it returns empty when only
+           embedding-based candidates exist and no lexical/tag signal matches.
+           This means sub-category terms like "cervezas" (which exist as tags
+           on beer products but not as a DB category) now correctly resolve
+           to the matching products instead of returning "no tenemos cervezas".
+
+        Historical note: commit ac2a6a3 added a category-existence pre-check
+        here that blocked the fallback when the search term didn't overlap
+        any DB category name. That pre-check was redundant with the
+        pure-embedding filter and overly aggressive — it blocked legitimate
+        tag-based sub-category searches like "cervezas" (products are in
+        category BEBIDAS but tagged "cerveza"). Removed in this commit.
         """
         raw = (category or "").strip()
         normalized = normalize_category(category) if raw else ""
         products = self.list_products(business_id=business_id, category=normalized or None)
         if products or not raw:
             return products
-
-        # Before any fallback, require the requested category to overlap an
-        # existing category at this tenant. This guards against the "qué
-        # pizzas tienen" case where no pizza category exists and we used to
-        # quietly pivot to embedding noise.
-        raw_norm = _normalize_for_category_check(raw)
-        normalized_norm = _normalize_for_category_check(normalized) if normalized else ""
-        existing = [
-            _normalize_for_category_check(c)
-            for c in (self.list_categories(business_id=business_id) or [])
-        ]
-
-        def _overlaps(needle: str) -> bool:
-            if not needle:
-                return False
-            return any(needle in cat or cat in needle for cat in existing if cat)
-
-        if not (_overlaps(raw_norm) or _overlaps(normalized_norm)):
-            logger.warning(
-                "[LOOKUP_FALLBACK] category_not_available business=%s category=%s → returning empty",
-                business_id, raw,
-            )
-            return []
 
         logger.warning(
             "[LOOKUP_FALLBACK] category_lookup_empty → hybrid_search_used category=%s",

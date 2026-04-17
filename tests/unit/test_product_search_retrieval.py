@@ -341,19 +341,20 @@ class TestCategoryExistencePreCheck:
     """
 
     def test_pizza_category_returns_empty_when_no_pizza_exists(self):
-        """'qué pizzas tienen' at Biela: no pizza category → return []."""
+        """
+        'qué pizzas tienen' at Biela: no pizza category, no products
+        tagged 'pizza' → return []. The hybrid search's pure-embedding
+        filter handles this — it returns empty when only embedding
+        neighbors match and no lexical/tag signal exists.
+        """
         from app.database import product_order_service as svc_module
         svc = svc_module.product_order_service
 
-        with patch.object(svc, "list_products", return_value=[]) as mock_list, \
-             patch.object(svc, "list_categories", return_value=["BURGERS", "BEBIDAS", "HOT DOGS"]), \
-             patch.object(svc, "search_products_semantic") as mock_semantic:
+        with patch.object(svc, "list_products", return_value=[]), \
+             patch.object(svc, "search_products_semantic", return_value=[]):
             result = svc.list_products_with_fallback(BUSINESS_ID, "pizza")
 
         assert result == []
-        mock_semantic.assert_not_called(), (
-            "Phase 3: semantic fallback must be skipped when the category doesn't exist"
-        )
 
     def test_bebidas_category_falls_through_when_exists(self):
         """
