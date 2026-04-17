@@ -934,6 +934,7 @@ def execute_order_intent(
                         "product_id": item.get("product_id") or bypass_pid or "",
                         "product_name": "" if bypass_pid else (item.get("product_name") or ""),
                         "quantity": int(item.get("quantity") or 1),
+                        "notes": (item.get("notes") or "").strip(),
                     }
                     try:
                         tool_fn.invoke(args)
