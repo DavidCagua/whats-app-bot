@@ -376,3 +376,42 @@ class TestNotesAdditionUpdateCartItem:
         params = result.get("params") or {}
         notes = (params.get("notes") or "").lower()
         assert "mango" in notes, f"expected 'mango' in notes, got {notes!r}"
+
+
+# ---------------------------------------------------------------------------
+# Negative CONFIRM — "que no" after "¿algo más?"
+# ---------------------------------------------------------------------------
+
+
+class TestNegativeConfirmRouting:
+    """
+    Regression for f2764bf: when the bot's last message asked "¿algo más?"
+    or "¿procedemos?" and the user responds with a negative ("que no",
+    "nada más", "eso es todo"), the planner must route to CONFIRM, not
+    CHAT. The backend resolves CONFIRM by state (ORDERING → checkout,
+    READY_TO_PLACE → place order).
+    """
+
+    def test_que_no_after_algo_mas_routes_to_confirm(self):
+        result = _classify_intent(
+            "que no",
+            order_state="ORDERING",
+            cart_summary="1x BARRACUDA. Subtotal: $28.000",
+        )
+        assert result["intent"] == "CONFIRM"
+
+    def test_nada_mas_after_algo_mas_routes_to_confirm(self):
+        result = _classify_intent(
+            "nada más",
+            order_state="ORDERING",
+            cart_summary="1x BARRACUDA. Subtotal: $28.000",
+        )
+        assert result["intent"] == "CONFIRM"
+
+    def test_eso_es_todo_after_algo_mas_routes_to_confirm(self):
+        result = _classify_intent(
+            "eso es todo",
+            order_state="ORDERING",
+            cart_summary="1x BARRACUDA; 1x Club Colombia. Subtotal: $35.500",
+        )
+        assert result["intent"] == "CONFIRM"

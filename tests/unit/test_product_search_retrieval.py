@@ -391,6 +391,27 @@ class TestCategoryExistencePreCheck:
         mock_semantic.assert_called_once()
         assert len(result) == 1
 
+    def test_cerveza_subcategory_falls_through_to_tag_search(self):
+        """
+        Regression for 98b8bf9: 'cervezas' is not a DB category (products
+        are in BEBIDAS) but beers are tagged 'cerveza'. The old pre-check
+        blocked the fallback for non-overlapping category names. Now the
+        hybrid search runs and finds beers via tag match.
+        """
+        from app.database import product_order_service as svc_module
+        svc = svc_module.product_order_service
+
+        beers = [BIELA_CATALOG["CORONA"], BIELA_CATALOG["CORONA_MICH"]]
+        with patch.object(svc, "list_products", return_value=[]), \
+             patch.object(svc, "search_products_semantic", return_value=beers) as mock_semantic:
+            result = svc.list_products_with_fallback(BUSINESS_ID, "cervezas")
+
+        mock_semantic.assert_called_once()
+        assert len(result) == 2
+        names = {p["name"] for p in result}
+        assert "Corona 355ml" in names
+        assert "Corona michelada" in names
+
 
 # ---------------------------------------------------------------------------
 # Phase 6 — generic-product token-containment rule

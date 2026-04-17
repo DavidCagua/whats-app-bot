@@ -849,6 +849,105 @@ def test_biela_soda_de_frutos_rojos_wins_decisively():
 # LLM-as-judge scenario — prose quality check
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Multi-item with notes — denver + honey (e1d528e regression)
+# ---------------------------------------------------------------------------
+
+
+def test_biela_multi_item_with_notes_denver_and_honey():
+    """
+    e1d528e regression: multi-item ADD_TO_CART loop wasn't forwarding
+    notes to add_to_cart. Named products like DENVER and HONEY BURGER
+    must land with their notes ("sin salchicha", "sin cebolla").
+    """
+    DENVER = product("Perro Caliente Denver", 27000, category="HOT DOGS",
+                     description="Perro caliente estilo Denver.",
+                     tags=["perro", "hot dog"])
+    HONEY = product("HONEY BURGER", 28000, description="Hamburguesa con miel.",
+                    tags=["hamburguesa", "burger", "miel"])
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        if "denver" in q:
+            return [DENVER]
+        if "honey" in q:
+            return [HONEY]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_multi_item_with_notes_denver_honey",
+        user_message="un denver sin salchicha y una honey sin cebolla",
+        initial_order_context={"state": "ORDERING", "items": [], "total": 0},
+        known_products=[DENVER, HONEY],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["HOT DOGS", "BURGERS", "BEBIDAS"],
+        must_contain_any=[
+            r"sin salchicha",
+            r"sin cebolla",
+        ],
+        must_not_contain=[
+            r"\blo siento\b",
+            r"\bno pude\b",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
+# Cerveza category search — tag-based fallback (98b8bf9 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_biela_tienes_cervezas_lists_beers():
+    """
+    98b8bf9 regression: "tienes cervezas?" must list beers, not say
+    "no tenemos". Beers are tagged "cerveza" but categorized under
+    BEBIDAS, so the LIST_PRODUCTS → category ILIKE fails. The fallback
+    to hybrid search finds them via tag match.
+    """
+    CORONA = product("Corona 355ml", 12000, category="BEBIDAS",
+                     tags=["cerveza", "beer", "mexicana"])
+    CLUB = product("Club Colombia", 7500, category="BEBIDAS",
+                   tags=["cerveza", "beer", "nacional"])
+    POKER = product("Poker", 7500, category="BEBIDAS",
+                    tags=["cerveza", "beer", "nacional"])
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        if "cerveza" in q or "beer" in q:
+            return [CORONA, CLUB, POKER]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_tienes_cervezas_lists_beers",
+        user_message="tienes cervezas?",
+        initial_order_context={"state": "GREETING"},
+        known_products=[CORONA, CLUB, POKER],
+        stub_search_products=_search_stub,
+        stub_list_products_with_fallback=lambda biz, cat: (
+            [CORONA, CLUB, POKER] if "cerveza" in (cat or "").lower() else []
+        ),
+        stub_list_categories=lambda biz: ["BURGERS", "HOT DOGS", "BEBIDAS"],
+        must_contain_any=[
+            r"corona",
+            r"club colombia",
+            r"poker",
+        ],
+        must_not_contain=[
+            r"\bno tenemos cerveza",
+            r"\bno hay cerveza",
+            r"\blo siento\b",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
+# LLM-as-judge scenario — prose quality check
+# ---------------------------------------------------------------------------
+
 def test_hay_pizza_llm_judge_full_semantic_check():
     """
     Same 'pizza' case, but graded by the tuned TRAJECTORY_ACCURACY_PROMPT
