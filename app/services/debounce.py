@@ -232,11 +232,15 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
     except Exception as exc:
         logging.error("[DEBOUNCE] flush error for %s: %s", phone, exc, exc_info=True)
     finally:
-        # Clean up processing flag + flusher lock.
+        # Clean up processing flag only. Do NOT delete key_flusher here —
+        # _LUA_DRAIN already deleted it at drain time, and a newer
+        # flusher may have re-created it since then. Deleting it here
+        # would destroy the newer flusher's lock, causing the next
+        # message to start a duplicate flusher instead of coalescing.
         try:
             r = _get_redis()
             if r:
-                r.delete(key_flusher, _processing_key(to_number, phone))
+                r.delete(_processing_key(to_number, phone))
         except Exception:
             pass
 
