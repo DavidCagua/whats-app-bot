@@ -139,7 +139,7 @@ export function ConversationsSidebar({
 
   const handleConversationClick = (whatsappId: string, businessId: string) => {
     const conversationId = `${whatsappId}:${businessId}`
-    const now = Date.now()
+    const now = Date.now() // eslint-disable-line react-hooks/purity
     setLastSeen((prev) => ({ ...prev, [conversationId]: now }))
     localStorage.setItem(`inbox:lastSeen:${conversationId}`, String(now))
 
