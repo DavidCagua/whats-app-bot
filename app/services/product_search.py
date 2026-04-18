@@ -153,10 +153,13 @@ def _llm_resolve_disambiguation(
 
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
-        response = llm.invoke([
-            SystemMessage(content=_LLM_RESOLVER_SYSTEM),
-            HumanMessage(content=user_msg),
-        ])
+        response = llm.invoke(
+            [
+                SystemMessage(content=_LLM_RESOLVER_SYSTEM),
+                HumanMessage(content=user_msg),
+            ],
+            config={"run_name": "product_disambiguator"},
+        )
         text = (response.content if hasattr(response, "content") else str(response)).strip()
 
         # Parse JSON — try raw first, then extract from markdown fences

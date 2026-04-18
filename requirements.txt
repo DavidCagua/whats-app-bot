@@ -7,6 +7,7 @@ aiohttp
 requests
 langchain
 langchain-openai
+langsmith
 pytz
 sqlalchemy
 psycopg2-binary

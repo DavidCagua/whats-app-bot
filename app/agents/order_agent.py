@@ -900,7 +900,19 @@ class OrderAgent(BaseAgent):
                 SystemMessage(content=planner_system),
                 HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON: intent y params."),
             ]
-            planner_response = self.llm.invoke(planner_messages)
+            planner_response = self.llm.invoke(
+                planner_messages,
+                config={
+                    "run_name": "order_planner",
+                    "metadata": {
+                        "wa_id": wa_id,
+                        "business_id": str(business_id),
+                        "order_state": order_state,
+                        "stale_turn": stale_turn,
+                        "run_id": run_id,
+                    },
+                },
+            )
             planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
             parsed = _parse_planner_response(planner_text)
             # Deterministic safety net: if the planner stripped a
@@ -987,7 +999,19 @@ class OrderAgent(BaseAgent):
                     SystemMessage(content=response_system),
                     HumanMessage(content=resp_input + "\n\nResponde al cliente en español colombiano, breve y natural:"),
                 ]
-                response_llm = self.llm.invoke(response_messages)
+                response_llm = self.llm.invoke(
+                    response_messages,
+                    config={
+                        "run_name": "order_response",
+                        "metadata": {
+                            "wa_id": wa_id,
+                            "business_id": str(business_id),
+                            "intent": intent,
+                            "result_kind": result_kind,
+                            "run_id": run_id,
+                        },
+                    },
+                )
                 final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)
                 final_response_text = (final_response_text or "").strip() or "Listo. ¿En qué más puedo ayudarte?"
 
