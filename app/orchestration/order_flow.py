@@ -662,6 +662,79 @@ def _find_tool(tool_name: str):
     return None
 
 
+# ---------- context-aware disambiguation filter ----------
+
+def _extract_product_names_from_history(
+    conversation_history: Optional[List[Dict[str, str]]],
+) -> set:
+    """
+    Extract product names mentioned in recent assistant messages.
+
+    Scans the last few assistant messages for product name patterns like
+    "SPECIAL DOG ($27.000)" or "• VITTORIA ($28.000)" — the format used
+    by the response generator when listing products.
+
+    Returns a set of lowercased product names found.
+    """
+    if not conversation_history:
+        return set()
+
+    names: set = set()
+    # Look at the last 4 assistant messages (covers typical list + follow-up)
+    assistant_msgs = [
+        m for m in conversation_history
+        if (m.get("role") or "") == "assistant"
+    ][-4:]
+
+    for msg in assistant_msgs:
+        content = msg.get("content") or msg.get("message") or ""
+        # Pattern 1: "PRODUCT_NAME ($XX.XXX)" — standard product listing
+        for match in re.finditer(r"([A-ZÁÉÍÓÚÑa-záéíóúñ][\w\s]*?)\s*\(\$[\d.,]+\)", content):
+            name = match.group(1).strip()
+            if len(name) >= 3:  # skip noise like "de" or "a"
+                names.add(name.lower())
+        # Pattern 2: "• NAME" or "- NAME" at start of line — bullet lists
+        for match in re.finditer(r"(?:^|[\n•\-])\s*\**([A-ZÁÉÍÓÚÑ][\w\s]+?)\**(?:\s*[\($\-—:])", content):
+            name = match.group(1).strip()
+            if len(name) >= 3:
+                names.add(name.lower())
+
+    return names
+
+
+def _filter_ambiguous_by_history(
+    matches: List[Dict[str, Any]],
+    conversation_history: Optional[List[Dict[str, str]]],
+) -> Optional[Dict[str, Any]]:
+    """
+    When AmbiguousProductError fires, check if exactly one candidate
+    was recently listed by the bot. If so, the user is referencing
+    that product by abbreviation — return it as the winner.
+
+    Returns the winning product dict, or None if filtering can't resolve.
+    """
+    recent_names = _extract_product_names_from_history(conversation_history)
+    if not recent_names:
+        return None
+
+    # Find which ambiguous candidates appeared in recent bot messages
+    in_history = [
+        m for m in matches
+        if (m.get("name") or "").lower() in recent_names
+    ]
+
+    if len(in_history) == 1:
+        winner = in_history[0]
+        logger.info(
+            "[ORDER_FLOW] disambig resolved by history context: %r "
+            "(was in recent listing, other candidates were not)",
+            winner.get("name"),
+        )
+        return winner
+
+    return None
+
+
 # ---------- main executor ----------
 
 def execute_order_intent(
@@ -671,6 +744,7 @@ def execute_order_intent(
     session: Dict,
     intent: str,
     params: Optional[Dict] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
     Execute one order intent: validate state, run one tool (or compute state),
@@ -939,18 +1013,45 @@ def execute_order_intent(
                     try:
                         tool_fn.invoke(args)
                     except AmbiguousProductError as amb_err:
-                        if multi_ambiguity is None:
-                            multi_ambiguity = amb_err
-                            multi_ambiguity_query = (
-                                (item.get("product_name") or "").strip()
-                                or (amb_err.query or "").strip()
-                            )
-                        logger.warning(
-                            "[ORDER_FLOW] multi-item: ambiguous item '%s' (%d matches); "
-                            "continuing with remaining items",
-                            item.get("product_name"),
-                            len(amb_err.matches or []),
+                        # Try to resolve via conversation history context
+                        history_winner = _filter_ambiguous_by_history(
+                            amb_err.matches or [], conversation_history,
                         )
+                        if history_winner:
+                            # Retry with the resolved product
+                            retry_args = {
+                                "injected_business_context": ctx,
+                                "product_id": history_winner.get("id") or "",
+                                "product_name": "",
+                                "quantity": int(item.get("quantity") or 1),
+                                "notes": (item.get("notes") or "").strip(),
+                            }
+                            try:
+                                tool_fn.invoke(retry_args)
+                            except Exception as retry_e:
+                                logger.warning(
+                                    "[ORDER_FLOW] multi-item: history-resolved retry failed: %s",
+                                    retry_e,
+                                )
+                                if multi_ambiguity is None:
+                                    multi_ambiguity = amb_err
+                                    multi_ambiguity_query = (
+                                        (item.get("product_name") or "").strip()
+                                        or (amb_err.query or "").strip()
+                                    )
+                        else:
+                            if multi_ambiguity is None:
+                                multi_ambiguity = amb_err
+                                multi_ambiguity_query = (
+                                    (item.get("product_name") or "").strip()
+                                    or (amb_err.query or "").strip()
+                                )
+                            logger.warning(
+                                "[ORDER_FLOW] multi-item: ambiguous item '%s' (%d matches); "
+                                "continuing with remaining items",
+                                item.get("product_name"),
+                                len(amb_err.matches or []),
+                            )
                     except ProductNotFoundError as nf_err:
                         label = (item.get("product_name") or "").strip() or (nf_err.query or "")
                         if label:
@@ -1363,6 +1464,37 @@ def execute_order_intent(
         return _user_error_result(current_state, wa_id, business_id, f"Intent {intent} no soportado")
 
     except AmbiguousProductError as e:
+        # Try to resolve via conversation history context before asking user
+        history_winner = _filter_ambiguous_by_history(
+            e.matches or [], conversation_history,
+        )
+        if history_winner and intent == INTENT_ADD_TO_CART:
+            # Retry the add with the resolved product
+            try:
+                tool_fn = _find_tool("add_to_cart")
+                if tool_fn:
+                    retry_args = {
+                        "injected_business_context": ctx,
+                        "product_id": history_winner.get("id") or "",
+                        "product_name": "",
+                        "quantity": int(params.get("quantity") or 1),
+                        "notes": (params.get("notes") or "").strip(),
+                    }
+                    tool_fn.invoke(retry_args)
+                    # Success — return a normal cart_change result
+                    cart_after = _get_cart_for_logging(wa_id, business_id)
+                    return _base_result(
+                        ORDER_STATE_ORDERING, wa_id, business_id,
+                        RESULT_KIND_CART_CHANGE,
+                        cart_action=CART_ACTION_ADDED,
+                        cart_items=cart_after.get("items") or [],
+                        cart_total=cart_after.get("total") or 0,
+                    )
+            except Exception as retry_e:
+                logger.warning(
+                    "[ORDER_FLOW] history-resolved retry failed: %s", retry_e,
+                )
+
         requested_name = (params.get("product_name") or "").strip()
         if not requested_name and isinstance(params.get("items"), list):
             for it in params["items"]:

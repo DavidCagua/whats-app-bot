@@ -74,6 +74,7 @@ Otras reglas:
 - Si ya están en recolección de datos (COLLECTING_DELIVERY) y el usuario PROVEE datos: usa SUBMIT_DELIVERY_INFO con uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}. Si solo necesitas saber qué falta (sin que el usuario haya dado nada nuevo), usa GET_CUSTOMER_INFO.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
 - Si el usuario indica que su teléfono es el MISMO desde el que está escribiendo (ej. "este número", "este mismo", "el mismo", "mi whatsapp", "con este mismo", "el de whatsapp", "al que te estoy escribiendo"): usa SUBMIT_DELIVERY_INFO con `phone` igual al marcador literal `<SENDER>`. Ejemplo: {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"phone": "<SENDER>"}}}}. El backend sustituirá el marcador por el número real del remitente. NUNCA inventes un número.
+- RESOLUCIÓN DE NOMBRES ABREVIADOS: si el historial reciente muestra que el bot acaba de listar productos (ej. "Tenemos: DENVER, NAIROBI, PEGORETTI, SPECIAL DOG") y el usuario responde con un nombre corto o abreviado que coincide con UNO de esos productos (ej. "un special"), usa el nombre COMPLETO del catálogo tal como apareció en la lista (ej. "SPECIAL DOG"). NO envíes solo la parte que el usuario dijo — la búsqueda del backend puede encontrar múltiples productos con nombres similares (ej. "SPECIAL DOG" y "SPECIAL FRIES") y desambiguar innecesariamente. Ejemplos: bot listó "SPECIAL DOG, PEGORETTI, NAIROBI, DENVER" → usuario dice "un special" → product_name="SPECIAL DOG". Bot listó "BIELA FRIES, CHEESE FRIES" → usuario dice "las biela" → product_name="BIELA FRIES".
 - Si solo conversa: CHAT.
 
 Responde ÚNICAMENTE con un JSON válido, sin markdown ni texto extra: {{"intent": "NOMBRE", "params": {{}}}}
@@ -895,7 +896,7 @@ class OrderAgent(BaseAgent):
             history_text = ""
             for msg in conversation_history[-6:]:
                 role = msg.get("role", "")
-                content = (msg.get("content") or msg.get("message", ""))[:200]
+                content = (msg.get("content") or msg.get("message", ""))[:400]
                 history_text += f"{role}: {content}\n"
             planner_messages = [
                 SystemMessage(content=planner_system),
@@ -951,6 +952,7 @@ class OrderAgent(BaseAgent):
                 session=session,
                 intent=intent,
                 params=params,
+                conversation_history=conversation_history,
             )
             success = exec_result.get("success", False)
             cart_summary_after = exec_result.get("cart_summary") or cart_summary_str

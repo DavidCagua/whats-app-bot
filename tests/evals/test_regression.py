@@ -963,6 +963,71 @@ def test_biela_tienes_cervezas_lists_beers():
 # ---------------------------------------------------------------------------
 
 
+def test_biela_special_after_listing_resolves_to_special_dog():
+    """
+    User asks "Tienes perros calientes?" → bot lists DENVER, NAIROBI,
+    PEGORETTI, SPECIAL DOG. User replies "Un special y un pegorreti".
+    "special" should resolve to SPECIAL DOG (not disambiguate with
+    SPECIAL FRIES) because SPECIAL DOG was in the listing.
+
+    Layer 1 (planner): prompt instructs the LLM to emit full catalog name.
+    Layer 2 (executor): context filter prefers candidates from recent listing.
+    """
+    SPECIAL_DOG = product(
+        "SPECIAL DOG", 27000,
+        category="HOT DOGS",
+        description="Pan artesanal, salchicha, costilla en salsa maracuyá.",
+        tags=["hot dog", "perro", "perro caliente"],
+        matched_by="exact",
+    )
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        if "special" in q:
+            return [SPECIAL_DOG]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_special_after_listing_resolves_to_special_dog",
+        user_message="Un special",
+        initial_order_context={"state": "GREETING"},
+        conversation_history=[
+            {"role": "user", "content": "Tienes perros calientes?"},
+            {"role": "assistant", "content": (
+                "¡Claro! Tenemos:\n"
+                "• DENVER ($27.000)\n"
+                "• NAIROBI ($27.000)\n"
+                "• PEGORETTI ($27.000)\n"
+                "• SPECIAL DOG ($27.000)\n"
+                "¿Te gustaría ordenar alguno?"
+            )},
+        ],
+        known_products=[SPECIAL_DOG],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["HOT DOGS", "BURGERS", "BEBIDAS"],
+        reference_trajectory=expected_planner_call(
+            user_message="Un special",
+            intent="ADD_TO_CART",
+            params={},
+        ),
+        trajectory_match_mode="superset",
+        tool_args_match_mode="ignore",
+        must_not_contain=[
+            r"SPECIAL FRIES",
+            r"\bcu[aá]l prefieres\b",
+            r"\bcu[aá]l te gustar[ií]a\b",
+        ],
+        must_contain_any=[
+            r"SPECIAL DOG",
+            r"\bagregad[oa]\b",
+            r"\bhemos agregado\b",
+            r"\bse agreg[oó]\b",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
 def test_biela_vitoria_typo_resolves_to_vittoria():
     """
     User types "Una Vitoria" (1 t) — the product is VITTORIA (2 t's).
