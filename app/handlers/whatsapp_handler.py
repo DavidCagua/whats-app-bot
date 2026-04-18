@@ -186,6 +186,7 @@ def _run_agent_and_send(
             business_context=business_context,
             message_id=message_id,
             stale_turn=stale_turn,
+            abort_key=abort_key,
         )
         if not response or not response.strip():
             logging.error("❌ ConversationManager returned None or empty response")
@@ -197,20 +198,12 @@ def _run_agent_and_send(
         response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
     logging.warning(f"[TIMING] ConversationManager.process took {time.time() - llm_start:.3f}s")
 
-    # ── Abort check: a newer message arrived while we were processing ──
-    # Skip sending the stale response. The newer message's flusher will
-    # process it with fresh context. The response IS stored in
-    # conversation history (agent already persisted it) which is fine —
-    # it gives the planner context that the bot "would have said X".
-    if abort_key:
-        from app.services.debounce import check_abort, clear_abort
-        if check_abort(abort_key):
-            clear_abort(abort_key)
-            logging.warning(
-                "[ABORT] %s: skipping send — newer message arrived during processing",
-                wa_id,
-            )
-            return False
+    # Agent returns __ABORTED__ when it detected a newer message after
+    # the planner but before the executor. No state was mutated — skip
+    # sending so the newer message's flusher processes cleanly.
+    if response == "__ABORTED__":
+        logging.warning("[ABORT] %s: aborted after planner, skipping send", wa_id)
+        return False
 
     processed_response = process_text_for_whatsapp(response)
     data = get_text_message_input(wa_id, processed_response)

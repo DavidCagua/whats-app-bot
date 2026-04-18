@@ -826,6 +826,7 @@ class OrderAgent(BaseAgent):
         message_id: Optional[str] = None,
         session: Optional[Dict] = None,
         stale_turn: bool = False,
+        abort_key: Optional[str] = None,
         **kwargs,
     ) -> AgentOutput:
         """Planner (intent) -> executor (one tool) -> response generator from actual tool result and cart."""
@@ -924,6 +925,23 @@ class OrderAgent(BaseAgent):
             intent = (parsed.get("intent") or INTENT_CHAT).upper().replace(" ", "_")
             params = parsed.get("params") or {}
             logging.warning("[ORDER_AGENT] Planner intent=%s params=%s", intent, params)
+
+            # ── Abort check: a newer message arrived while the planner ran.
+            # Skip executor + response so cart state stays clean.
+            if abort_key:
+                from ..services.debounce import check_abort, clear_abort
+                if check_abort(abort_key):
+                    clear_abort(abort_key)
+                    logging.warning(
+                        "[ABORT] %s: aborting after planner (intent=%s) — newer message arrived",
+                        wa_id, intent,
+                    )
+                    tracer.end_run(run_id, success=False, latency_ms=(time.time() - start_time) * 1000)
+                    return {
+                        "agent_type": self.agent_type,
+                        "message": "__ABORTED__",
+                        "state_update": {},
+                    }
 
             # 2) Executor: validate state, run one tool, update state
             exec_result = execute_order_intent(
