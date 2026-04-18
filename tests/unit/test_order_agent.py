@@ -32,6 +32,10 @@ class TestProductsListResponsePrompt:
         the response system prompt must instruct the LLM to always include descriptions,
         not summarize them away. Previously the rule said "si son muchos (>6), puedes
         agrupar o resumir" which caused the bot to drop descriptions entirely.
+
+        With the 5-item cap, only the first 5 products are sent to the LLM
+        to keep WhatsApp messages readable. The remaining count is shown so
+        the LLM can tell the user there are more options.
         """
         agent = OrderAgent()
         system, inp = agent._build_response_prompt(
@@ -47,11 +51,17 @@ class TestProductsListResponsePrompt:
         assert "resumir" not in system, \
             "Prompt must not allow summarizing descriptions away"
 
-        for name in ["AL PASTOR", "AMERICANA", "ARRABBIATA", "BARRACUDA",
-                     "BETA", "BIELA", "BIMOTA", "HONEY BURGER"]:
-            assert name in inp, f"All product names must be passed to the LLM, missing: {name}"
+        # First 5 products shown with descriptions
+        for name in ["AL PASTOR", "AMERICANA", "ARRABBIATA", "BARRACUDA", "BETA"]:
+            assert name in inp, f"Top-5 product must be in LLM input, missing: {name}"
         assert "cebolla caramelizada" in inp, \
             "Product descriptions must be passed to the LLM input"
+
+        # Remaining count communicated
+        assert "3 más" in inp, \
+            "LLM input must mention how many products are not shown"
+        assert "5 de 8" in inp, \
+            "LLM input must show X of Y products"
 
     def test_products_list_prompt_without_descriptions_is_name_and_price_only(self):
         """If products have no descriptions, the prompt still renders and just lists name+price."""

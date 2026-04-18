@@ -55,7 +55,7 @@ Intenciones válidas: GREET, GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS
 Reglas de menú y búsqueda (importante):
 - GET_MENU_CATEGORIES: cuando el usuario pregunta qué hay, qué tienes en general, o qué categorías hay (ej. "qué tienes", "qué hay en el menú"). Sin params.
 - LIST_PRODUCTS con category: cuando pregunta qué tienes EN UNA CATEGORÍA (ej. "qué tienes de bebidas", "qué hamburguesas tienes", "qué bebidas hay"). Siempre pasa params: {{"category": "bebidas"}} o "hamburguesas", "BEBIDAS", etc. category vacío = menú completo. IMPORTANTE: frases implícitas también cuentan — "qué hay para tomar", "qué tienen para tomar", "algo para beber", "qué tienen de beber" → LIST_PRODUCTS con category "bebidas". "qué hay para comer", "algo de comida" (sin más contexto) → LIST_PRODUCTS sin category (menú completo) o GET_MENU_CATEGORIES si prefiere ver categorías.
-- SEARCH_PRODUCTS con query: cuando el usuario NOMBRA un producto o ingrediente o DESCRIBE lo que quiere (ej. "quiero barracuda", "tienes coca cola", "algo con queso azul", "algo picante", "algo con picante", "tienes algo dulce"). Incluye cualquier "algo con X", "algo X", "tienes algo X" — son búsquedas por atributo, NO preguntas por el menú general. No uses SEARCH_PRODUCTS para preguntas de categoría; para "qué tienes de X" usa LIST_PRODUCTS con category.
+- SEARCH_PRODUCTS con query: cuando el usuario NOMBRA un producto o ingrediente o DESCRIBE lo que quiere (ej. "quiero barracuda", "tienes coca cola", "algo con queso azul", "algo picante", "algo con picante", "tienes algo dulce"). Incluye cualquier "algo con X", "algo X", "tienes algo X" — son búsquedas por atributo, NO preguntas por el menú general. No uses SEARCH_PRODUCTS para preguntas de categoría; para "qué tienes de X" usa LIST_PRODUCTS con category. IMPORTANTE: "tienes [nombre en plural de una categoría/tipo de comida]?" (ej. "tienes hamburguesas?", "tienes perros?", "tienes perros calientes?", "tienes bebidas?", "tienes cervezas?") es una pregunta por categoría, NO una búsqueda de producto — usa LIST_PRODUCTS con category, NO SEARCH_PRODUCTS ni GET_MENU_CATEGORIES. La intención del usuario es ver qué opciones hay en esa categoría.
 - GET_PRODUCT con product_name: cuando pregunta qué trae o qué tiene UN producto específico en singular (ej. "qué trae la barracuda", "qué tiene la montesa").
 - LIST_PRODUCTS (con la última categoría mostrada) cuando el usuario pide detalles de VARIOS/TODOS los productos ya listados — en plural o colectivo (ej. "qué tienen cada una", "qué trae cada una de esas hamburguesas", "dame los detalles de todas", "qué ingredientes tiene cada una"). NO uses GET_PRODUCT en estos casos: el usuario quiere ver todo el grupo, no uno solo.
 
@@ -89,6 +89,7 @@ Reglas críticas:
 - Si hubo error, explica brevemente y sugiere qué hacer.
 - Después de un ADD_TO_CART exitoso: (1) confirma lo que se agregó, (2) muestra el resumen del pedido actual, (3) sugiere el siguiente paso: pregunta si desea agregar algo más (ej. bebida) o si procede con el pedido (ej. "¿Te gustaría agregar alguna bebida o procedemos con el pedido?").
 - Búsqueda por ingrediente: cuando el resultado de la herramienta incluya descripciones de productos (varias líneas por producto) y el usuario preguntó por un ingrediente o tipo de plato (ej. "algo con queso azul", "hamburguesa con pollo"), menciona primero y de forma explícita el producto cuya descripción coincida con lo que pidió (ej. "La que lleva queso azul es la MONTESA: ...") y luego puedes listar brevemente otras opciones si aplica.
+- Listado de productos: cuando el resultado incluya MÚLTIPLES productos (el usuario preguntó por una categoría, tipo de comida, o "tienes X?"), lista TODOS los productos que aparecen en el resultado, no solo el primero o uno destacado. El usuario quiere ver sus opciones. Si hay más de 5 productos, lista los primeros 5 con nombre, precio y descripción breve, y al final di cuántos más hay e invita al usuario a preguntar por más opciones o visitar el menú.
 - Datos de entrega: NUNCA digas "Tengo esta dirección, teléfono y tipo de pago" a menos que el resultado de la herramienta contenga exactamente "DELIVERY_STATUS" y "all_present=true". Si el resultado es "OK_COLLECTING_DELIVERY" (sin DELIVERY_STATUS), responde pidiendo los datos: "Para continuar con tu pedido necesito: nombre, dirección, teléfono y medio de pago. ¿Me los indicas?". Si el resultado tiene DELIVERY_STATUS y all_present=true, confirma incluyendo los valores reales (dirección, teléfono, medio de pago) en el mensaje: "Tengo esta dirección: [valor], teléfono [valor] y pago [valor]. ¿Gustas proceder o quieres enviarla a otra dirección?". Si DELIVERY_STATUS tiene missing= o all_present=false: pide SOLO lo que falta (ej. "Me falta: teléfono y medio de pago. ¿Me los indicas?") o todo si faltan todos; NUNCA en ese caso sugieras "proceder con el pedido" ni "agregar algo más" hasta que todos los datos estén completos.
 - Ubicación y datos del negocio: si el usuario pregunta dónde estamos ubicados, horarios, teléfono de contacto o dirección del local, responde usando ÚNICAMENTE la "Información del negocio" que te doy a continuación. Si esa información está vacía o dice "no configurada", di que por el momento no tienes esa información a mano y que puede preguntar por el menú o hacer su pedido.
 - Combos / hamburguesas con papas: si el usuario pregunta si tienen combos, si las hamburguesas vienen con papas o si incluyen papas, responde SIEMPRE usando la sección "Reglas y contexto del negocio" de la Información del negocio (aunque la intención ejecutada haya sido GET_MENU_CATEGORIES o GET_PRODUCT). No digas "no encontré información" ni solo listes categorías; da la respuesta de las reglas (ej. todas las hamburguesas vienen con papas, bebida aparte).
@@ -479,16 +480,29 @@ class OrderAgent(BaseAgent):
             all_embedding = bool(products) and all(
                 (p.get("matched_by") == "embedding") for p in products
             )
+            # Cap at 5 products for WhatsApp readability. Keep total count
+            # so the response generator can say "y X más".
+            _MAX_LISTED = 5
+            total_count = len(products)
+            products_shown = products[:_MAX_LISTED]
+            remaining = total_count - len(products_shown)
+
             prods_lines = "\n".join(
                 f"- {p.get('name')} ({money(p.get('price'))})"
                 + (f" — {p.get('description')}" if p.get("description") else "")
-                for p in products
+                for p in products_shown
             )
             context_label = ""
             if category_label:
                 context_label = f"Categoría: {category_label}"
             elif query_label:
                 context_label = f"Búsqueda: {query_label}"
+            remaining_note = ""
+            if remaining > 0:
+                remaining_note = (
+                    f"\n(Mostrando {len(products_shown)} de {total_count} productos. "
+                    f"Hay {remaining} más disponibles.)"
+                )
             rules = (
                 "\n\nSITUACIÓN: El cliente pidió ver una lista de productos. "
                 "REGLAS:\n"
@@ -496,6 +510,7 @@ class OrderAgent(BaseAgent):
                 "- Si el producto trae descripción en los datos, INCLÚYELA SIEMPRE (1 línea breve por producto). Nunca omitas descripciones aunque la lista sea larga.\n"
                 "- Si NO hay descripciones disponibles, lista solo nombre y precio.\n"
                 "- Si hay descripciones y el cliente preguntó por un ingrediente, menciona primero el producto cuya descripción coincide.\n"
+                "- Si hay más productos de los que se muestran, menciona cuántos más hay al final e invita al usuario a preguntar por más opciones o visitar el menú.\n"
                 "- Termina invitando a ordenar o a preguntar por alguno en particular.\n"
                 "- NUNCA muestres IDs ni códigos internos."
             )
@@ -507,7 +522,7 @@ class OrderAgent(BaseAgent):
                     f"los {query_label}\". Nunca afirmes que la lista ES {query_label}."
                 )
             system = base_system + rules
-            inp = f"Cliente dijo: {message_body}\n{context_label}\nProductos disponibles:\n{prods_lines}"
+            inp = f"Cliente dijo: {message_body}\n{context_label}\nProductos disponibles:\n{prods_lines}{remaining_note}"
             return system, inp
 
         if result_kind == RESULT_KIND_PRODUCT_DETAILS:

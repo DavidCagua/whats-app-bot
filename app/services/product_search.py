@@ -579,11 +579,14 @@ def _lexical_candidates(
         add_like("coalesce(description,'')", full_query_norm)
         add_like("coalesce(category,'')", full_query_norm)
 
-    # Each expanded token on name/desc/category
+    # Each expanded token on name/desc/category/tags-as-text
     for tok in tokens_expanded:
         add_like("coalesce(name,'')", tok)
         add_like("coalesce(description,'')", tok)
         add_like("coalesce(category,'')", tok)
+        # Tags as text: catches stemmed tokens that don't exact-match
+        # any tag element but substring-match (e.g. stem "perr" in tag "perro")
+        add_like("coalesce(array_to_string(tags, ' '),'')", tok)
 
     # Tag containment (native array &&)
     tag_clause = ""
