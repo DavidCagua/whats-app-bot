@@ -27,6 +27,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 
 DEBOUNCE_SECONDS = 0.5
 _FLUSHER_TTL = 90   # safety expiry on flusher lock: sleep(3) + max LLM time
@@ -135,11 +136,11 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
     in the request thread via current_app._get_current_object() and passed
     here so we can push an app context — background threads don't inherit one.
     """
-    # Sleep for the debounce window before draining.
-    # Kept short (0.5s) — the abort mechanism handles corrections
-    # that arrive during processing, so we only need to catch
-    # near-simultaneous webhook deliveries.
+    # Unique ID so we can trace which drain belongs to which flusher.
+    fid = uuid.uuid4().hex[:6]
+    logging.warning("[DEBOUNCE] %s fid=%s: sleeping %.1fs (pid=%d)", phone, fid, DEBOUNCE_SECONDS, os.getpid())
     time.sleep(DEBOUNCE_SECONDS)
+    logging.warning("[DEBOUNCE] %s fid=%s: woke up (pid=%d)", phone, fid, os.getpid())
 
     r = _get_redis()
     if r is None:
@@ -156,7 +157,7 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
         drain = r.register_script(_LUA_DRAIN)
         raw_msgs = drain(keys=[key_msgs, key_flusher])
 
-        logging.warning("[DEBOUNCE] %s: drained %d message(s) from Redis", phone, len(raw_msgs) if raw_msgs else 0)
+        logging.warning("[DEBOUNCE] %s fid=%s: drained %d message(s)", phone, fid, len(raw_msgs) if raw_msgs else 0)
         if not raw_msgs:
             return
 
@@ -306,11 +307,14 @@ def debounce_message(
             )
             t.start()
             logging.warning(
-                "[DEBOUNCE] %s: buffered + flusher started (window=%.1fs)",
-                phone, DEBOUNCE_SECONDS,
+                "[DEBOUNCE] %s: buffered + flusher started (window=%.1fs) lua=%s pid=%d",
+                phone, DEBOUNCE_SECONDS, lua_result, os.getpid(),
             )
         else:
-            logging.warning("[DEBOUNCE] %s: buffered (flusher already running)", phone)
+            logging.warning(
+                "[DEBOUNCE] %s: COALESCED (flusher lock held) lua=%s pid=%d",
+                phone, lua_result, os.getpid(),
+            )
             # If the previous flusher already drained and is processing
             # (not just sleeping), signal it to abort before executor —
             # this new message supersedes the in-flight turn.
