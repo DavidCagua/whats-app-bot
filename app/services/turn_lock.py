@@ -50,12 +50,25 @@ def _wa_id_to_lock_key(wa_id: str) -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
+class TurnLockResult:
+    """Yielded by wa_id_turn_lock; exposes whether the lock had to wait."""
+    __slots__ = ("waited",)
+
+    def __init__(self, waited: bool = False):
+        self.waited = waited
+
+
 @contextmanager
-def wa_id_turn_lock(wa_id: str, *, timeout_seconds: float = 30.0) -> Iterator[None]:
+def wa_id_turn_lock(wa_id: str, *, timeout_seconds: float = 30.0) -> Iterator[TurnLockResult]:
     """
     Hold a per-wa_id Postgres advisory lock for the duration of the
     `with` block. A second concurrent caller for the same wa_id blocks
     until the first exits.
+
+    Yields a ``TurnLockResult`` whose ``.waited`` flag is True when the
+    lock was NOT immediately available (another turn was in-flight).
+    Callers can use this to detect "stale turns" — messages the user
+    sent before seeing the previous bot reply.
 
     Args:
         wa_id: WhatsApp ID (e.g. "+573001234567"). Empty/None disables
@@ -70,8 +83,9 @@ def wa_id_turn_lock(wa_id: str, *, timeout_seconds: float = 30.0) -> Iterator[No
     failure. Failure to acquire is logged but does NOT raise — the
     block still runs without serialization in that case.
     """
+    result = TurnLockResult()
     if not wa_id:
-        yield
+        yield result
         return
 
     key = _wa_id_to_lock_key(wa_id)
@@ -81,14 +95,30 @@ def wa_id_turn_lock(wa_id: str, *, timeout_seconds: float = 30.0) -> Iterator[No
         try:
             conn = engine.raw_connection()
             cur = conn.cursor()
-            # Bound the wait so a stuck handler can't wedge other
-            # messages for this user forever. lock_timeout is in ms
-            # at the session level — auto-resets when conn closes.
-            cur.execute(f"SET lock_timeout = '{int(timeout_seconds * 1000)}ms'")
-            cur.execute("SELECT pg_advisory_lock(%s)", (key,))
-            locked = True
-            cur.close()
-            logger.info(f"[TURN_LOCK] acquired wa_id={wa_id} key={key}")
+
+            # Probe: try to acquire without blocking to detect contention.
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+            got_it = cur.fetchone()[0]
+
+            if got_it:
+                # Lock was free — no other turn in-flight.
+                locked = True
+                cur.close()
+                logger.info(f"[TURN_LOCK] acquired (no wait) wa_id={wa_id} key={key}")
+            else:
+                # Another turn holds the lock — this is a queued message.
+                result.waited = True
+                cur.close()
+                logger.warning(
+                    f"[TURN_LOCK] wa_id={wa_id} key={key}: lock held, waiting (stale turn)"
+                )
+                cur = conn.cursor()
+                cur.execute(f"SET lock_timeout = '{int(timeout_seconds * 1000)}ms'")
+                cur.execute("SELECT pg_advisory_lock(%s)", (key,))
+                locked = True
+                cur.close()
+                logger.info(f"[TURN_LOCK] acquired (after wait) wa_id={wa_id} key={key}")
+
         except Exception as e:
             # Acquisition failed (timeout, DB unreachable, …). Fall back
             # to running without the lock so the user's message is not
@@ -98,7 +128,7 @@ def wa_id_turn_lock(wa_id: str, *, timeout_seconds: float = 30.0) -> Iterator[No
                 "proceeding without serialization"
             )
 
-        yield
+        yield result
     finally:
         if locked and conn is not None:
             try:

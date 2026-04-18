@@ -825,6 +825,8 @@ class OrderAgent(BaseAgent):
         conversation_history: List[Dict],
         message_id: Optional[str] = None,
         session: Optional[Dict] = None,
+        stale_turn: bool = False,
+        **kwargs,
     ) -> AgentOutput:
         """Planner (intent) -> executor (one tool) -> response generator from actual tool result and cart."""
         run_id = str(uuid.uuid4())
@@ -882,6 +884,12 @@ class OrderAgent(BaseAgent):
                 [o.get("name") for o in (pending.get("options") or [])] if pending else [],
             )
             planner_system += build_pending_disambiguation_prompt_block(pending)
+
+            if stale_turn:
+                planner_system += (
+                    "\n\nNOTA: El usuario envió este mensaje ANTES de ver tu respuesta "
+                    "anterior. No asumas que leyó o reaccionó a tu último mensaje."
+                )
 
             history_text = ""
             for msg in conversation_history[-6:]:

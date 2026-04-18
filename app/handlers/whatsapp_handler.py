@@ -23,10 +23,16 @@ from app.utils.whatsapp_utils import (
 )
 
 
-def process_whatsapp_message(body, business_context=None):
+def process_whatsapp_message(body, business_context=None, abort_key=None, stale_turn=False):
     """
     Process incoming WhatsApp message: parse, persist, optionally run agent and send reply.
     Voice-only messages are persisted and enqueued; reply is sent later when transcript is ready.
+
+    Args:
+        abort_key: Optional Redis key checked before sending — if set, a newer
+            message arrived during processing and this response should be dropped.
+        stale_turn: True when this message was queued behind another turn —
+            the user sent it before seeing the bot's previous reply.
     """
     overall_start = time.time()
     # Fresh per-turn memoization cache. Eliminates 2-4x redundant reads
@@ -108,6 +114,8 @@ def process_whatsapp_message(body, business_context=None):
             name=name,
             business_context=business_context,
             message_id=message_id,
+            abort_key=abort_key,
+            stale_turn=stale_turn,
         )
 
     except Exception as e:
@@ -164,6 +172,8 @@ def _run_agent_and_send(
     name: str,
     business_context: Optional[dict],
     message_id: Optional[str] = None,
+    abort_key: Optional[str] = None,
+    stale_turn: bool = False,
 ) -> bool:
     """Run conversation manager and send reply via utils. Returns True if send succeeded."""
     llm_start = time.time()
@@ -175,6 +185,7 @@ def _run_agent_and_send(
             name=name,
             business_context=business_context,
             message_id=message_id,
+            stale_turn=stale_turn,
         )
         if not response or not response.strip():
             logging.error("❌ ConversationManager returned None or empty response")
@@ -185,6 +196,21 @@ def _run_agent_and_send(
         logging.error(traceback.format_exc())
         response = "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?"
     logging.warning(f"[TIMING] ConversationManager.process took {time.time() - llm_start:.3f}s")
+
+    # ── Abort check: a newer message arrived while we were processing ──
+    # Skip sending the stale response. The newer message's flusher will
+    # process it with fresh context. The response IS stored in
+    # conversation history (agent already persisted it) which is fine —
+    # it gives the planner context that the bot "would have said X".
+    if abort_key:
+        from app.services.debounce import check_abort, clear_abort
+        if check_abort(abort_key):
+            clear_abort(abort_key)
+            logging.warning(
+                "[ABORT] %s: skipping send — newer message arrived during processing",
+                wa_id,
+            )
+            return False
 
     processed_response = process_text_for_whatsapp(response)
     data = get_text_message_input(wa_id, processed_response)

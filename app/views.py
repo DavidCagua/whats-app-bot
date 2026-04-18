@@ -225,8 +225,12 @@ def handle_twilio_message():
     try:
         business_context = resolve_twilio_business_context(to_number)
         processing_start = time.time()
-        with wa_id_turn_lock(sender_wa_id):
-            process_whatsapp_message(normalized_body, business_context=business_context)
+        with wa_id_turn_lock(sender_wa_id) as lock_result:
+            process_whatsapp_message(
+                normalized_body,
+                business_context=business_context,
+                stale_turn=lock_result.waited,
+            )
         logging.warning(
             f"[TIMING] process_whatsapp_message (Twilio sync) took {time.time() - processing_start:.3f}s"
         )

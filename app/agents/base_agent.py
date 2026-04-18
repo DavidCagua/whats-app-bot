@@ -40,9 +40,13 @@ class BaseAgent(ABC):
         business_context: Optional[Dict],
         conversation_history: List[Dict],
         message_id: Optional[str] = None,
+        **kwargs,
     ) -> AgentOutput:
         """
         Execute agent logic. Return structured AgentOutput.
+
+        Subclasses may accept additional keyword arguments (e.g.
+        ``session``, ``stale_turn``) via **kwargs.
 
         Returns:
             { "agent_type": str, "message": str, "state_update": dict }

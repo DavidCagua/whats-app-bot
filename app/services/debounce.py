@@ -31,6 +31,46 @@ import time
 DEBOUNCE_SECONDS = 3.0
 _FLUSHER_TTL = 90   # safety expiry on flusher lock: sleep(3) + max LLM time
 _MSG_TTL = 120      # safety expiry on buffered messages (seconds)
+_PROCESSING_TTL = 60  # safety expiry on processing flag (seconds)
+_ABORT_TTL = 30       # safety expiry on abort signal (seconds)
+
+
+def _processing_key(to_number: str, phone: str) -> str:
+    return f"processing:{to_number}:{phone}"
+
+
+def _abort_key(to_number: str, phone: str) -> str:
+    return f"abort:{to_number}:{phone}"
+
+
+def check_abort(abort_key: str) -> bool:
+    """
+    Check if an abort signal exists for the given key.
+    Called by the handler layer before sending a response — if True,
+    a newer message arrived during processing and this response is stale.
+    """
+    if not abort_key:
+        return False
+    r = _get_redis()
+    if r is None:
+        return False
+    try:
+        return bool(r.exists(abort_key))
+    except Exception:
+        return False
+
+
+def clear_abort(abort_key: str) -> None:
+    """Delete the abort flag after it has been consumed."""
+    if not abort_key:
+        return
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        r.delete(abort_key)
+    except Exception:
+        pass
 
 _redis_client = None
 _init_lock = threading.Lock()
@@ -170,19 +210,31 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
         from ..handlers.whatsapp_handler import process_whatsapp_message  # avoid circular
         from .turn_lock import wa_id_turn_lock
 
+        # Set processing flag so new arrivals can signal an abort.
+        proc_key = _processing_key(to_number, phone)
+        ab_key = _abort_key(to_number, phone)
+        try:
+            r.set(proc_key, "1", ex=_PROCESSING_TTL)
+        except Exception:
+            pass
+
         with flask_app.app_context():
-            with wa_id_turn_lock(phone):
-                process_whatsapp_message(combined_body, business_context=business_context)
+            with wa_id_turn_lock(phone) as lock_result:
+                process_whatsapp_message(
+                    combined_body,
+                    business_context=business_context,
+                    abort_key=ab_key,
+                    stale_turn=lock_result.waited,
+                )
 
     except Exception as exc:
         logging.error("[DEBOUNCE] flush error for %s: %s", phone, exc, exc_info=True)
     finally:
-        # Belt-and-suspenders: release flusher lock even if Lua drain or
-        # processing crashed before it could delete it.
+        # Clean up processing flag + flusher lock.
         try:
             r = _get_redis()
             if r:
-                r.delete(key_flusher)
+                r.delete(key_flusher, _processing_key(to_number, phone))
         except Exception:
             pass
 
@@ -257,6 +309,20 @@ def debounce_message(
             )
         else:
             logging.warning("[DEBOUNCE] %s: buffered (flusher already running)", phone)
+            # If the previous flusher already drained and is processing
+            # (not just sleeping), signal it to skip sending — this new
+            # message supersedes the in-flight response.
+            proc_key = _processing_key(to_number, phone)
+            try:
+                if r.exists(proc_key):
+                    ab_key = _abort_key(to_number, phone)
+                    r.set(ab_key, "1", ex=_ABORT_TTL)
+                    logging.warning(
+                        "[DEBOUNCE] %s: abort signal set (new message during processing)",
+                        phone,
+                    )
+            except Exception as exc:
+                logging.warning("[DEBOUNCE] %s: failed to set abort: %s", phone, exc)
 
         return True
 

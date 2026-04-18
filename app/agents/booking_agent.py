@@ -213,6 +213,7 @@ class BookingAgent(BaseAgent):
         conversation_history: List[Dict],
         message_id: Optional[str] = None,
         session: Optional[Dict] = None,
+        **kwargs,
     ) -> AgentOutput:
         """Run booking agent. Returns AgentOutput."""
         run_id = str(uuid.uuid4())

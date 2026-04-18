@@ -24,6 +24,7 @@ def execute_agent(
     name: str,
     business_context: Optional[Dict],
     message_id: Optional[str] = None,
+    stale_turn: bool = False,
 ) -> Dict:
     """
     Execute the specified agent and return AgentOutput.
@@ -61,6 +62,7 @@ def execute_agent(
         business_context=business_context,
         conversation_history=conversation_history,
         message_id=message_id,
+        stale_turn=stale_turn,
     )
 
     if agent_type in ("order", "booking") and business_id:

@@ -243,6 +243,7 @@ class SalesAgent(BaseAgent):
         business_context: Optional[Dict],
         conversation_history: List[Dict],
         message_id: Optional[str] = None,
+        **kwargs,
     ) -> AgentOutput:
         """Run sales agent: intent filter → LLM + tool loop. Return AgentOutput."""
         run_id = str(uuid.uuid4())

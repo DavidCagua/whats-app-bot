@@ -22,6 +22,7 @@ class ConversationManager:
         name: str,
         business_context: Optional[dict],
         message_id: Optional[str] = None,
+        stale_turn: bool = False,
     ) -> str:
         """
         Process incoming message. Phase 1: single-agent fast path.
@@ -76,6 +77,7 @@ class ConversationManager:
             name=name,
             business_context=business_context,
             message_id=message_id,
+            stale_turn=stale_turn,
         )
 
         # Persist state_update to session (order completion, active_agents, etc.)
