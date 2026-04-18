@@ -138,9 +138,11 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
     """
     # Unique ID so we can trace which drain belongs to which flusher.
     fid = uuid.uuid4().hex[:6]
-    logging.warning("[DEBOUNCE] %s fid=%s: sleeping %.1fs (pid=%d)", phone, fid, DEBOUNCE_SECONDS, os.getpid())
+    t0 = time.time()
+    logging.warning("[DEBOUNCE] %s fid=%s: sleeping %.1fs (pid=%d t=%.3f)", phone, fid, DEBOUNCE_SECONDS, os.getpid(), t0)
     time.sleep(DEBOUNCE_SECONDS)
-    logging.warning("[DEBOUNCE] %s fid=%s: woke up (pid=%d)", phone, fid, os.getpid())
+    t1 = time.time()
+    logging.warning("[DEBOUNCE] %s fid=%s: woke after %.3fs (pid=%d t=%.3f)", phone, fid, t1 - t0, os.getpid(), t1)
 
     r = _get_redis()
     if r is None:
@@ -307,13 +309,13 @@ def debounce_message(
             )
             t.start()
             logging.warning(
-                "[DEBOUNCE] %s: buffered + flusher started (window=%.1fs) lua=%s pid=%d",
-                phone, DEBOUNCE_SECONDS, lua_result, os.getpid(),
+                "[DEBOUNCE] %s: NEW flusher lua=%s pid=%d t=%.3f",
+                phone, lua_result, os.getpid(), time.time(),
             )
         else:
             logging.warning(
-                "[DEBOUNCE] %s: COALESCED (flusher lock held) lua=%s pid=%d",
-                phone, lua_result, os.getpid(),
+                "[DEBOUNCE] %s: COALESCED lua=%s pid=%d t=%.3f",
+                phone, lua_result, os.getpid(), time.time(),
             )
             # If the previous flusher already drained and is processing
             # (not just sleeping), signal it to abort before executor —
