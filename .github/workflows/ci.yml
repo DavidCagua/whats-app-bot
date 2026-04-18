@@ -72,3 +72,28 @@ jobs:
           # Fails if SQLAlchemy models drift from the DB schema. Catches
           # "forgot to add a new column to a migration" and similar bugs.
           alembic check
+
+  admin-console-lint:
+    name: TypeScript & lint check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin-console
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+          cache-dependency-path: admin-console/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
