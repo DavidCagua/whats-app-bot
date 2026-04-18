@@ -137,7 +137,10 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
     """
     # Sleep for the full debounce window before draining.
     # All messages that arrive within this window will be in the list.
+    t_start = time.time()
+    logging.warning("[DEBOUNCE_TRACE] %s: flusher sleeping %.1fs", phone, DEBOUNCE_SECONDS)
     time.sleep(DEBOUNCE_SECONDS)
+    logging.warning("[DEBOUNCE_TRACE] %s: flusher woke after %.3fs", phone, time.time() - t_start)
 
     r = _get_redis()
     if r is None:
@@ -154,11 +157,23 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
         drain = r.register_script(_LUA_DRAIN)
         raw_msgs = drain(keys=[key_msgs, key_flusher])
 
-        logging.warning("[DEBOUNCE] %s: drained %d message(s) from Redis", phone, len(raw_msgs) if raw_msgs else 0)
+        logging.warning(
+            "[DEBOUNCE_TRACE] %s: drained %d msg(s), flusher_lock released, elapsed=%.3fs",
+            phone, len(raw_msgs) if raw_msgs else 0, time.time() - t_start,
+        )
         if not raw_msgs:
             return
 
-        logging.warning("[DEBOUNCE] %s: coalescing %d message(s)", phone, len(raw_msgs))
+        # Extract text bodies for debugging
+        dbg_texts = []
+        for raw in (raw_msgs or []):
+            try:
+                entry = json.loads(raw)
+                txt = entry["normalized_body"]["entry"][0]["changes"][0]["value"]["messages"][0]["text"]["body"]
+                dbg_texts.append(txt[:60])
+            except Exception:
+                dbg_texts.append("(parse error)")
+        logging.warning("[DEBOUNCE_TRACE] %s: coalescing %d msg(s): %s", phone, len(raw_msgs), dbg_texts)
 
         entries = []
         for raw in raw_msgs:
@@ -282,6 +297,7 @@ def debounce_message(
 
     payload = json.dumps({"normalized_body": normalized_body})
 
+    buf_time = time.time()
     try:
         # Atomic Lua: RPUSH + SET NX in one script so no other client can
         # slip between them. Returns 1 if this caller won the flusher lock.
@@ -290,9 +306,11 @@ def debounce_message(
             keys=[key_msgs, key_flusher],
             args=[payload, _MSG_TTL, _FLUSHER_TTL],
         )
+        # Also check how many messages are buffered right now
+        buf_len = r.llen(key_msgs)
         logging.warning(
-            "[DEBOUNCE] %s: key_flusher=%s lua_result=%s",
-            phone, key_flusher, lua_result,
+            "[DEBOUNCE_TRACE] %s: lua_result=%s buf_len=%d flusher_key=%s t=%.3f",
+            phone, lua_result, buf_len, key_flusher, buf_time,
         )
         is_flusher = bool(lua_result)
         if is_flusher:
@@ -304,25 +322,34 @@ def debounce_message(
             )
             t.start()
             logging.warning(
-                "[DEBOUNCE] %s: buffered + flusher started (window=%.1fs)",
+                "[DEBOUNCE_TRACE] %s: NEW flusher started (window=%.1fs)",
                 phone, DEBOUNCE_SECONDS,
             )
         else:
-            logging.warning("[DEBOUNCE] %s: buffered (flusher already running)", phone)
+            logging.warning(
+                "[DEBOUNCE_TRACE] %s: COALESCED into existing flusher (buf_len=%d)",
+                phone, buf_len,
+            )
             # If the previous flusher already drained and is processing
             # (not just sleeping), signal it to skip sending — this new
             # message supersedes the in-flight response.
             proc_key = _processing_key(to_number, phone)
             try:
-                if r.exists(proc_key):
+                proc_exists = r.exists(proc_key)
+                if proc_exists:
                     ab_key = _abort_key(to_number, phone)
                     r.set(ab_key, "1", ex=_ABORT_TTL)
                     logging.warning(
-                        "[DEBOUNCE] %s: abort signal set (new message during processing)",
+                        "[DEBOUNCE_TRACE] %s: ABORT signal set (processing flag was live)",
+                        phone,
+                    )
+                else:
+                    logging.warning(
+                        "[DEBOUNCE_TRACE] %s: flusher still sleeping (no processing flag)",
                         phone,
                     )
             except Exception as exc:
-                logging.warning("[DEBOUNCE] %s: failed to set abort: %s", phone, exc)
+                logging.warning("[DEBOUNCE_TRACE] %s: failed to check/set abort: %s", phone, exc)
 
         return True
 
