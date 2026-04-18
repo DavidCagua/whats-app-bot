@@ -82,6 +82,9 @@ BIELA_CATALOG = {
     # existing prefix-rival disambiguation behavior.
     "CORONA":      _product("p-17", "Corona 355ml", category="BEBIDAS", description="", tags=["bebida", "cerveza"], price=12000),
     "CORONA_MICH": _product("p-18", "Corona michelada", category="BEBIDAS", description="", tags=["bebida", "cerveza"], price=14500),
+    # Chicken burgers — used by the typo-tolerance tests (vitoria → VITTORIA).
+    "VITTORIA":    _product("p-19", "VITTORIA", description="Filete de pollo apanado, albahaca, mozzarella.", tags=["hamburguesa", "burger", "pollo"], price=28000),
+    "ARIZONA":     _product("p-20", "ARIZONA", description="Filete de pollo apanado, tocineta, pepinillos.", tags=["hamburguesa", "burger", "pollo"], price=28000),
 }
 
 
@@ -136,6 +139,11 @@ def _stub_search(lexical=None, semantic=None, synonyms=None):
         # intercepting. Tests that want to exercise the LLM resolver
         # override this with their own mock.
         patch("app.services.product_search._llm_resolve_disambiguation", return_value=None),
+        # Disable fuzzy fallback paths by default — trigram returns no
+        # hits, LLM zero-result returns None. Tests for these features
+        # override explicitly.
+        patch("app.services.product_search._trigram_candidates", return_value={}),
+        patch("app.services.product_search._llm_zero_result_fallback", return_value=None),
     ]
 
 
@@ -848,3 +856,175 @@ class TestLLMDisambiguationResolver:
                     BUSINESS_ID, "corona", unique=True,
                 )
         assert len(exc_info.value.matches) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — Typo tolerance: trigram + LLM zero-result fallback
+# ---------------------------------------------------------------------------
+
+
+def _stub_search_with_trigram(
+    lexical=None,
+    semantic=None,
+    synonyms=None,
+    trigram=None,
+    llm_zero_result=None,
+):
+    """
+    Like _stub_search but lets the caller control the trigram fallback
+    and LLM zero-result fallback return values.
+
+    Args:
+        trigram: {product_key: product_dict} — what _trigram_candidates returns
+        llm_zero_result: product dict or None — what _llm_zero_result_fallback returns
+    """
+    base_patches = _stub_search(lexical=lexical, semantic=semantic, synonyms=synonyms)
+
+    trigram_map = {}
+    for k, p in (trigram or {}).items():
+        trigram_map[p["id"]] = p
+
+    # Replace the trigram and llm_zero_result patches (last two in base)
+    base_patches[-2] = patch(
+        "app.services.product_search._trigram_candidates",
+        return_value=trigram_map,
+    )
+    base_patches[-1] = patch(
+        "app.services.product_search._llm_zero_result_fallback",
+        return_value=llm_zero_result,
+    )
+    # Stub catalog_cache.list_products so the LLM fallback path doesn't
+    # hit the real DB (the return value is only used by the real
+    # _llm_zero_result_fallback, which is itself patched above).
+    base_patches.append(patch(
+        "app.services.product_search.catalog_cache.list_products",
+        return_value=list(BIELA_CATALOG.values()),
+    ))
+    return base_patches
+
+
+class TestTypoTolerance:
+    """
+    Regression tests for the typo-tolerance fallback chain.
+
+    When lexical + semantic return nothing (the user misspelled a product
+    name), the search should try:
+      1. pg_trgm similarity on product names
+      2. LLM zero-result fallback with cached catalog
+
+    Pinned by the real incident: user typed "Una Vitoria" (1 t) for the
+    product "VITTORIA" (2 t's). The bot replied "No tengo la Vitoria en
+    el menú" instead of adding it to the cart.
+    """
+
+    def test_trigram_single_hit_returns_winner(self):
+        """
+        Trigram finds exactly one fuzzy match → return it directly.
+        This is the "vitoria" → "VITTORIA" case.
+        """
+        # Lexical + semantic return nothing (the typo breaks ILIKE)
+        trigram = {"VITTORIA": BIELA_CATALOG["VITTORIA"]}
+        with _PatchStack(_stub_search_with_trigram(trigram=trigram)):
+            results = product_search.search_products(
+                BUSINESS_ID, "vitoria", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "VITTORIA"
+        assert results[0]["matched_by"] == "trigram"
+
+    def test_trigram_single_hit_unique_false(self):
+        """Trigram hit also works for unique=False (browse/search path)."""
+        trigram = {"VITTORIA": BIELA_CATALOG["VITTORIA"]}
+        with _PatchStack(_stub_search_with_trigram(trigram=trigram)):
+            results = product_search.search_products(
+                BUSINESS_ID, "vitoria", unique=False,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "VITTORIA"
+
+    def test_trigram_multiple_hits_raises_ambiguous(self):
+        """
+        Trigram returns multiple fuzzy matches and LLM disambiguator
+        can't pick a winner → AmbiguousProductError.
+        """
+        trigram = {
+            "VITTORIA": BIELA_CATALOG["VITTORIA"],
+            "ARIZONA":  BIELA_CATALOG["ARIZONA"],
+        }
+        with _PatchStack(_stub_search_with_trigram(trigram=trigram)):
+            with pytest.raises(product_search.AmbiguousProductError) as exc_info:
+                product_search.search_products(
+                    BUSINESS_ID, "vizona", unique=True,
+                )
+        names = {m.get("name") for m in exc_info.value.matches}
+        assert "VITTORIA" in names or "ARIZONA" in names
+
+    def test_trigram_multiple_hits_llm_picks_winner(self):
+        """
+        Trigram returns multiple fuzzy matches but the LLM disambiguator
+        picks a clear winner.
+        """
+        trigram = {
+            "VITTORIA": BIELA_CATALOG["VITTORIA"],
+            "ARIZONA":  BIELA_CATALOG["ARIZONA"],
+        }
+        # Override LLM disambiguator to pick VITTORIA
+        patches = _stub_search_with_trigram(trigram=trigram)
+        # The LLM disambiguator patch is at index 4 in the base stubs
+        patches[4] = patch(
+            "app.services.product_search._llm_resolve_disambiguation",
+            return_value={
+                "result": "WINNER",
+                "product": dict(BIELA_CATALOG["VITTORIA"]),
+            },
+        )
+        with _PatchStack(patches):
+            results = product_search.search_products(
+                BUSINESS_ID, "vitoria", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "VITTORIA"
+
+    def test_llm_zero_result_fallback_when_trigram_empty(self):
+        """
+        Both lexical+semantic AND trigram return nothing → LLM fallback
+        with cached catalog finds the match.
+        """
+        llm_match = dict(BIELA_CATALOG["VITTORIA"])
+        llm_match["matched_by"] = "llm_fallback"
+        # Also need to stub catalog_cache.list_products
+        patches = _stub_search_with_trigram(llm_zero_result=llm_match)
+        with _PatchStack(patches):
+            results = product_search.search_products(
+                BUSINESS_ID, "vitoria", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "VITTORIA"
+        assert results[0]["matched_by"] == "llm_fallback"
+
+    def test_all_fallbacks_fail_returns_empty(self):
+        """
+        Lexical, semantic, trigram, and LLM all return nothing → [].
+        """
+        with _PatchStack(_stub_search_with_trigram()):
+            results = product_search.search_products(
+                BUSINESS_ID, "xyznonexistent", unique=True,
+            )
+        assert results == []
+
+    def test_trigram_does_not_fire_when_lexical_has_results(self):
+        """
+        When lexical returns results, the trigram fallback should NOT
+        run — it only fires when merged is empty.
+        """
+        lexical = {"VITTORIA": BIELA_CATALOG["VITTORIA"]}
+        trigram = {"ARIZONA": BIELA_CATALOG["ARIZONA"]}
+        with _PatchStack(_stub_search_with_trigram(
+            lexical=lexical, trigram=trigram,
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "vittoria", unique=True,
+            )
+        # Should return VITTORIA from lexical, not ARIZONA from trigram
+        assert len(results) == 1
+        assert results[0]["name"] == "VITTORIA"

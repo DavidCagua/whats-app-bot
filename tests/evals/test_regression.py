@@ -948,6 +948,77 @@ def test_biela_tienes_cervezas_lists_beers():
 # LLM-as-judge scenario — prose quality check
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Biela — typo tolerance (vitoria → VITTORIA)
+#
+# Incident 2026-04-18 +573177000722. User typed "Una Vitoria" (single t)
+# two turns after the bot listed VITTORIA (double t) as a chicken burger.
+# The search returned empty because ILIKE '%vitoria%' doesn't match
+# 'VITTORIA'. Bot replied "No tengo la Vitoria en el menú."
+#
+# Fix: two-layer fallback — pg_trgm similarity (catches single-char
+# typos) → LLM zero-result fallback (catches phonetic misspellings).
+# The unit-test layer (test_product_search_retrieval.py TestTypoTolerance)
+# verifies the search mechanics; this eval verifies the agent-level flow.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_vitoria_typo_resolves_to_vittoria():
+    """
+    User types "Una Vitoria" (1 t) — the product is VITTORIA (2 t's).
+    The search fallback must resolve the typo and the agent must add
+    the product to the cart, not say "no tenemos".
+    """
+    VITTORIA = product(
+        "VITTORIA", 28000,
+        description="Filete de pollo apanado, albahaca, mozzarella, pesto.",
+        tags=["hamburguesa", "burger", "pollo"],
+        matched_by="trigram",
+    )
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        # Simulate the trigram fallback finding VITTORIA for "vitoria"
+        if "vitor" in q or "vittor" in q:
+            return [VITTORIA]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_vitoria_typo_resolves_to_vittoria",
+        user_message="Una Vitoria",
+        initial_order_context={"state": "GREETING"},
+        conversation_history=[
+            {"role": "user", "content": "Tienes hamburguesas de pollo?"},
+            {"role": "assistant", "content": "Sí, tenemos: ARIZONA ($28.000), BOOSTER ($28.000), VITTORIA ($28.000)."},
+        ],
+        known_products=[VITTORIA],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["BURGERS", "CHICKEN BURGERS", "HOT DOGS", "BEBIDAS"],
+        reference_trajectory=expected_planner_call(
+            user_message="Una Vitoria",
+            intent="ADD_TO_CART",
+            params={},
+        ),
+        trajectory_match_mode="superset",
+        tool_args_match_mode="ignore",
+        must_not_contain=[
+            r"\bno tenemos\b",
+            r"\bno tengo\b",
+            r"\bno hay\b",
+            r"\bno está\b",
+            r"\bno encontr[eé]\b",
+        ],
+        must_contain_any=[
+            r"\bagregad[oa]\b",
+            r"\bhemos agregado\b",
+            r"\bse agreg[oó]\b",
+            r"VITTORIA",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
 def test_hay_pizza_llm_judge_full_semantic_check():
     """
     Same 'pizza' case, but graded by the tuned TRAJECTORY_ACCURACY_PROMPT

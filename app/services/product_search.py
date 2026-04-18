@@ -216,6 +216,107 @@ def _llm_resolve_disambiguation(
         return None
 
 
+# ── LLM zero-result fallback ────────────────────────────────────────────
+# When both lexical, semantic, AND trigram phases return nothing, this
+# sends the query + full catalog to a fast LLM as a last resort. Handles
+# cases where the typo is too severe for trigram (e.g. phonetic
+# misspellings, creative abbreviations) but a language model can still
+# infer the intent from context.
+
+_LLM_ZERO_RESULT_SYSTEM = """You are a product-matching fallback for a Colombian restaurant's WhatsApp ordering bot.
+
+The customer typed a product name that didn't match anything in our catalog via normal search.
+This usually means a typo, misspelling, or phonetic approximation.
+
+Given the customer's query and the full product catalog, decide:
+
+1. **MATCH** — if exactly one product is clearly what the customer meant (typo, misspelling,
+   phonetic similarity), return its index. Examples: "vitoria" → VITTORIA, "aravbiata" → ARRABBIATA.
+
+2. **NO_MATCH** — if no product is a reasonable match for the query, or if multiple products
+   could match equally well. Do NOT guess.
+
+Rules:
+- Only return MATCH if you are highly confident (>90%) this is a typo/misspelling of that product.
+- Never match unrelated products just because they share a letter or two.
+- Respond ONLY with valid JSON, no markdown, no explanation.
+
+Response format — exactly one of:
+  {"result": "MATCH", "index": <0-based>}
+  {"result": "NO_MATCH"}
+"""
+
+
+def _llm_zero_result_fallback(
+    query: str,
+    all_products: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Last-resort LLM call when all search phases returned nothing.
+
+    Only sends product names + categories to the LLM (minimal tokens).
+    Returns the matched product dict or None.
+    """
+    llm = _get_llm_resolver()
+    if llm is None:
+        return None
+    if not all_products:
+        return None
+
+    # Send only name + category — minimal tokens, enough for typo matching
+    lines = []
+    for i, p in enumerate(all_products):
+        cat = p.get("category") or ""
+        lines.append(f"{i}. {p.get('name')} ({cat})")
+
+    user_msg = f'Query: "{query}"\n\nCatalog:\n' + "\n".join(lines)
+
+    try:
+        from langchain_core.messages import SystemMessage, HumanMessage
+        response = llm.invoke(
+            [
+                SystemMessage(content=_LLM_ZERO_RESULT_SYSTEM),
+                HumanMessage(content=user_msg),
+            ],
+            config={"run_name": "product_zero_result_fallback"},
+        )
+        text = (response.content if hasattr(response, "content") else str(response)).strip()
+
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[^{}]*\}", text)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+
+        if not parsed or not isinstance(parsed, dict):
+            logger.warning("[PRODUCT_SEARCH] LLM zero-result fallback unparseable: %r", text)
+            return None
+
+        result_type = (parsed.get("result") or "").upper()
+        if result_type == "MATCH":
+            idx = parsed.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(all_products):
+                winner = dict(all_products[idx])
+                winner["matched_by"] = "llm_fallback"
+                logger.info(
+                    "[PRODUCT_SEARCH] LLM zero-result fallback: query=%r → %r",
+                    query, winner.get("name"),
+                )
+                return winner
+
+        logger.info("[PRODUCT_SEARCH] LLM zero-result fallback: NO_MATCH for query=%r", query)
+        return None
+
+    except Exception as exc:
+        logger.warning("[PRODUCT_SEARCH] LLM zero-result fallback failed: %s", exc)
+        return None
+
+
 class AmbiguousProductError(Exception):
     """Raised when unique=True but the search result has no clear winner."""
     def __init__(self, query: str, matches: List[Dict[str, Any]]):
@@ -368,6 +469,82 @@ _SCORE_STEM_BONUS = 5
 # [ORDER_TURN] log signal: raise if noise leaks through, drop if legitimate
 # typos/near-matches get killed. 0.55 is a conservative starting point.
 _EMBEDDING_SIMILARITY_FLOOR = 0.55
+
+# Minimum pg_trgm similarity for a trigram fuzzy match to qualify.
+# 0.3 is Postgres's default; 0.35 tightens it slightly to avoid noise
+# while still catching single-char typos like "vitoria" → "vittoria".
+_TRIGRAM_SIMILARITY_THRESHOLD = 0.35
+
+
+def _trigram_candidates(
+    db_session,
+    business_id: str,
+    query_norm: str,
+    limit: int = 10,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Fuzzy fallback using pg_trgm similarity on product names.
+
+    Only called when both lexical and semantic phases returned zero
+    candidates — i.e. the user's query has a typo or misspelling that
+    breaks substring matching but is close enough for trigram overlap.
+
+    Returns {product_id: product_row_dict}, same shape as _lexical_candidates.
+    """
+    if not query_norm:
+        return {}
+
+    business_uuid = uuid.UUID(business_id)
+    sql = sql_text("""
+        SELECT id, business_id, name, description, price, currency, category, sku,
+               is_active, tags, metadata,
+               similarity(lower(name), :query) AS sim
+        FROM products
+        WHERE business_id = :business_id
+          AND is_active = TRUE
+          AND similarity(lower(name), :query) > :threshold
+        ORDER BY sim DESC
+        LIMIT :lim
+    """)
+    try:
+        rows = db_session.execute(sql, {
+            "business_id": str(business_uuid),
+            "query": query_norm,
+            "threshold": _TRIGRAM_SIMILARITY_THRESHOLD,
+            "lim": limit,
+        }).mappings().all()
+    except Exception as e:
+        logger.debug("[PRODUCT_SEARCH] trigram search failed (pg_trgm not available?): %s", e)
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+        return {}
+
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        pid = str(row["id"])
+        candidates[pid] = {
+            "id": pid,
+            "business_id": str(row["business_id"]),
+            "name": row["name"],
+            "description": row["description"],
+            "price": float(row["price"]) if row["price"] is not None else 0.0,
+            "currency": row["currency"],
+            "category": row["category"],
+            "sku": row["sku"],
+            "is_active": row["is_active"],
+            "tags": list(row["tags"] or []),
+            "metadata": dict(row["metadata"] or {}),
+        }
+    if candidates:
+        logger.info(
+            "[PRODUCT_SEARCH] trigram fallback: query=%r found %d candidate(s): %s",
+            query_norm,
+            len(candidates),
+            [c.get("name") for c in candidates.values()],
+        )
+    return candidates
 
 
 def _lexical_candidates(
@@ -760,7 +937,40 @@ def search_products(
                 merged[pid] = prod
 
         if not merged:
-            return []
+            # ── Fallback chain: trigram → LLM ────────────────────────
+            # Both lexical and semantic returned nothing. Try fuzzy
+            # matching via pg_trgm, then an LLM last resort.
+
+            # Fallback 1: pg_trgm similarity on product names
+            trigram_hits = _trigram_candidates(db_session, business_id, query_norm, limit=5)
+            if trigram_hits:
+                # Trigram already ranked by similarity. For unique=True
+                # with a single hit, return it directly — the normal
+                # scorer would give it score=0 because the typo that
+                # brought us here also breaks substring matching.
+                for prod in trigram_hits.values():
+                    prod["matched_by"] = "trigram"
+                if unique and len(trigram_hits) == 1:
+                    return list(trigram_hits.values())
+                if unique and len(trigram_hits) > 1:
+                    # Multiple fuzzy matches — let the LLM disambiguator
+                    # pick, or raise AmbiguousProductError.
+                    candidates = list(trigram_hits.values())
+                    llm_result = _llm_resolve_disambiguation(query, candidates)
+                    if llm_result and llm_result["result"] == "WINNER":
+                        return [llm_result["product"]]
+                    raise AmbiguousProductError(query=query, matches=candidates)
+                # unique=False: return all trigram hits
+                return list(trigram_hits.values())[:limit]
+            else:
+                # Fallback 2: LLM zero-result fallback — send the query
+                # + cached catalog (names+category only) to a fast LLM.
+                all_prods = catalog_cache.list_products(business_id) or []
+                llm_match = _llm_zero_result_fallback(query, all_prods)
+                if llm_match:
+                    return [llm_match]
+
+                return []
 
         # scored: list of (score, exact_match, has_lexical, product)
         # Each product dict gains a "matched_by" tag so downstream layers
