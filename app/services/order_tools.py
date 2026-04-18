@@ -162,7 +162,7 @@ def list_category_products(category: str = "", injected_business_context: dict =
     Leave category empty to list the full menu.
 
     Args:
-        category: Category filter (e.g. BEBIDAS, HAMBURGUESAS, FRIES). Empty = full menu.
+        category: Category filter (e.g. BEBIDAS, HAMBURGUESAS, SALCHIPAPAS). Empty = full menu.
     """
     logger.info(f"[ORDER_TOOL] list_category_products category='{category}'")
     try:

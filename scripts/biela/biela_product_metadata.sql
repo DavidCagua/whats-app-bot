@@ -45,7 +45,7 @@ UPDATE products SET tags = ARRAY['hot dog', 'perro', 'perro caliente', 'salchich
 UPDATE products SET tags = ARRAY['hot dog', 'perro', 'perro caliente', 'salchicha', 'costilla', 'bbq'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-HD-04';
 
 -- ============================================================================
--- FRIES — "salchipapas" is the regional generic for fries-with-toppings
+-- SALCHIPAPAS — "salchipapas" is the regional generic for fries-with-toppings
 -- ============================================================================
 
 UPDATE products SET tags = ARRAY['papas', 'fritas', 'salchipapas', 'especial', 'completa'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-FR-01';

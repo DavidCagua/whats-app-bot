@@ -25,12 +25,12 @@ INSERT INTO products (business_id, name, description, price, currency, category,
 ('44488756-473b-46d2-a907-9f579e98ecfd', 'SPECIAL DOG', 'Pan artesanal, salchicha americana, trozos de costilla en salsa maracuyá, papas trituradas, crema griega, salsa chipotle, mayonesa de cilantro y papas fritas', 27000, 'COP', 'HOT DOGS', 'BL-HD-03', true),
 ('44488756-473b-46d2-a907-9f579e98ecfd', 'NAIROBI', 'Pan artesanal, salchicha americana, queso mozzarella, costilla en salsa BBQ, mayonesa de cilantro, cebolla morada encurtida, ripio triturado y papas fritas', 27000, 'COP', 'HOT DOGS', 'BL-HD-04', true);
 
--- FRIES
+-- SALCHIPAPAS
 INSERT INTO products (business_id, name, description, price, currency, category, sku, is_active) VALUES
-('44488756-473b-46d2-a907-9f579e98ecfd', 'SPECIAL FRIES', 'Papas fritas, salchicha americana, chorizo artesanal, plátano maduro, albahaca, queso parmesano y pico de gallo', 30000, 'COP', 'FRIES', 'BL-FR-01', true),
-('44488756-473b-46d2-a907-9f579e98ecfd', 'SALCHIPAPA', 'Papas fritas y salchicha americana, acompañadas de tu salsa favorita', 18000, 'COP', 'FRIES', 'BL-FR-02', true),
-('44488756-473b-46d2-a907-9f579e98ecfd', 'BIELA FRIES', 'Papas fritas con queso crema, queso parmesano, salchicha americana, tocineta caramelizada, mayonesa de cilantro, mermelada de tomate cherry y albahaca', 28000, 'COP', 'FRIES', 'BL-FR-03', true),
-('44488756-473b-46d2-a907-9f579e98ecfd', 'CHEESE FRIES', 'Papas fritas con queso cheddar, tocineta caramelizada y queso parmesano', 27000, 'COP', 'FRIES', 'BL-FR-04', true);
+('44488756-473b-46d2-a907-9f579e98ecfd', 'SPECIAL FRIES', 'Papas fritas, salchicha americana, chorizo artesanal, plátano maduro, albahaca, queso parmesano y pico de gallo', 30000, 'COP', 'SALCHIPAPAS', 'BL-FR-01', true),
+('44488756-473b-46d2-a907-9f579e98ecfd', 'SALCHIPAPA', 'Papas fritas y salchicha americana, acompañadas de tu salsa favorita', 18000, 'COP', 'SALCHIPAPAS', 'BL-FR-02', true),
+('44488756-473b-46d2-a907-9f579e98ecfd', 'BIELA FRIES', 'Papas fritas con queso crema, queso parmesano, salchicha americana, tocineta caramelizada, mayonesa de cilantro, mermelada de tomate cherry y albahaca', 28000, 'COP', 'SALCHIPAPAS', 'BL-FR-03', true),
+('44488756-473b-46d2-a907-9f579e98ecfd', 'CHEESE FRIES', 'Papas fritas con queso cheddar, tocineta caramelizada y queso parmesano', 27000, 'COP', 'SALCHIPAPAS', 'BL-FR-04', true);
 
 -- CHICKEN BURGERS
 INSERT INTO products (business_id, name, description, price, currency, category, sku, is_active) VALUES

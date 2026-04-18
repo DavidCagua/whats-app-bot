@@ -196,7 +196,7 @@ def test_menu_link_sent_when_user_asks_for_carta():
         user_message="me envias la carta porfa",
         initial_order_context={"state": "GREETING"},
         stub_list_categories=lambda biz: [
-            "BURGERS", "CHICKEN BURGERS", "HOT DOGS", "FRIES",
+            "BURGERS", "CHICKEN BURGERS", "HOT DOGS", "SALCHIPAPAS",
             "BEBIDAS", "MENÚ INFANTIL", "STEAK & RIBS",
         ],
         reference_trajectory=expected_planner_call(
