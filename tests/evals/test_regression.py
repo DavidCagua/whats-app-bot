@@ -1271,6 +1271,72 @@ def test_biela_hamburguesas_picantes_finds_mexican_and_arrabbiata():
     assert_scenario(scenario, run)
 
 
+# ---------------------------------------------------------------------------
+# Biela — browse menu mid-checkout
+#
+# Incident 2026-04-18. User was in READY_TO_PLACE (delivery info confirmed),
+# asked "tienes cervezas?" — bot repeated delivery info instead of listing
+# beers. Root cause: LIST_PRODUCTS and SEARCH_PRODUCTS were not in the
+# allowed intents for COLLECTING_DELIVERY / READY_TO_PLACE. Fix: browse
+# intents now re-open the cart to ORDERING, same as cart mutations.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_browse_menu_during_checkout_lists_products():
+    """
+    "tienes cervezas?" during READY_TO_PLACE must list beers, not
+    repeat delivery info.
+    """
+    CORONA = product("Corona 355ml", 12000, category="BEBIDAS",
+                     tags=["cerveza", "beer", "mexicana"])
+    CLUB = product("Club Colombia", 7500, category="BEBIDAS",
+                   tags=["cerveza", "beer", "nacional"])
+    POKER = product("Poker", 7500, category="BEBIDAS",
+                    tags=["cerveza", "beer", "nacional"])
+    beers = [CORONA, CLUB, POKER]
+
+    scenario = AgentScenario(
+        name="biela_browse_menu_during_checkout",
+        user_message="tienes cervezas?",
+        initial_order_context={
+            "state": "READY_TO_PLACE",
+            "items": [
+                {"product_id": "prod-barracuda", "name": "BARRACUDA", "quantity": 1, "price": 28000},
+            ],
+            "total": 28000,
+            "delivery_info": {
+                "name": "David",
+                "address": "Calle 18 #28-48",
+                "phone": "+573177000722",
+                "payment_method": "Efectivo",
+            },
+        },
+        conversation_history=[
+            {"role": "assistant", "content": "Tengo dirección Calle 18 #28-48, teléfono 3177000722 y pago Efectivo. ¿Procedemos?"},
+        ],
+        stub_search_products=lambda biz, q: beers,
+        stub_list_products_with_fallback=lambda biz, cat: (
+            beers if "cerveza" in (cat or "").lower() else []
+        ),
+        stub_list_categories=lambda biz: [
+            "HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS", "SALCHIPAPAS",
+        ],
+        must_contain_any=[
+            r"[Cc]orona",
+            r"[Cc]lub [Cc]olombia",
+            r"[Pp]oker",
+        ],
+        must_not_contain=[
+            # Must NOT repeat delivery info instead of listing beers
+            r"[Cc]alle 18",
+            r"\bno tenemos cerveza",
+            r"\bno contamos\b",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
 def test_hay_pizza_llm_judge_full_semantic_check():
     """
     Same 'pizza' case, but graded by the tuned TRAJECTORY_ACCURACY_PROMPT

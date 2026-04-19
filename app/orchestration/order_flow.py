@@ -154,6 +154,17 @@ CART_MUTATING_INTENTS = (
     INTENT_UPDATE_CART_ITEM,
 )
 
+# Browse intents that should re-open the cart when emitted during
+# COLLECTING_DELIVERY / READY_TO_PLACE. The user changed their mind
+# mid-checkout and wants to explore the menu or add more items.
+# Delivery info persists in the session — CONFIRM picks it back up.
+BROWSE_INTENTS = (
+    INTENT_LIST_PRODUCTS,
+    INTENT_SEARCH_PRODUCTS,
+    INTENT_GET_PRODUCT,
+    INTENT_GET_MENU_CATEGORIES,
+)
+
 
 # ---------- helpers ----------
 
@@ -785,7 +796,7 @@ def execute_order_intent(
     if intent not in allowed:
         if (
             current_state in (ORDER_STATE_READY_TO_PLACE, ORDER_STATE_COLLECTING_DELIVERY)
-            and intent in CART_MUTATING_INTENTS
+            and intent in (*CART_MUTATING_INTENTS, *BROWSE_INTENTS)
         ):
             logger.warning(
                 "[ORDER_FLOW] Re-opening cart: intent=%s state=%s -> %s",

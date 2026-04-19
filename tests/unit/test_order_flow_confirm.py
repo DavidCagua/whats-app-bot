@@ -259,10 +259,12 @@ class TestRejectionRecovery:
         assert result.get("error_kind") != "user_visible"
         assert result["state_after"] == ORDER_STATE_GREETING
 
-    def test_place_order_in_collecting_delivery_returns_delivery_status(
+    def test_browse_intent_in_collecting_delivery_reopens_cart(
         self, fake_session, wa_id, business_context
     ):
-        """Rejection in COLLECTING_DELIVERY/READY_TO_PLACE re-renders the prompt."""
+        """Browse intents in COLLECTING_DELIVERY/READY_TO_PLACE re-open the
+        cart to ORDERING so the user can explore the menu mid-checkout.
+        Delivery info persists in the session — CONFIRM picks it back up."""
         business_id = business_context["business_id"]
         fake_session.save(
             wa_id, business_id,
@@ -276,11 +278,9 @@ class TestRejectionRecovery:
 
         with patch("app.orchestration.order_flow.session_state_service", fake_session), \
              patch("app.orchestration.order_flow.order_tools"), \
-             patch("app.orchestration.order_flow._build_delivery_status",
-                   return_value={"all_present": False, "missing": ["phone", "payment_method"]}):
-            # GET_MENU_CATEGORIES is not in COLLECTING_DELIVERY's allowlist
-            # and isn't cart-mutating (so it won't reopen the cart), and isn't
-            # PROCEED_TO_CHECKOUT (so it won't be coerced). Pure rejection path.
+             patch("app.orchestration.order_flow.catalog_cache") as mock_cache:
+            mock_cache.list_categories.return_value = ["HAMBURGUESAS", "BEBIDAS"]
+            mock_cache.list_products.return_value = []
             from app.orchestration.order_flow import INTENT_GET_MENU_CATEGORIES
             result = execute_order_intent(
                 wa_id=wa_id,
@@ -291,5 +291,6 @@ class TestRejectionRecovery:
                 params={},
             )
 
-        assert result["result_kind"] == RESULT_KIND_DELIVERY_STATUS
-        assert result.get("error_kind") != "user_visible"
+        # Should execute the intent, not reject it
+        assert result["result_kind"] != RESULT_KIND_DELIVERY_STATUS
+        assert result["state_after"] == ORDER_STATE_ORDERING
