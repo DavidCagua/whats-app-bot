@@ -984,6 +984,15 @@ def execute_order_intent(
                 # so the response generator can mention both: "agregué la
                 # soda; del jugo tengo estas opciones …".
                 existing_names = {_normalize_product_name(it.get("name") or "") for it in (cart_before.get("items") or [])}
+                # Duplicate-add guard: only skip items already in cart when
+                # the batch has 2+ items. This catches the planner
+                # hallucination pattern (user asks for 1 product, planner
+                # re-emits the whole cart), but allows single-item batches
+                # through — when there's only one item, the user explicitly
+                # asked for it (e.g. "dame otra barracuda") and skipping
+                # would silently drop their request. (fix: 984e1b2 was too
+                # aggressive, blocked all re-adds including intentional ones)
+                skip_existing = len(params["items"]) > 1
                 for item in params["items"]:
                     if not isinstance(item, dict):
                         continue
@@ -994,7 +1003,7 @@ def execute_order_intent(
                     # base name "Jugos en leche" in the cart.
                     raw_name = re.sub(r"\s*\(.*?\)\s*$", "", item.get("product_name") or "")
                     item_name = _normalize_product_name(raw_name)
-                    if item_name and item_name in existing_names:
+                    if skip_existing and item_name and item_name in existing_names:
                         logger.warning(
                             "[ORDER_FLOW] Skipping duplicate add: '%s' already in cart",
                             item.get("product_name"),

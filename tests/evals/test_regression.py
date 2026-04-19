@@ -895,6 +895,67 @@ def test_biela_multi_item_with_notes_denver_and_honey():
 
 
 # ---------------------------------------------------------------------------
+# Biela — "dame otra barracuda" quantity increment
+#
+# Incident 2026-04-18. User said "dame otra barracuda" with BARRACUDA
+# already in the cart. The multi-item duplicate guard (984e1b2) skipped
+# the add because BARRACUDA was in existing_names. Bot replied "Tu pedido
+# sigue igual" instead of incrementing the quantity. Fix: duplicate guard
+# only fires when the items batch has 2+ items (hallucination pattern),
+# not for single-item batches (intentional re-add).
+# ---------------------------------------------------------------------------
+
+
+def test_biela_dame_otra_barracuda_increments_quantity():
+    """
+    "Dame otra barracuda" with BARRACUDA already in cart must add a
+    second one, not say "sin cambios".
+    """
+    BARRACUDA = product("BARRACUDA", 28000,
+                        description="Doble carne, cheddar, tocineta.",
+                        tags=["hamburguesa", "burger"])
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        if "barracuda" in q:
+            return [BARRACUDA]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_dame_otra_barracuda_increments",
+        user_message="Dame otra barracuda",
+        initial_order_context={
+            "state": "ORDERING",
+            "items": [
+                {"product_id": "prod-barracuda", "name": "BARRACUDA", "quantity": 1, "price": 28000},
+            ],
+            "total": 28000,
+        },
+        conversation_history=[
+            {"role": "user", "content": "Dame una barracuda"},
+            {"role": "assistant", "content": "Listo, he agregado la BARRACUDA. Subtotal: $28.000. ¿Algo más?"},
+        ],
+        known_products=[BARRACUDA],
+        stub_search_products=_search_stub,
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS"],
+        must_contain_any=[
+            r"\bagregad[oa]\b",
+            r"\bhemos agregado\b",
+            r"\bse agreg[oó]\b",
+            r"BARRACUDA",
+            r"2x.*BARRACUDA|BARRACUDA.*2",
+        ],
+        must_not_contain=[
+            r"\bsin cambios\b",
+            r"\bsigue igual\b",
+            r"\bno se pudo\b",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
 # Cerveza category search — tag-based fallback (98b8bf9 regression)
 # ---------------------------------------------------------------------------
 
