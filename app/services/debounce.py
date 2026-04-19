@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 
-DEBOUNCE_SECONDS = 0.5
+DEBOUNCE_SECONDS = 0.0
 _FLUSHER_TTL = 90   # safety expiry on flusher lock: sleep(3) + max LLM time
 _MSG_TTL = 120      # safety expiry on buffered messages (seconds)
 _PROCESSING_TTL = 60  # safety expiry on processing flag (seconds)
