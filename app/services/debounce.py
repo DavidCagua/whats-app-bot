@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 
-DEBOUNCE_SECONDS = 0.5
+DEBOUNCE_SECONDS = 2.0
 _FLUSHER_TTL = 90   # safety expiry on flusher lock: sleep(3) + max LLM time
 _MSG_TTL = 120      # safety expiry on buffered messages (seconds)
 _PROCESSING_TTL = 60  # safety expiry on processing flag (seconds)
@@ -317,20 +317,24 @@ def debounce_message(
                 "[DEBOUNCE] %s: COALESCED lua=%s pid=%d t=%.3f",
                 phone, lua_result, os.getpid(), time.time(),
             )
-            # If the previous flusher already drained and is processing
-            # (not just sleeping), signal it to abort before executor —
-            # this new message supersedes the in-flight turn.
-            proc_key = _processing_key(to_number, phone)
-            try:
-                if r.exists(proc_key):
-                    ab_key = _abort_key(to_number, phone)
-                    r.set(ab_key, "1", ex=_ABORT_TTL)
-                    logging.warning(
-                        "[DEBOUNCE] %s: abort signal set (new message during processing)",
-                        phone,
-                    )
-            except Exception as exc:
-                logging.warning("[DEBOUNCE] %s: failed to set abort: %s", phone, exc)
+
+        # If a previous flusher already drained and is processing
+        # (not just sleeping), signal it to abort before executor —
+        # this new message supersedes the in-flight turn.
+        # Runs for ALL messages (not just coalesced) because _LUA_DRAIN
+        # releases the flusher lock at drain time, so new messages
+        # arriving during processing get lua_result=1 (own flusher).
+        proc_key = _processing_key(to_number, phone)
+        try:
+            if r.exists(proc_key):
+                ab_key = _abort_key(to_number, phone)
+                r.set(ab_key, "1", ex=_ABORT_TTL)
+                logging.warning(
+                    "[DEBOUNCE] %s: ABORT signal set (processing in-flight) t=%.3f",
+                    phone, time.time(),
+                )
+        except Exception as exc:
+            logging.warning("[DEBOUNCE] %s: failed to set abort: %s", phone, exc)
 
         return True
 
