@@ -17,8 +17,8 @@
 \set business_id '44488756-473b-46d2-a907-9f579e98ecfd'
 
 -- ============================================================================
--- BURGERS — names are unique codenames; no customer will search by code.
---            tag each with generic "hamburguesa" terms + distinctive ingredients.
+-- HAMBURGUESAS — names are unique codenames; no customer will search by code.
+--                tag each with generic "hamburguesa" terms + distinctive ingredients.
 -- ============================================================================
 
 UPDATE products SET tags = ARRAY['hamburguesa', 'burger', 'carne', 'res', 'queso', 'papas'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BUR-01';
@@ -36,7 +36,7 @@ UPDATE products SET tags = ARRAY['hamburguesa', 'burger', 'carne', 'res', 'cerdo
 UPDATE products SET tags = ARRAY['hamburguesa', 'burger', 'carne', 'res', 'mexicana', 'jalapeno', 'picante'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BUR-13';
 
 -- ============================================================================
--- HOT DOGS — "perro caliente" / "perro" is the regional term
+-- PERROS CALIENTES — "perro caliente" / "perro" is the regional term
 -- ============================================================================
 
 UPDATE products SET tags = ARRAY['hot dog', 'perro', 'perro caliente', 'salchicha', 'pollo'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-HD-01';
@@ -54,7 +54,7 @@ UPDATE products SET tags = ARRAY['papas', 'fritas', 'salchipapas', 'queso', 'com
 UPDATE products SET tags = ARRAY['papas', 'fritas', 'salchipapas', 'queso', 'cheddar'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-FR-04';
 
 -- ============================================================================
--- CHICKEN BURGERS
+-- HAMBURGUESAS DE POLLO
 -- ============================================================================
 
 UPDATE products SET tags = ARRAY['hamburguesa', 'pollo', 'chicken burger', 'apanado', 'crispy'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-CB-01';
@@ -68,7 +68,7 @@ UPDATE products SET tags = ARRAY['hamburguesa', 'pollo', 'chicken burger', 'apan
 UPDATE products SET tags = ARRAY['infantil', 'nino', 'nina', 'kids', 'menu infantil', 'combo nino'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-MI-01';
 
 -- ============================================================================
--- STEAK & RIBS
+-- PARRILLA
 -- ============================================================================
 
 UPDATE products SET tags = ARRAY['costillas', 'ribs', 'cerdo', 'bbq', 'carne'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-SR-01';
@@ -86,8 +86,8 @@ UPDATE products SET tags = ARRAY['limonada', 'jugo', 'bebida fria', 'hierba buen
 UPDATE products SET tags = ARRAY['limonada', 'jugo', 'bebida fria', 'natural', 'limon'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BEB-04';
 
 -- Hervidos (the "hervidito" case)
-UPDATE products SET tags = ARRAY['hervido', 'caliente', 'bebida caliente', 'maracuya'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BEB-05';
-UPDATE products SET tags = ARRAY['hervido', 'caliente', 'bebida caliente', 'mora'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BEB-06';
+UPDATE products SET tags = ARRAY['hervido', 'caliente', 'aguardiente', 'trago', 'alcohol', 'coctel', 'canelazo', 'maracuya'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BEB-05';
+UPDATE products SET tags = ARRAY['hervido', 'caliente', 'aguardiente', 'trago', 'alcohol', 'coctel', 'canelazo', 'mora'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BEB-06';
 
 -- Malteadas
 UPDATE products SET tags = ARRAY['malteada', 'milkshake', 'batido', 'maracuya', 'uvilla'] WHERE business_id = '44488756-473b-46d2-a907-9f579e98ecfd' AND sku = 'BL-BEB-07';

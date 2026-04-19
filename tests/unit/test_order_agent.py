@@ -107,6 +107,59 @@ class TestPhoneFormatFromWaId:
         assert _format_phone_from_wa_id(None) == ""
 
 
+class TestCategoryNormalization:
+    """Verify CATEGORY_MAP correctly normalizes Spanish category terms."""
+
+    def test_hamburguesas_de_pollo_full_phrase(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("hamburguesas de pollo") == "HAMBURGUESAS DE POLLO"
+
+    def test_hamburguesa_de_pollo_singular(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("hamburguesa de pollo") == "HAMBURGUESAS DE POLLO"
+
+    def test_hamburguesas_maps_to_hamburguesas(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("hamburguesas") == "HAMBURGUESAS"
+
+    def test_pollo_maps_to_chicken(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("pollo") == "HAMBURGUESAS DE POLLO"
+
+    def test_perros_calientes_full_phrase(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("perros calientes") == "PERROS CALIENTES"
+
+    def test_hot_dog_legacy(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("hot dogs") == "PERROS CALIENTES"
+
+    def test_parrilla(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("parrilla") == "PARRILLA"
+
+    def test_costillas_maps_to_parrilla(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("costillas") == "PARRILLA"
+
+    def test_postres(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("postres") == "POSTRES"
+
+    def test_salchipapas_unchanged(self):
+        from app.database.product_order_service import normalize_category
+        assert normalize_category("salchipapas") == "SALCHIPAPAS"
+
+    def test_full_phrase_wins_over_word_by_word(self):
+        """'hamburguesas de pollo' must match full phrase → HAMBURGUESAS DE POLLO,
+        not word-by-word → HAMBURGUESAS (from 'hamburguesas')."""
+        from app.database.product_order_service import normalize_category
+        result = normalize_category("hamburguesas de pollo")
+        assert result == "HAMBURGUESAS DE POLLO", (
+            f"Full phrase must win over word-by-word fallback, got {result!r}"
+        )
+
+
 class TestPlannerPromptRules:
     """Verify planner prompt contains the rules that route intents correctly."""
 
@@ -149,3 +202,17 @@ class TestPlannerPromptRules:
         idx_plural = lower.find("cada una")
         idx_list = lower.find("list_products", idx_plural - 200 if idx_plural > 200 else 0)
         assert 0 <= idx_list, "LIST_PRODUCTS must be referenced near the 'cada una' rule"
+
+    def test_planner_prompt_has_category_attribute_exception(self):
+        """
+        Regression: "tienes hamburguesas picantes?" must route to
+        SEARCH_PRODUCTS (attribute search), NOT LIST_PRODUCTS (category).
+        The planner prompt must include the exception for category + adjective.
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        lower = prompt.lower()
+        assert "adjetivo" in lower or "modificador" in lower, \
+            "Planner prompt must describe the category+attribute exception"
+        assert "search_products" in lower
+        assert "hamburguesas picantes" in lower, \
+            "Planner prompt must use 'hamburguesas picantes' as an example"

@@ -560,7 +560,7 @@ def assert_scenario(scenario: AgentScenario, run: ScenarioRun) -> None:
 # Helpers for scenario authors
 # ---------------------------------------------------------------------------
 
-def product(name: str, price: float, *, category: str = "BURGERS",
+def product(name: str, price: float, *, category: str = "HAMBURGUESAS",
             description: str = "", tags: Optional[List[str]] = None,
             matched_by: Optional[str] = None) -> Dict[str, Any]:
     """Build a minimal product dict for stubbing catalog calls."""

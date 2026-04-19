@@ -53,7 +53,7 @@ def test_attribute_only_query_picante_routes_to_search():
         stub_search_products=_arrabbiata,
         stub_list_products_with_fallback=_arrabbiata,
         stub_list_products=_arrabbiata,
-        stub_list_categories=lambda biz: ["BURGERS", "HOT DOGS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS"],
         must_contain_any=[r"ARRABBIATA", r"arrabbiata"],
     )
     run = run_scenario(scenario)

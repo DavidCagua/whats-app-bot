@@ -59,7 +59,7 @@ def test_hay_pizza_at_biela_says_no_pizza():
         initial_order_context={"state": "GREETING"},
         stub_search_products=lambda biz, q: [],
         stub_list_products_with_fallback=lambda biz, cat: [],
-        stub_list_categories=lambda biz: ["BURGERS", "HOT DOGS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS"],
         must_not_contain=[
             r"(?<!no\s)tenemos pizza",
             r"(?<!no\s)contamos con.*pizza",
@@ -90,7 +90,7 @@ def test_hay_sushi_at_biela_says_no_sushi():
         initial_order_context={"state": "GREETING"},
         stub_search_products=lambda biz, q: [],
         stub_list_products_with_fallback=lambda biz, cat: [],
-        stub_list_categories=lambda biz: ["BURGERS", "HOT DOGS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS"],
         must_not_contain=[
             r"(?<!no\s)tenemos sushi",
             r"(?<!no\s)contamos con.*sushi",
@@ -132,7 +132,7 @@ def test_perro_caliente_denver_no_disambiguation():
     """
     denver = product(
         "DENVER", 27000,
-        category="HOT DOGS",
+        category="PERROS CALIENTES",
         description="Pan artesanal, salchicha, queso, tocineta, cebolla caramelizada, papas fritas.",
         tags=["hot dog", "perro", "perro caliente", "salchicha", "tocineta", "queso"],
         matched_by="exact",
@@ -196,8 +196,8 @@ def test_menu_link_sent_when_user_asks_for_carta():
         user_message="me envias la carta porfa",
         initial_order_context={"state": "GREETING"},
         stub_list_categories=lambda biz: [
-            "BURGERS", "CHICKEN BURGERS", "HOT DOGS", "SALCHIPAPAS",
-            "BEBIDAS", "MENÚ INFANTIL", "STEAK & RIBS",
+            "HAMBURGUESAS", "HAMBURGUESAS DE POLLO", "PERROS CALIENTES", "SALCHIPAPAS",
+            "BEBIDAS", "MENÚ INFANTIL", "PARRILLA",
         ],
         reference_trajectory=expected_planner_call(
             user_message="me envias la carta porfa",
@@ -226,7 +226,7 @@ def test_perro_caliente_denver_returns_only_denver():
     """
     denver = product(
         "Perro Caliente Denver", 27000,
-        category="HOT DOGS",
+        category="PERROS CALIENTES",
         description="Perro caliente estilo Denver con salsa BBQ y tocineta.",
         tags=["perro", "hot dog"],
         matched_by="exact",
@@ -286,7 +286,7 @@ def test_algo_con_picante_returns_arrabbiata_preservation():
         stub_search_products=_arrabbiata_matches,
         stub_list_products_with_fallback=_arrabbiata_matches,
         stub_list_products=_arrabbiata_matches,
-        stub_list_categories=lambda biz: ["BURGERS", "HOT DOGS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS"],
         must_contain_any=[r"ARRABBIATA", r"arrabbiata"],
     )
     run = run_scenario(scenario)
@@ -453,7 +453,7 @@ def test_biela_jugo_mora_en_leche_plus_soda_multi_item():
         initial_order_context={"state": "ORDERING", "items": [], "total": 0},
         stub_search_products=_search_stub,
         stub_list_products_with_fallback=lambda biz, cat: [],
-        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS", "PLATOS"],
+        stub_list_categories=lambda biz: ["BEBIDAS", "HAMBURGUESAS", "PLATOS"],
         must_contain_any=[
             # The real (non-hallucinated) generic product name must appear
             # in the cart line. The response may also echo the user's
@@ -586,7 +586,7 @@ def test_biela_disamb_reply_preserves_flavor_as_notes():
         # call returns the real row instead of None.
         known_products=[JUGOS_EN_AGUA, JUGOS_EN_LECHE, HERVIDO_MORA],
         stub_search_products=_search_stub,
-        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        stub_list_categories=lambda biz: ["BEBIDAS", "HAMBURGUESAS"],
         must_contain_any=[
             # Cart line must show the mora flavor as a note on Jugos en agua
             r"jugos? en agua.*\(mora\)",
@@ -671,7 +671,7 @@ def test_biela_multi_item_one_not_found_surfaces_in_response():
         initial_order_context={"state": "ORDERING", "items": [], "total": 0},
         known_products=[CLUB_COLOMBIA],
         stub_search_products=_search_stub,
-        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        stub_list_categories=lambda biz: ["BEBIDAS", "HAMBURGUESAS"],
         must_contain_any=[
             # Club Colombia lands in the cart
             r"club colombia",
@@ -749,7 +749,7 @@ def test_biela_jugo_de_mora_disamb_excludes_hervido_mora():
         initial_order_context={"state": "ORDERING", "items": [], "total": 0},
         known_products=[JUGOS_EN_AGUA, JUGOS_EN_LECHE, HERVIDO_MORA],
         stub_search_products=_search_stub,
-        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        stub_list_categories=lambda biz: ["BEBIDAS", "HAMBURGUESAS"],
         must_not_contain=[
             # Hervido Mora must not be presented as an option for
             # "jugo de mora" — it's a hot drink, not a juice.
@@ -820,7 +820,7 @@ def test_biela_soda_de_frutos_rojos_wins_decisively():
         initial_order_context={"state": "ORDERING", "items": [], "total": 0},
         known_products=[SODA_FRUTOS, SODA_PLAIN, SODA_UVILLA, COCA, COCA_ZERO],
         stub_search_products=_search_stub,
-        stub_list_categories=lambda biz: ["BEBIDAS", "BURGERS"],
+        stub_list_categories=lambda biz: ["BEBIDAS", "HAMBURGUESAS"],
         must_contain_any=[
             # Cart should confirm the Soda Frutos rojos landing —
             # exact catalog name required.
@@ -860,7 +860,7 @@ def test_biela_multi_item_with_notes_denver_and_honey():
     notes to add_to_cart. Named products like DENVER and HONEY BURGER
     must land with their notes ("sin salchicha", "sin cebolla").
     """
-    DENVER = product("Perro Caliente Denver", 27000, category="HOT DOGS",
+    DENVER = product("Perro Caliente Denver", 27000, category="PERROS CALIENTES",
                      description="Perro caliente estilo Denver.",
                      tags=["perro", "hot dog"])
     HONEY = product("HONEY BURGER", 28000, description="Hamburguesa con miel.",
@@ -880,7 +880,7 @@ def test_biela_multi_item_with_notes_denver_and_honey():
         initial_order_context={"state": "ORDERING", "items": [], "total": 0},
         known_products=[DENVER, HONEY],
         stub_search_products=_search_stub,
-        stub_list_categories=lambda biz: ["HOT DOGS", "BURGERS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["PERROS CALIENTES", "HAMBURGUESAS", "BEBIDAS"],
         must_contain_any=[
             r"sin salchicha",
             r"sin cebolla",
@@ -928,7 +928,7 @@ def test_biela_tienes_cervezas_lists_beers():
         stub_list_products_with_fallback=lambda biz, cat: (
             [CORONA, CLUB, POKER] if "cerveza" in (cat or "").lower() else []
         ),
-        stub_list_categories=lambda biz: ["BURGERS", "HOT DOGS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS"],
         must_contain_any=[
             r"corona",
             r"club colombia",
@@ -975,7 +975,7 @@ def test_biela_special_after_listing_resolves_to_special_dog():
     """
     SPECIAL_DOG = product(
         "SPECIAL DOG", 27000,
-        category="HOT DOGS",
+        category="PERROS CALIENTES",
         description="Pan artesanal, salchicha, costilla en salsa maracuyá.",
         tags=["hot dog", "perro", "perro caliente"],
         matched_by="exact",
@@ -1004,7 +1004,7 @@ def test_biela_special_after_listing_resolves_to_special_dog():
         ],
         known_products=[SPECIAL_DOG],
         stub_search_products=_search_stub,
-        stub_list_categories=lambda biz: ["HOT DOGS", "BURGERS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["PERROS CALIENTES", "HAMBURGUESAS", "BEBIDAS"],
         reference_trajectory=expected_planner_call(
             user_message="Un special",
             intent="ADD_TO_CART",
@@ -1058,7 +1058,7 @@ def test_biela_vitoria_typo_resolves_to_vittoria():
         ],
         known_products=[VITTORIA],
         stub_search_products=_search_stub,
-        stub_list_categories=lambda biz: ["BURGERS", "CHICKEN BURGERS", "HOT DOGS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "HAMBURGUESAS DE POLLO", "PERROS CALIENTES", "BEBIDAS"],
         reference_trajectory=expected_planner_call(
             user_message="Una Vitoria",
             intent="ADD_TO_CART",
@@ -1078,6 +1078,132 @@ def test_biela_vitoria_typo_resolves_to_vittoria():
             r"\bhemos agregado\b",
             r"\bse agreg[oó]\b",
             r"VITTORIA",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
+# Biela — "hamburguesas de pollo" category routing
+#
+# Incident 2026-04-18. User asked "tienes hamburguesas de pollo?" — the
+# category normalize mapped "hamburguesas" → BURGERS (now HAMBURGUESAS)
+# via word-by-word fallback, never reaching "pollo". User got all 13
+# beef burgers instead of the 3 chicken burgers. Fix: added full-phrase
+# entry "hamburguesas de pollo" → "HAMBURGUESAS DE POLLO" to CATEGORY_MAP
+# and renamed DB category from CHICKEN BURGERS to HAMBURGUESAS DE POLLO.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_hamburguesas_de_pollo_lists_chicken_burgers():
+    """
+    "tienes hamburguesas de pollo?" must list only chicken burgers
+    (BOOSTER, VITTORIA, ARIZONA), not all 13 beef burgers.
+    """
+    BOOSTER = product("BOOSTER", 28000, category="HAMBURGUESAS DE POLLO",
+                      description="Filete de pollo apanado, cebolla caramelizada.",
+                      tags=["hamburguesa", "pollo", "apanado"])
+    VITTORIA = product("VITTORIA", 28000, category="HAMBURGUESAS DE POLLO",
+                       description="Filete de pollo apanado, albahaca, mozzarella.",
+                       tags=["hamburguesa", "pollo", "apanado"])
+    ARIZONA = product("ARIZONA", 28000, category="HAMBURGUESAS DE POLLO",
+                      description="Filete de pollo apanado, tocineta, pepinillos.",
+                      tags=["hamburguesa", "pollo", "apanado"])
+    chicken_burgers = [BOOSTER, VITTORIA, ARIZONA]
+
+    scenario = AgentScenario(
+        name="biela_hamburguesas_de_pollo_lists_chicken",
+        user_message="tienes hamburguesas de pollo?",
+        initial_order_context={"state": "GREETING"},
+        stub_list_products_with_fallback=lambda biz, cat: (
+            chicken_burgers if "POLLO" in (cat or "").upper() else []
+        ),
+        stub_search_products=lambda biz, q: chicken_burgers,
+        stub_list_categories=lambda biz: [
+            "HAMBURGUESAS", "HAMBURGUESAS DE POLLO", "PERROS CALIENTES",
+            "BEBIDAS", "SALCHIPAPAS",
+        ],
+        reference_trajectory=expected_planner_call(
+            user_message="tienes hamburguesas de pollo?",
+            intent="LIST_PRODUCTS",
+            params={},
+        ),
+        trajectory_match_mode="superset",
+        tool_args_match_mode="ignore",
+        must_contain_any=[
+            r"BOOSTER|booster",
+            r"VITTORIA|vittoria",
+            r"ARIZONA|arizona",
+        ],
+        must_not_contain=[
+            # Must NOT list beef burgers
+            r"\bBARRACUDA\b",
+            r"\bBIELA\b",
+            r"\bBETA\b",
+            r"\bMONTESA\b",
+            r"\bno tenemos\b",
+            r"\bno hay\b",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
+# Biela — "hamburguesas picantes" attribute search
+#
+# Incident 2026-04-18. User asked "tienes hamburguesas picantes?" — the
+# planner routed to LIST_PRODUCTS category="hamburguesas" (the "picantes"
+# qualifier was lost). All 13 burgers returned, LLM cherry-picked but
+# missed MEXICAN BURGER. Fix: planner prompt now routes category+adjective
+# queries to SEARCH_PRODUCTS so tag matching can find "picante"-tagged
+# products.
+# ---------------------------------------------------------------------------
+
+
+def test_biela_hamburguesas_picantes_finds_mexican_and_arrabbiata():
+    """
+    "tienes hamburguesas picantes?" must route to SEARCH_PRODUCTS and
+    return products tagged 'picante' — at minimum ARRABBIATA and
+    MEXICAN BURGER.
+    """
+    ARRABBIATA = product("ARRABBIATA", 27000,
+                         description="Pan, carne, mozzarella, salsa arrabbiata picante.",
+                         tags=["hamburguesa", "burger", "picante"])
+    MEXICAN = product("MEXICAN BURGER", 27000,
+                      description="Pan, carne, mozzarella, pico de gallo, jalapeño.",
+                      tags=["hamburguesa", "burger", "mexicana", "jalapeno", "picante"])
+
+    def _search_stub(biz, query: str):
+        q = (query or "").lower()
+        if "picante" in q or "hamburguesa" in q:
+            return [ARRABBIATA, MEXICAN]
+        return []
+
+    scenario = AgentScenario(
+        name="biela_hamburguesas_picantes_search",
+        user_message="tienes hamburguesas picantes?",
+        initial_order_context={"state": "GREETING"},
+        stub_search_products=_search_stub,
+        stub_list_products_with_fallback=lambda biz, cat: [],
+        stub_list_categories=lambda biz: [
+            "HAMBURGUESAS", "HAMBURGUESAS DE POLLO", "PERROS CALIENTES", "BEBIDAS",
+        ],
+        reference_trajectory=expected_planner_call(
+            user_message="tienes hamburguesas picantes?",
+            intent="SEARCH_PRODUCTS",
+            params={},
+        ),
+        trajectory_match_mode="superset",
+        tool_args_match_mode="ignore",
+        must_contain_any=[
+            r"ARRABBIATA|arrabbiata",
+            r"MEXICAN|mexican",
+        ],
+        must_not_contain=[
+            r"\bno tenemos\b",
+            r"\bno hay\b",
         ],
     )
     run = run_scenario(scenario)
@@ -1105,7 +1231,7 @@ def test_hay_pizza_llm_judge_full_semantic_check():
         initial_order_context={"state": "GREETING"},
         stub_search_products=lambda biz, q: [],
         stub_list_products_with_fallback=lambda biz, cat: [],
-        stub_list_categories=lambda biz: ["BURGERS", "HOT DOGS", "BEBIDAS"],
+        stub_list_categories=lambda biz: ["HAMBURGUESAS", "PERROS CALIENTES", "BEBIDAS"],
         llm_judge_rubric=(
             "The restaurant does NOT sell pizza. The reply PASSES if it "
             "clearly tells the customer that pizza is not available, without "

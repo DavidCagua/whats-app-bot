@@ -36,7 +36,7 @@ BUSINESS_ID = "44488756-473b-46d2-a907-9f579e98ecfd"  # matches biela_product_me
 def _product(
     pid: str,
     name: str,
-    category: str = "BURGERS",
+    category: str = "HAMBURGUESAS",
     description: str = "",
     tags=None,
     price: float = 27000.0,
@@ -68,9 +68,9 @@ BIELA_CATALOG = {
     "MICHELADA":   _product("p-08", "Michelada", category="BEBIDAS", description="Cerveza preparada con limón y sal.", tags=["bebida", "cerveza"], price=12000),
     "LIM_NATURAL": _product("p-09", "Limonada natural", category="BEBIDAS", description="", tags=["bebida", "limonada"], price=6500),
     "LIM_CEREZA":  _product("p-10", "Limonada de cereza", category="BEBIDAS", description="", tags=["bebida", "limonada"], price=12000),
-    "PERRO_DENVER":_product("p-11", "Perro Caliente Denver", category="HOT DOGS", description="Perro caliente estilo Denver.", tags=["perro", "hot dog"], price=27000),
-    "NIJABOU":     _product("p-12", "NIJABOU", category="BURGERS", description="Hamburguesa estilo japonés.", tags=["hamburguesa", "burger"]),
-    "NAIROBI":     _product("p-13", "NAIROBI", category="BURGERS", description="Hamburguesa estilo africano.", tags=["hamburguesa", "burger"]),
+    "PERRO_DENVER":_product("p-11", "Perro Caliente Denver", category="PERROS CALIENTES", description="Perro caliente estilo Denver.", tags=["perro", "hot dog"], price=27000),
+    "NIJABOU":     _product("p-12", "NIJABOU", category="HAMBURGUESAS", description="Hamburguesa estilo japonés.", tags=["hamburguesa", "burger"]),
+    "NAIROBI":     _product("p-13", "NAIROBI", category="HAMBURGUESAS", description="Hamburguesa estilo africano.", tags=["hamburguesa", "burger"]),
     # Beverage generics + siblings used by the generic-product-match tests.
     # "Jugos en leche" and "Jugos en agua" are catalog-level rows that
     # accept any flavor the kitchen stocks that day — the flavor is
@@ -375,7 +375,7 @@ class TestCategoryExistencePreCheck:
 
         existing_drinks = [BIELA_CATALOG["LIM_NATURAL"], BIELA_CATALOG["MICHELADA"]]
         with patch.object(svc, "list_products", return_value=existing_drinks), \
-             patch.object(svc, "list_categories", return_value=["BURGERS", "BEBIDAS"]), \
+             patch.object(svc, "list_categories", return_value=["HAMBURGUESAS", "BEBIDAS"]), \
              patch.object(svc, "search_products_semantic") as mock_semantic:
             result = svc.list_products_with_fallback(BUSINESS_ID, "bebidas")
 
@@ -392,7 +392,7 @@ class TestCategoryExistencePreCheck:
         svc = svc_module.product_order_service
 
         with patch.object(svc, "list_products", return_value=[]), \
-             patch.object(svc, "list_categories", return_value=["BURGERS", "BEBIDAS"]), \
+             patch.object(svc, "list_categories", return_value=["HAMBURGUESAS", "BEBIDAS"]), \
              patch.object(svc, "search_products_semantic", return_value=[BIELA_CATALOG["LIM_NATURAL"]]) as mock_semantic:
             result = svc.list_products_with_fallback(BUSINESS_ID, "bebidas")
 
