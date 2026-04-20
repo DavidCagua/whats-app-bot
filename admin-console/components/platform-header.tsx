@@ -3,7 +3,8 @@ import Link from "next/link"
 import type { Session } from "next-auth"
 import { Building2, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { signOut } from "@/lib/auth"
+import { logoutAction } from "@/lib/actions/logout"
+import { LogoutButtonClient } from "@/components/logout-button-client"
 import logo from "@/app/logo.png"
 
 export async function PlatformHeader({ session }: { session: Session }) {
@@ -42,16 +43,7 @@ export async function PlatformHeader({ session }: { session: Session }) {
           <p className="font-medium leading-none">{session.user?.name}</p>
           <p className="text-xs text-muted-foreground">{session.user?.email}</p>
         </div>
-        <form
-          action={async () => {
-            "use server"
-            await signOut({ redirectTo: "/login" })
-          }}
-        >
-          <Button variant="outline" size="sm" type="submit">
-            Sign out
-          </Button>
-        </form>
+       <LogoutButtonClient action={logoutAction} />
       </div>
     </header>
   )
