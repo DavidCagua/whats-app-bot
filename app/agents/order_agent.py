@@ -20,7 +20,6 @@ from ..orchestration.order_flow import (
     execute_order_intent,
     INTENT_ADD_TO_CART,
     INTENT_CHAT,
-    INTENT_GREET,
     INTENT_CONFIRM,
     RESULT_KIND_CHAT,
     RESULT_KIND_MENU_CATEGORIES,
@@ -50,7 +49,9 @@ PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de p
 Estado actual: {order_state}
 Productos YA en el pedido (NO los incluyas de nuevo en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad con frases como "quiero otro", "dame uno más", "agrega otro". Si el usuario pide UN producto NUEVO, emite SOLO ese producto — no repitas los que ya están aquí): {cart_summary}
 
-Intenciones válidas: GREET, GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, CHAT.
+Intenciones válidas: GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, CHAT.
+
+Nota: los saludos puros (sólo "hola", "buenas", "buen día") ya son manejados por el router antes de que llegues a clasificar — NO recibirás saludos puros.
 
 Reglas de menú y búsqueda (importante):
 - GET_MENU_CATEGORIES: cuando el usuario pregunta qué hay, qué tienes en general, o qué categorías hay (ej. "qué tienes", "qué hay en el menú"). Sin params.
@@ -60,9 +61,8 @@ Reglas de menú y búsqueda (importante):
 - LIST_PRODUCTS (con la última categoría mostrada) cuando el usuario pide detalles de VARIOS/TODOS los productos ya listados — en plural o colectivo (ej. "qué tienen cada una", "qué trae cada una de esas hamburguesas", "dame los detalles de todas", "qué ingredientes tiene cada una"). NO uses GET_PRODUCT en estos casos: el usuario quiere ver todo el grupo, no uno solo.
 
 Otras reglas:
-- REGLA DE PRIORIDAD (más importante que las demás): si el mensaje NOMBRA uno o más productos del menú (aunque esté acompañado de un saludo, de la palabra "domicilio", "pedido", "por favor", o de una lista con saltos de línea), SIEMPRE clasifica como ADD_TO_CART con los items correspondientes. El saludo y palabras como "domicilio"/"pedido" son contexto, NO intención — se ignoran para la clasificación cuando hay productos nombrados. CHAT y GREET se usan SOLO cuando NO hay ningún producto en el mensaje.
+- REGLA DE PRIORIDAD (más importante que las demás): si el mensaje NOMBRA uno o más productos del menú (aunque esté acompañado de un saludo, de la palabra "domicilio", "pedido", "por favor", o de una lista con saltos de línea), SIEMPRE clasifica como ADD_TO_CART con los items correspondientes. El saludo y palabras como "domicilio"/"pedido" son contexto, NO intención — se ignoran para la clasificación cuando hay productos nombrados. CHAT se usa SOLO cuando NO hay ningún producto en el mensaje.
 - REFERENCIA PRONOMINAL A PRODUCTO RECIENTE: si el mensaje usa un pronombre demostrativo ("esa", "ese", "eso", "esas", "esos", "la misma", "el mismo", "deme esa", "quiero ese", "dame eso") para referirse a un producto que se acaba de mencionar o mostrar en la conversación, trátalo como si el usuario NOMBRÓ ese producto. Revisa el historial reciente para identificar cuál producto se mencionó. Si además incluye modificaciones ("sin X", "con extra Y", "pero sin salsa"), clasifica como ADD_TO_CART con product_name del producto referenciado y notes con la modificación. Ejemplo: bot acaba de mostrar "AL PASTOR" y usuario dice "deme esa pero sin salsa picante" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "AL PASTOR", "quantity": 1, "notes": "sin salsa picante"}}}}. Esta regla tiene PRIORIDAD sobre las reglas de MODIFICACIONES y AÑADIR nota de más abajo — esas aplican SOLO cuando el producto YA ESTÁ en el carrito.
-- GREET SOLO si el mensaje es únicamente un saludo ("hola", "buenas", "buenos días", "buenas noches") SIN ninguna mención de producto, cantidad o intención de pedir. Si el usuario mezcla saludo con un producto específico ("hola quiero una barracuda") → usa ADD_TO_CART o SEARCH_PRODUCTS directamente, NO GREET.
 - Si el usuario expresa intención de pedir u ordenar SIN nombrar ningún producto específico (ej. "para un domicilio", "quiero pedir", "quiero hacer un pedido", "buenas, un domicilio por favor", "me pueden atender"): usa CHAT. El usuario probablemente ya sabe qué quiere; solo invítalo a decir su pedido. NO uses ADD_TO_CART, SEARCH_PRODUCTS ni GET_MENU_CATEGORIES porque no hay producto ni pregunta por el menú. IMPORTANTE: esta regla aplica SOLO si no hay productos nombrados — si hay aunque sea un producto, gana la regla de prioridad de arriba.
 - Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). REGLA IMPORTANTE PARA BEBIDAS GENÉRICAS: si el usuario pide un producto genérico con un sabor o fruta (ej. "un jugo de mora en agua", "un jugo de mango en leche", "un hervido de maracuyá"), pasa la frase COMPLETA como product_name incluyendo el sabor — NO la simplifiques al nombre del catálogo. Ejemplo: "un jugo de mango en agua" → product_name="jugo de mango en agua" (NO "Jugos en agua"). Ejemplo: "un jugo de fresa en leche" → product_name="jugo de fresa en leche". El backend extrae el sabor automáticamente. Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}. Ejemplo saludo + pedido multi-producto: "hola buenas un domicilio por favor, 2 betas, 1 barracuda, 1 biela fries" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "BETA", "quantity": 2}}, {{"product_name": "BARRACUDA", "quantity": 1}}, {{"product_name": "BIELA FRIES", "quantity": 1}}]}}}}. Ejemplo con saltos de línea: "hola buenas tardes un domicilio por favor\\n2 betas\\n1 barracuda\\n1 biela fries" → mismo resultado (los saltos de línea son solo formato).
 - MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al pedido (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en el pedido y "notes" con la instrucción. Ejemplo: pedido tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente. IMPORTANTE: esta regla aplica SOLO si el producto ya aparece en "Productos YA en el pedido" de arriba. Si el carrito está vacío o el producto NO está en el carrito, NO uses UPDATE_CART_ITEM — usa ADD_TO_CART con notes (o la regla de REFERENCIA PRONOMINAL si el usuario usa "esa"/"ese").
@@ -1000,60 +1000,36 @@ class OrderAgent(BaseAgent):
                 int((time.time() - start_time) * 1000),
             )
 
-            # 3) Response: deterministic greeting for GREET, else LLM response generator
-            if intent == INTENT_GREET:
-                business_name = "BIELA FAST FOOD"
-                menu_url = "https://gixlink.com/Biela"
-                if business_context and business_context.get("business"):
-                    biz = business_context["business"]
-                    business_name = (biz.get("name") or business_name).strip()
-                    settings = biz.get("settings") or {}
-                    menu_url = (settings.get("menu_url") or menu_url).strip()
-
-                customer_name = (name or "").strip()
-                has_real_name = customer_name and customer_name.lower() not in ("usuario", "cliente", "user")
-
-                # Preserve the existing greeting cases: personalized when we have a real name, generic otherwise.
-                if has_real_name:
-                    opener = f"Hola {customer_name}.\n\n"
-                else:
-                    opener = ""
-
-                final_response_text = (
-                    f"{opener}"
-                    f"Gracias por comunicarte con {business_name}. ¿Cómo podemos ayudarte?\n\n"
-                    "🍔🍟🔥😁\n\n"
-                    "Recuerda que nuestro horario de atención al público es de 5:30 PM a 10:00 PM de lunes a viernes.\n\n"
-                    f"{menu_url}"
-                )
-            else:
-                result_kind = exec_result.get("result_kind", "")
-                response_system, resp_input = self._build_response_prompt(
-                    result_kind=result_kind,
-                    exec_result=exec_result,
-                    message_body=message_body,
-                    business_context=business_context,
-                    cart_summary_after=cart_summary_after,
-                )
-                response_messages = [
-                    SystemMessage(content=response_system),
-                    HumanMessage(content=resp_input + "\n\nResponde al cliente en español colombiano, breve y natural:"),
-                ]
-                response_llm = self.llm.invoke(
-                    response_messages,
-                    config={
-                        "run_name": "order_response",
-                        "metadata": {
-                            "wa_id": wa_id,
-                            "business_id": str(business_id),
-                            "intent": intent,
-                            "result_kind": result_kind,
-                            "run_id": run_id,
-                        },
+            # 3) Response generator.
+            # Pure greetings are handled upstream by the router fast-path
+            # (see app/services/business_greeting.py) and never reach this agent.
+            result_kind = exec_result.get("result_kind", "")
+            response_system, resp_input = self._build_response_prompt(
+                result_kind=result_kind,
+                exec_result=exec_result,
+                message_body=message_body,
+                business_context=business_context,
+                cart_summary_after=cart_summary_after,
+            )
+            response_messages = [
+                SystemMessage(content=response_system),
+                HumanMessage(content=resp_input + "\n\nResponde al cliente en español colombiano, breve y natural:"),
+            ]
+            response_llm = self.llm.invoke(
+                response_messages,
+                config={
+                    "run_name": "order_response",
+                    "metadata": {
+                        "wa_id": wa_id,
+                        "business_id": str(business_id),
+                        "intent": intent,
+                        "result_kind": result_kind,
+                        "run_id": run_id,
                     },
-                )
-                final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)
-                final_response_text = (final_response_text or "").strip() or "Listo. ¿En qué más puedo ayudarte?"
+                },
+            )
+            final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)
+            final_response_text = (final_response_text or "").strip() or "Listo. ¿En qué más puedo ayudarte?"
 
             conversation_service.store_conversation_message(wa_id, final_response_text, "assistant", business_id=business_id)
 

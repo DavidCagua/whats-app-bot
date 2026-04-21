@@ -15,7 +15,6 @@ from app.database.session_state_service import (
 )
 from app.orchestration.order_flow import (
     execute_order_intent,
-    INTENT_GREET,
     INTENT_ADD_TO_CART,
     INTENT_VIEW_CART,
     INTENT_UPDATE_CART_ITEM,

@@ -27,41 +27,9 @@ def _make_fake_llm(responses):
 class TestHappyPathOrder:
     """Test a complete order flow from greeting to placement."""
 
-    def test_greeting_returns_deterministic_response(self, fake_session, business_context):
-        """Greeting should return the hardcoded welcome message without hitting response generator LLM."""
-        fake_llm = _make_fake_llm([
-            # Planner returns GREET intent
-            '{"intent": "GREET", "params": {}}',
-        ])
-
-        agent = OrderAgent()
-        agent.llm = fake_llm
-
-        with patch("app.agents.order_agent.execute_order_intent") as mock_exec, \
-             patch("app.agents.order_agent.conversation_service"), \
-             patch("app.agents.order_agent.tracer"):
-
-            mock_exec.return_value = {
-                "success": True,
-                "tool_result": "GREET",
-                "state_after": ORDER_STATE_GREETING,
-                "error": None,
-                "cart_summary": "Pedido vacío.",
-            }
-
-            result = agent.execute(
-                message_body="Hola",
-                wa_id=FAKE_WA_ID,
-                name="Juan",
-                business_context=business_context,
-                conversation_history=[],
-                session={"order_context": {"state": "GREETING"}},
-            )
-
-        assert result["agent_type"] == "order"
-        assert "Test Restaurant" in result["message"] or "BIELA" in result["message"]
-        # Greeting is deterministic — should not call the response generator LLM
-        # Only 1 LLM call (planner), not 2
+    # Greeting is handled by the router fast-path (app/services/business_greeting.py)
+    # before any agent runs. Tests for it live in tests/unit/test_business_greeting.py
+    # and tests/unit/test_router.py — no agent-level greeting test anymore.
 
     # Case: Full happy path — greeting → add item → checkout → delivery info → place order
     #   Script 2 LLM calls per non-GREET turn (planner + response generator).

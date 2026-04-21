@@ -71,10 +71,9 @@ def _classify_with_pending(message: str, pending_options, requested_name: str, o
 class TestPlannerIntentClassification:
     """Test planner classifies real Spanish messages to correct intents."""
 
-    def test_greeting_classified_as_greet(self):
-        """A simple 'Hola' should be classified as GREET."""
-        result = _classify_intent("Hola")
-        assert result["intent"] == "GREET"
+    # Greeting classification moved to the router fast-path
+    # (app/services/business_greeting.py). The order planner no longer
+    # handles GREET; pure greetings never reach it.
 
     # Case: "Qué tienen de bebidas?" → LIST_PRODUCTS with category containing "bebidas"
     # Case: "Una barracuda y una coca cola" → ADD_TO_CART with items list (2 items)

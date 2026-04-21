@@ -46,7 +46,8 @@ def _save_session_and_invalidate(wa_id: str, business_id: str, state_update: Dic
 logger = logging.getLogger(__name__)
 
 # Intent names (planner output)
-INTENT_GREET = "GREET"
+# Note: GREET was removed when the router's greeting fast-path took over
+# pure-greeting handling (see app/services/business_greeting.py).
 INTENT_GET_MENU_CATEGORIES = "GET_MENU_CATEGORIES"
 INTENT_LIST_PRODUCTS = "LIST_PRODUCTS"
 INTENT_SEARCH_PRODUCTS = "SEARCH_PRODUCTS"
@@ -69,7 +70,6 @@ INTENT_CONFIRM = "CONFIRM"
 # Result kinds — routing signal for the response generator.
 # Every execute_order_intent return carries exactly one of these so the
 # response generator can pick the right branch without string-sniffing tool output.
-RESULT_KIND_GREET = "greet"
 RESULT_KIND_CHAT = "chat"
 RESULT_KIND_MENU_CATEGORIES = "menu_categories"
 RESULT_KIND_PRODUCTS_LIST = "products_list"
@@ -99,7 +99,6 @@ ORDER_STATES = (
 
 ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
     ORDER_STATE_GREETING: (
-        INTENT_GREET,
         INTENT_GET_MENU_CATEGORIES,
         INTENT_LIST_PRODUCTS,
         INTENT_SEARCH_PRODUCTS,
@@ -829,9 +828,6 @@ def execute_order_intent(
 
     try:
         # --- state-transition / no-tool intents ---
-        if intent == INTENT_GREET:
-            return _base_result(current_state, wa_id, business_id, RESULT_KIND_GREET)
-
         if intent == INTENT_CHAT:
             return _base_result(current_state, wa_id, business_id, RESULT_KIND_CHAT)
 
