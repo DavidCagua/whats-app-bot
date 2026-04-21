@@ -8,8 +8,7 @@ import logging
 from typing import Optional
 
 from ..database.business_agent_service import business_agent_service
-from ..database.session_state_service import session_state_service
-from .agent_executor import execute_agent
+from .dispatcher import dispatch
 from .router import (
     route as router_route,
     DOMAIN_ORDER,
@@ -123,9 +122,11 @@ class ConversationManager:
             agents_summary,
         )
 
-        output = execute_agent(
-            agent_type=agent_type,
-            message_body=message_body,
+        # Single-segment dispatch (Phase 3a). The dispatcher handles state
+        # persistence internally so handoff hops see post-mutation state.
+        # Future Phase 3b will feed multi-segment lists from the router.
+        dispatch_result = dispatch(
+            segments=[(agent_type, message_body)],
             wa_id=wa_id,
             name=name,
             business_context=business_context,
@@ -134,16 +135,13 @@ class ConversationManager:
             abort_key=abort_key,
         )
 
-        # Persist state_update to session (order completion, active_agents, etc.)
-        state_update = output.get("state_update") or {}
-        if state_update and wa_id and business_id:
-            try:
-                session_state_service.save(wa_id, business_id, state_update)
-                logging.debug("[CONVERSATION_MANAGER] Persisted state_update to session")
-            except Exception as e:
-                logging.error(f"[CONVERSATION_MANAGER] Failed to persist state_update: {e}")
+        if dispatch_result.handoff_chain and len(dispatch_result.handoff_chain) > 1:
+            logging.warning(
+                "[CONVERSATION_MANAGER] Multi-agent turn chain=%s",
+                dispatch_result.handoff_chain,
+            )
 
-        return output.get("message", "Lo siento, no pude procesar tu mensaje.")
+        return dispatch_result.message or "Lo siento, no pude procesar tu mensaje."
 
 
 # Global instance

@@ -46,9 +46,26 @@ class BaseAgent(ABC):
         Execute agent logic. Return structured AgentOutput.
 
         Subclasses may accept additional keyword arguments (e.g.
-        ``session``, ``stale_turn``) via **kwargs.
+        ``session``, ``stale_turn``, ``handoff_context``) via **kwargs.
 
-        Returns:
-            { "agent_type": str, "message": str, "state_update": dict }
+        Return shape:
+            {
+                "agent_type": str,
+                "message": str,
+                "state_update": dict,
+                # Optional: mid-turn handoff to another agent. Dispatcher
+                # reads this and invokes the target agent with the
+                # provided segment + context. Not setting it is the
+                # default for agents that don't hand off.
+                "handoff": Optional[{
+                    "to": str,       # target agent_type
+                    "segment": str,  # message to pass to the target
+                    "context": dict, # structured payload (booking_id, etc.)
+                }],
+            }
+
+        Handoffs are capped at MAX_HOPS=3 per turn and are acyclic
+        (dispatcher rejects handoffs targeting an agent already in the
+        chain). See app/orchestration/dispatcher.py.
         """
         pass
