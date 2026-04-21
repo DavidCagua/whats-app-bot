@@ -1,11 +1,20 @@
 """
 ConversationManager: Entry point for message processing.
-Loads business context, enabled agents; routes to AgentExecutor.
-Persists agent state_update to session after execution.
+
+Flow per turn:
+  1. Greeting fast-path (router) — pure greetings reply directly.
+  2. LLM classifier (router) — decomposes message into (domain, text)
+     segments. Length 1 for single-intent, 2-3 for mixed-intent.
+  3. Map each segment's domain → agent_type using the business's
+     enabled agents. Unmapped / unavailable → fall back to primary.
+  4. Coalesce consecutive same-agent segments (prevents double
+     invocation when router over-decomposes).
+  5. Dispatch the resulting list. Dispatcher handles handoff chains
+     and state persistence.
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from ..database.business_agent_service import business_agent_service
 from .dispatcher import dispatch
@@ -20,20 +29,95 @@ from .router import (
 
 # Maps a router-classified domain to the agent_type that should handle it.
 # Domains for which no dedicated agent/handler exists yet map to None,
-# meaning "fall back to the business's primary agent." This lets us ship
-# the classifier now and observe its accuracy in LangSmith before wiring
-# the dedicated agents.
+# meaning "fall back to the business's primary agent."
 _DOMAIN_TO_AGENT_TYPE = {
     DOMAIN_ORDER: "order",
     DOMAIN_CUSTOMER_SERVICE: "customer_service",
-    # DOMAIN_CATALOG: None  (no agent — catalog intents still owned by order)
+    # catalog intents are currently handled by the order agent's
+    # remaining planner branches — fall back to primary.
     DOMAIN_CATALOG: None,
     DOMAIN_CHAT: None,
 }
 
 
+def _resolve_primary_agent(
+    enabled_agents: List[dict],
+    business_context: Optional[dict],
+) -> str:
+    """
+    Pick the business's primary agent for fallback cases: no classifier
+    output, unmapped domains, or unenabled mapped agents.
+
+    Priority order:
+      1. business.settings.conversation_primary_agent if it maps to an
+         enabled agent.
+      2. First enabled agent by priority.
+      3. Last-resort default: "booking".
+    """
+    if not enabled_agents:
+        return "booking"
+
+    biz = (business_context or {}).get("business") or {}
+    settings = biz.get("settings") or {}
+    primary = str(settings.get("conversation_primary_agent") or "").strip().lower()
+    if primary and any(a["agent_type"] == primary for a in enabled_agents):
+        return primary
+    if primary:
+        logging.warning(
+            "[CONVERSATION_MANAGER] conversation_primary_agent=%r not in enabled agents; "
+            "using first by priority",
+            primary,
+        )
+    return enabled_agents[0]["agent_type"]
+
+
+def _coalesce(segments: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """
+    Merge consecutive segments that resolve to the same agent_type.
+    Avoids double-invoking an agent when the router over-decomposes
+    (e.g. splits a single-domain message into adjacent segments).
+    """
+    if not segments:
+        return segments
+    out: List[Tuple[str, str]] = []
+    for agent_type, text in segments:
+        if out and out[-1][0] == agent_type:
+            merged_text = f"{out[-1][1]}\n{text}"
+            out[-1] = (agent_type, merged_text)
+        else:
+            out.append((agent_type, text))
+    return out
+
+
+def _build_dispatch_segments(
+    router_segments: Optional[List[Tuple[str, str]]],
+    enabled_agents: List[dict],
+    primary_agent_type: str,
+    full_message: str,
+) -> List[Tuple[str, str]]:
+    """
+    Build the (agent_type, text) list the dispatcher will run. Applies
+    domain→agent mapping, fallback for unmapped/unavailable agents, and
+    coalesces consecutive same-agent segments.
+    """
+    if not router_segments:
+        # Classifier failed or empty — run primary on the whole message.
+        return [(primary_agent_type, full_message)]
+
+    enabled_types = {a["agent_type"] for a in enabled_agents}
+
+    mapped: List[Tuple[str, str]] = []
+    for domain, text in router_segments:
+        target = _DOMAIN_TO_AGENT_TYPE.get(domain)
+        if not target or target not in enabled_types:
+            target = primary_agent_type
+        mapped.append((target, text))
+
+    return _coalesce(mapped)
+
+
 class ConversationManager:
-    """Orchestrates message flow: load agents, route, execute, persist session state."""
+    """Orchestrates message flow: route → dispatch."""
 
     def process(
         self,
@@ -46,17 +130,11 @@ class ConversationManager:
         abort_key: Optional[str] = None,
     ) -> str:
         """
-        Process incoming message. Phase 1: single-agent fast path.
-        Persists state_update from agent to session when non-empty.
-
-        Returns:
-            Final response text to send to user.
+        Process incoming message, return the final user-facing reply.
         """
         business_id = business_context.get("business_id") if business_context else None
 
-        # Router fast-path: pure greetings (and, in later phases, menu
-        # queries + business-info queries) are answered directly without
-        # invoking any agent. Returns None → fall through to agent dispatch.
+        # 1. Router fast-path: pure greetings reply directly.
         router_result = router_route(
             message_body=message_body,
             business_context=business_context,
@@ -66,67 +144,31 @@ class ConversationManager:
             logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")
             return router_result.direct_reply
 
-        # Load enabled agents for this business (ordered by priority ascending).
+        # 2. Pick primary + build dispatch segments from router output.
         enabled_agents = business_agent_service.get_enabled_agents(business_id or "")
-
-        # Router classifier may hint the agent_type. If the hint resolves
-        # to an enabled agent, use it; otherwise fall through to the
-        # primary agent selection logic below (unchanged behavior).
-        # Domains without a dedicated agent (customer_service until Phase 2,
-        # catalog, chat) return None and go to the primary agent.
-        classifier_hint = None
-        if router_result.domain:
-            mapped = _DOMAIN_TO_AGENT_TYPE.get(router_result.domain)
-            if mapped and any(a["agent_type"] == mapped for a in enabled_agents):
-                classifier_hint = mapped
-            logging.warning(
-                "[CONVERSATION_MANAGER] Router domain=%s → agent_type=%s (hint_applied=%s)",
-                router_result.domain, mapped, classifier_hint is not None,
-            )
-
-        agent_type = "booking"
-        if classifier_hint:
-            # Router classifier picked a domain that resolves to an enabled agent.
-            # Take precedence over the business's `conversation_primary_agent`.
-            agent_type = classifier_hint
-        elif enabled_agents:
-            biz = (business_context or {}).get("business") or {}
-            settings = biz.get("settings") or {}
-            primary = str(settings.get("conversation_primary_agent") or "").strip().lower()
-            if primary:
-                match = next(
-                    (a for a in enabled_agents if a["agent_type"] == primary),
-                    None,
-                )
-                if match:
-                    agent_type = primary
-                else:
-                    agent_type = enabled_agents[0]["agent_type"]
-                    logging.warning(
-                        "[CONVERSATION_MANAGER] conversation_primary_agent=%r not in enabled agents; "
-                        "using first by priority: %s",
-                        primary,
-                        agent_type,
-                    )
-            else:
-                agent_type = enabled_agents[0]["agent_type"]
-
-        agents_summary = (
-            ", ".join(f"{a['agent_type']}:{a.get('priority')}" for a in enabled_agents)
-            if enabled_agents
-            else "(none, default booking)"
+        primary_agent_type = _resolve_primary_agent(enabled_agents, business_context)
+        dispatch_segments = _build_dispatch_segments(
+            router_segments=router_result.segments,
+            enabled_agents=enabled_agents,
+            primary_agent_type=primary_agent_type,
+            full_message=message_body,
         )
+
+        agents_summary = ", ".join(f"{a['agent_type']}:{a.get('priority')}" for a in enabled_agents) \
+            if enabled_agents else "(none, default booking)"
         logging.warning(
-            "[CONVERSATION_MANAGER] Routed to agent=%s | enabled by priority: [%s]",
-            agent_type,
+            "[CONVERSATION_MANAGER] enabled=[%s] primary=%s router_segments=%s dispatch=%s",
             agents_summary,
+            primary_agent_type,
+            [d for d, _ in (router_result.segments or [])],
+            [t for t, _ in dispatch_segments],
         )
 
-        # Single-segment dispatch (Phase 3a). The dispatcher handles state
-        # persistence internally so handoff hops see post-mutation state.
-        # Future Phase 3b will feed multi-segment lists from the router.
+        # 3. Dispatch. Dispatcher handles handoffs, state persistence,
+        # abort check between hops, and composer invocation when
+        # multiple agents produced non-empty output.
         dispatch_result = dispatch(
-            segments=[(agent_type, message_body)],
+            segments=dispatch_segments,
             wa_id=wa_id,
             name=name,
             business_context=business_context,

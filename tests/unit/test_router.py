@@ -1,4 +1,4 @@
-"""Unit tests for app/orchestration/router.py — greeting fast-path + LLM classifier."""
+"""Unit tests for app/orchestration/router.py — greeting fast-path + LLM decomposition."""
 
 from unittest.mock import patch, MagicMock
 
@@ -16,32 +16,8 @@ BIELA_CONTEXT = {
 }
 
 
-class TestRouterGreetingFastPath:
-    @pytest.mark.parametrize("msg", ["hola", "buenas", "buenos días", "hey"])
-    def test_pure_greeting_returns_direct_reply(self, msg):
-        # LLM must NOT be called — greeting fast-path short-circuits.
-        with patch("app.orchestration.router._get_llm_classifier") as m:
-            result = router.route(
-                message_body=msg,
-                business_context=BIELA_CONTEXT,
-                customer_name="David",
-            )
-            m.assert_not_called()
-        assert result.direct_reply is not None
-        assert "Biela" in result.direct_reply
-        assert result.domain is None
-
-    def test_greeting_includes_customer_name(self):
-        result = router.route(
-            message_body="hola",
-            business_context=BIELA_CONTEXT,
-            customer_name="David",
-        )
-        assert result.direct_reply.startswith("Hola David.")
-
-
 def _mock_llm_returning(content: str):
-    """Build a mock llm.invoke() that returns a LangChain-style response with .content."""
+    """Build a mock llm.invoke() that returns a LangChain-style response."""
     llm = MagicMock()
     response = MagicMock()
     response.content = content
@@ -49,81 +25,169 @@ def _mock_llm_returning(content: str):
     return llm
 
 
-class TestRouterLLMClassifier:
+class TestRouterGreetingFastPath:
+    @pytest.mark.parametrize("msg", ["hola", "buenas", "buenos días", "hey"])
+    def test_pure_greeting_returns_direct_reply(self, msg):
+        with patch("app.orchestration.router._get_llm_classifier") as m:
+            result = router.route(msg, BIELA_CONTEXT, "David")
+            m.assert_not_called()
+        assert result.direct_reply is not None
+        assert "Biela" in result.direct_reply
+        assert result.segments is None
+        assert result.domain is None
+
+    def test_greeting_includes_customer_name(self):
+        result = router.route("hola", BIELA_CONTEXT, "David")
+        assert result.direct_reply.startswith("Hola David.")
+
+
+class TestRouterSingleSegmentClassification:
     @pytest.mark.parametrize(
-        "raw,expected",
+        "raw,expected_domain",
         [
-            ('{"domain": "order"}', router.DOMAIN_ORDER),
-            ('{"domain": "customer_service"}', router.DOMAIN_CUSTOMER_SERVICE),
-            ('{"domain": "catalog"}', router.DOMAIN_CATALOG),
-            ('{"domain": "chat"}', router.DOMAIN_CHAT),
+            ('{"segments": [{"domain": "order", "text": "quiero una barracuda"}]}', router.DOMAIN_ORDER),
+            ('{"segments": [{"domain": "customer_service", "text": "a qué hora abren"}]}', router.DOMAIN_CUSTOMER_SERVICE),
+            ('{"segments": [{"domain": "catalog", "text": "qué bebidas hay"}]}', router.DOMAIN_CATALOG),
+            ('{"segments": [{"domain": "chat", "text": "gracias"}]}', router.DOMAIN_CHAT),
         ],
     )
-    def test_parses_valid_domain_from_json(self, raw, expected):
+    def test_parses_single_segment(self, raw, expected_domain):
         mock_llm = _mock_llm_returning(raw)
         with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
-            result = router.route(
-                message_body="quiero una barracuda",
-                business_context=BIELA_CONTEXT,
-                customer_name="David",
-            )
-        assert result.domain == expected
-        assert result.direct_reply is None
+            result = router.route("whatever", BIELA_CONTEXT, "David")
+        assert result.segments is not None
+        assert len(result.segments) == 1
+        assert result.segments[0][0] == expected_domain
+        # Backward-compat: single segment exposes `domain` property.
+        assert result.domain == expected_domain
 
-    def test_strips_markdown_fences_from_response(self):
-        mock_llm = _mock_llm_returning('```json\n{"domain": "order"}\n```')
+    def test_strips_markdown_fences(self):
+        mock_llm = _mock_llm_returning('```json\n{"segments": [{"domain": "order", "text": "x"}]}\n```')
         with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
             result = router.route("x", BIELA_CONTEXT, "David")
         assert result.domain == router.DOMAIN_ORDER
 
     def test_extracts_json_from_wrapping_text(self):
-        mock_llm = _mock_llm_returning('Respuesta: {"domain": "catalog"} listo.')
+        mock_llm = _mock_llm_returning('Resultado: {"segments": [{"domain": "catalog", "text": "x"}]} listo.')
         with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
             result = router.route("x", BIELA_CONTEXT, "David")
         assert result.domain == router.DOMAIN_CATALOG
 
-    def test_invalid_domain_returns_none(self):
-        mock_llm = _mock_llm_returning('{"domain": "nonsense"}')
+
+class TestRouterMultiSegmentDecomposition:
+    def test_two_segments_different_domains(self):
+        raw = (
+            '{"segments": ['
+            '{"domain": "order", "text": "dame una barracuda"},'
+            '{"domain": "customer_service", "text": "a qué hora abren mañana"}'
+            ']}'
+        )
+        mock_llm = _mock_llm_returning(raw)
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route(
+                "dame una barracuda y a qué hora abren mañana",
+                BIELA_CONTEXT, "David",
+            )
+        assert result.segments == [
+            (router.DOMAIN_ORDER, "dame una barracuda"),
+            (router.DOMAIN_CUSTOMER_SERVICE, "a qué hora abren mañana"),
+        ]
+        # Multi-segment: backward-compat `domain` is None.
+        assert result.domain is None
+
+    def test_three_segments_within_cap(self):
+        raw = (
+            '{"segments": ['
+            '{"domain": "order", "text": "a"},'
+            '{"domain": "customer_service", "text": "b"},'
+            '{"domain": "catalog", "text": "c"}'
+            ']}'
+        )
+        mock_llm = _mock_llm_returning(raw)
         with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
             result = router.route("x", BIELA_CONTEXT, "David")
-        assert result.domain is None
-        assert result.direct_reply is None
+        assert len(result.segments) == 3
 
-    def test_unparseable_response_returns_none(self):
-        mock_llm = _mock_llm_returning("not json at all")
+    def test_excess_segments_truncated(self):
+        items = ",".join(
+            f'{{"domain": "order", "text": "item {i}"}}'
+            for i in range(10)
+        )
+        raw = f'{{"segments": [{items}]}}'
+        mock_llm = _mock_llm_returning(raw)
         with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
             result = router.route("x", BIELA_CONTEXT, "David")
+        assert len(result.segments) == router.MAX_SEGMENTS_PER_TURN
+
+    def test_invalid_domain_in_segment_skipped(self):
+        raw = (
+            '{"segments": ['
+            '{"domain": "nonsense", "text": "x"},'
+            '{"domain": "order", "text": "dame barracuda"}'
+            ']}'
+        )
+        mock_llm = _mock_llm_returning(raw)
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("x", BIELA_CONTEXT, "David")
+        assert result.segments == [(router.DOMAIN_ORDER, "dame barracuda")]
+
+    def test_empty_text_in_segment_skipped(self):
+        raw = (
+            '{"segments": ['
+            '{"domain": "order", "text": ""},'
+            '{"domain": "customer_service", "text": "a qué hora abren"}'
+            ']}'
+        )
+        mock_llm = _mock_llm_returning(raw)
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("x", BIELA_CONTEXT, "David")
+        assert result.segments == [(router.DOMAIN_CUSTOMER_SERVICE, "a qué hora abren")]
+
+
+class TestRouterClassifierFailures:
+    def test_empty_segments_list_returns_none_segments(self):
+        mock_llm = _mock_llm_returning('{"segments": []}')
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("x", BIELA_CONTEXT, "David")
+        assert result.segments is None
         assert result.domain is None
 
-    def test_llm_unavailable_returns_none(self):
+    def test_missing_segments_key(self):
+        mock_llm = _mock_llm_returning('{"domain": "order"}')
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("x", BIELA_CONTEXT, "David")
+        assert result.segments is None
+
+    def test_unparseable_json(self):
+        mock_llm = _mock_llm_returning("not json")
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("x", BIELA_CONTEXT, "David")
+        assert result.segments is None
+
+    def test_llm_unavailable(self):
         with patch("app.orchestration.router._get_llm_classifier", return_value=None):
             result = router.route("x", BIELA_CONTEXT, "David")
-        assert result.domain is None
-        assert result.direct_reply is None
+        assert result.segments is None
 
-    def test_llm_exception_returns_none_no_crash(self):
-        mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = RuntimeError("boom")
-        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+    def test_llm_exception_returns_none(self):
+        llm = MagicMock()
+        llm.invoke.side_effect = RuntimeError("boom")
+        with patch("app.orchestration.router._get_llm_classifier", return_value=llm):
             result = router.route("x", BIELA_CONTEXT, "David")
-        assert result.domain is None
+        assert result.segments is None
 
     def test_empty_message_skips_classifier(self):
         with patch("app.orchestration.router._get_llm_classifier") as m:
             result = router.route("", BIELA_CONTEXT, "David")
             m.assert_not_called()
-        assert result.domain is None
-        assert result.direct_reply is None
+        assert result.segments is None
 
-    def test_whitespace_only_message_skips_classifier(self):
-        with patch("app.orchestration.router._get_llm_classifier") as m:
-            result = router.route("   \n ", BIELA_CONTEXT, "David")
-            m.assert_not_called()
-        assert result.domain is None
 
-    def test_passes_business_id_in_metadata(self):
-        """LangSmith metadata should include business_id for filtering."""
-        mock_llm = _mock_llm_returning('{"domain": "order"}')
+class TestRouterMetadata:
+    def test_passes_business_id_in_langsmith_metadata(self):
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "order", "text": "x"}]}'
+        )
         with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
             router.route("x", BIELA_CONTEXT, "David")
         _, kwargs = mock_llm.invoke.call_args
