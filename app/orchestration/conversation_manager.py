@@ -26,8 +26,7 @@ from .router import (
 # the dedicated agents.
 _DOMAIN_TO_AGENT_TYPE = {
     DOMAIN_ORDER: "order",
-    # DOMAIN_CUSTOMER_SERVICE: "customer_service",  # enable when agent lands
-    DOMAIN_CUSTOMER_SERVICE: None,
+    DOMAIN_CUSTOMER_SERVICE: "customer_service",
     # DOMAIN_CATALOG: None  (no agent — catalog intents still owned by order)
     DOMAIN_CATALOG: None,
     DOMAIN_CHAT: None,
