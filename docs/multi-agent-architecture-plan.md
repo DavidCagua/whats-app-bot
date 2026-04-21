@@ -187,10 +187,24 @@ The router classifies a message into one of:
 - `greeting` → business_greeting service (already in Phase 1).
 - `catalog` → `catalog_service` called directly, response rendered by a small templated formatter or a `catalog_response_generator` LLM call (~300ms) that formats the results naturally. No agent dispatch.
 - `order` → dispatch to order agent with the slim intent set.
-- `support` → dispatch to support agent (Phase 2).
+- `customer_service` → dispatch to customer service agent (Phase 2). Handles pre-sale info (hours, address, delivery, payment) AND post-sale (order status, history).
 - `booking` → dispatch to booking agent (future).
 - `marketing` → dispatch to marketing agent (future).
 - `chat_fallback` → a generic "no entendí" reply with a suggestion prompt.
+
+**Tricky edge cases to document in the router prompt (with few-shot examples)**:
+
+| Message | Domain | Why |
+|---------|--------|-----|
+| "tienen coca cola?" | `catalog` | Asking about a product |
+| "tienen domicilio?" | `customer_service` | Asking about delivery policy |
+| "hacen delivery a Chapinero?" | `customer_service` | Delivery zone info |
+| "a qué hora me llega?" (during active order) | `customer_service` | Delivery time info, not status |
+| "cuánto demora el domicilio?" | `customer_service` | Delivery time policy |
+| "dónde está mi pedido?" | `customer_service` | Order status |
+| "ya te pago" | `order` | Checkout signal |
+| "quiero pagar" | `order` | Checkout signal |
+| "ya listo" (during active cart) | `order` | PLACE_ORDER signal |
 
 The router prompt stays short because it only picks between domains, not intents.
 
@@ -234,26 +248,114 @@ The router prompt stays short because it only picks between domains, not intents
 
 **Success criteria**: Existing single-agent behavior is byte-identical except the greeting no longer runs through the order agent's planner. New multi-segment outputs only possible once Phase 2 lands.
 
-### Phase 2: Support agent (read-only)
+### Phase 2: Customer service agent (read-only)
 
-**Scope**: Create `app/agents/support_agent.py` with 3 intents:
-- `GET_ORDER_STATUS` — look up the user's latest order, report status.
-- `GET_BUSINESS_INFO` — hours, address, phone, menu URL (from `business.settings`).
-- `LOG_COMPLAINT` — save a free-text complaint to a new table or existing field.
+**Naming**: `customer_service` (NOT `support` or `post_venta`). The agent handles BOTH pre-sale and post-sale customer-facing questions — it's not post-venta only. Using `customer_service` prevents the scope creep that `support` implies.
+
+**Scope coverage**:
+
+| Direction | Example questions |
+|-----------|------------------|
+| **Pre-sale** (prospects, browsing) | "dónde quedan?", "a qué hora abren?", "cuánto cobran domicilio?", "qué medios de pago aceptan?" |
+| **Mid-order** (during active cart) | "tienen descuento hoy?", "cuánto demora el domicilio?" |
+| **Post-sale** (order placed) | "dónde está mi pedido?", "qué pedí la última vez?", "puedo cambiar mi pedido?" (later phases) |
+
+The agent doesn't branch on pre- vs post-sale; it answers what's asked. Same business_info_service capability covers both funnel sides.
+
+**Intents (Phase 2, read-only)**:
+
+| Intent | Trigger examples | Action |
+|--------|------------------|--------|
+| `GET_BUSINESS_INFO` with `field` | "a qué hora abren", "dónde quedan", "cuánto domicilio", "qué pagos", "teléfono" | Look up `business.settings` field, reply |
+| `GET_ORDER_STATUS` | "dónde está mi pedido", "ya salió?", "cuánto falta" | Look up user's latest order, report status |
+| `GET_ORDER_HISTORY` | "qué he pedido", "muéstrame mis pedidos" | List last 5 orders with summaries |
+| `CUSTOMER_SERVICE_CHAT` | Anything not matched above | Fallback reply with what the agent can help with |
+
+**Deferred to later phases** (separate owner discussions):
+- `LOG_COMPLAINT` — needs schema decision + complaint workflow.
+- `MODIFY_ORDER` — needs modifiability rules + mid-turn handoff primitive (Phase 3).
+- `CANCEL_ORDER` — needs business rules.
+- `REQUEST_REFUND` — out of scope.
+
+**Order status formatting (Phase 2 safe defaults)**:
+
+Current statuses are `pending / completed / cancelled`. Until intermediate statuses (`preparing / en_camino / delivered`) are added to schema + owner workflow, use honest messaging:
+
+| Status | Reply framing |
+|--------|---------------|
+| `pending` | "Tu pedido está en preparación. Pronto nos comunicamos para coordinar entrega." |
+| `completed` | "Tu pedido ya fue entregado. ¿Algo más?" |
+| `cancelled` | "Tu pedido fue cancelado. Si fue un error, cuéntame." |
+
+Don't promise ETAs we can't verify. Intermediate statuses are Phase 2.5 after owner commits to real-time status updates.
+
+**Response generator strategy (chosen: balanced)**:
+
+For simple cases (GET_BUSINESS_INFO with a known field and found value), response generator renders directly from a template — no LLM call for the response, just substitution. Saves ~500ms on the common pre-sale path. Falls back to LLM response generation for:
+- Unusual phrasings.
+- Compound questions ("abren temprano y cuánto cuesta el domicilio?").
+- `GET_ORDER_STATUS` (tone matters more, data is structured).
+- `CUSTOMER_SERVICE_CHAT` fallback.
+
+Target: ~60-80 lines of response prompt (vs order agent's ~500). Customer service is simpler because there's less state branching.
+
+**Session state**:
+
+Customer service agent owns a new namespaced slot: `customer_service_context`.
+
+```python
+session = {
+    "order_context": {...},                # owned by order agent (read-only access for cs)
+    "customer_service_context": {           # owned by customer service agent
+        "last_status_check_order_id": "uuid",
+        "last_info_query": "hours",
+    },
+    "active_agents": [...],
+}
+```
+
+Customer service agent READS `order_context` (to see in-progress cart when relevant) but NEVER writes. Same strict separation rule.
+
+**Planner prompt (target: ~25 lines)**:
+
+```
+Eres un clasificador de intención para el agente de servicio al cliente de un restaurante.
+Manejas preguntas pre-venta (horarios, ubicación, domicilio, medios de pago) y post-venta
+(estado de pedido, historial).
+
+Intenciones válidas: GET_BUSINESS_INFO, GET_ORDER_STATUS, GET_ORDER_HISTORY, CUSTOMER_SERVICE_CHAT.
+
+Reglas:
+- GET_BUSINESS_INFO con field: info del negocio. Valores:
+  "hours", "address", "phone", "delivery_fee", "menu_url", "payment_methods".
+- GET_ORDER_STATUS: estado del pedido actual/reciente. Sin params.
+- GET_ORDER_HISTORY: pedidos anteriores del usuario. Sin params.
+- CUSTOMER_SERVICE_CHAT: cualquier otra cosa. Sin params.
+
+Responde SOLO con JSON.
+```
 
 **Files**:
-- `app/agents/support_agent.py` (new) — same planner → executor → response-gen pattern as order agent.
-- `app/services/support_tools.py` (new) — three tools above.
-- `app/orchestration/support_flow.py` (new) — parallel to `order_flow.py`.
-- Migration: add `complaints` table OR add `complaint_text` column to `orders`. Decide with owner.
+- `app/agents/customer_service_agent.py` (new) — three-stage agent, same pattern as order.
+- `app/orchestration/customer_service_flow.py` (new) — executor + intent/result constants.
+- `app/database/order_lookup_service.py` (new) — read-only: `get_latest_order`, `get_order_history`, `get_order_by_id`.
+- `app/services/business_info_service.py` (new) — `get_business_info(business_id, field)`. Shared capability: the router may call this directly in later phases for fast-paths.
+
+**Approximate sizes**:
+- `customer_service_agent.py`: ~200 lines
+- `customer_service_flow.py`: ~150 lines
+- `order_lookup_service.py`: ~60 lines
+- `business_info_service.py`: ~40 lines
+- Tests: ~300 lines total
 
 **Tests**:
-- Order status lookup returns correct info when order exists.
-- Order status lookup handles "no order found" gracefully.
-- Business info queries work across all settings fields.
-- Complaint log persists and is retrievable.
+- `GET_ORDER_STATUS`: existing order, no order found, multiple orders.
+- `GET_BUSINESS_INFO`: each supported field, missing fields, unknown fields.
+- `GET_ORDER_HISTORY`: empty history, N orders, ordering by recency.
+- `CUSTOMER_SERVICE_CHAT`: fallback reply lists what the agent can do.
+- Planner classification: 10-20 labeled messages covering pre-sale + post-sale patterns.
 
-**Success criteria**: Support agent can be enabled in `business_agents` table and handles its 3 intents end-to-end in isolation.
+**Success criteria**: Customer service agent can be enabled in `business_agents` table. Handles all 4 intents end-to-end. Router correctly dispatches info questions and status questions to it (Phase 1 router addition).
 
 ### Phase 3: Dispatcher + composer
 

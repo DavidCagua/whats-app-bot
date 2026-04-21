@@ -10,7 +10,28 @@ from typing import Optional
 from ..database.business_agent_service import business_agent_service
 from ..database.session_state_service import session_state_service
 from .agent_executor import execute_agent
-from .router import route as router_route
+from .router import (
+    route as router_route,
+    DOMAIN_ORDER,
+    DOMAIN_CUSTOMER_SERVICE,
+    DOMAIN_CATALOG,
+    DOMAIN_CHAT,
+)
+
+
+# Maps a router-classified domain to the agent_type that should handle it.
+# Domains for which no dedicated agent/handler exists yet map to None,
+# meaning "fall back to the business's primary agent." This lets us ship
+# the classifier now and observe its accuracy in LangSmith before wiring
+# the dedicated agents.
+_DOMAIN_TO_AGENT_TYPE = {
+    DOMAIN_ORDER: "order",
+    # DOMAIN_CUSTOMER_SERVICE: "customer_service",  # enable when agent lands
+    DOMAIN_CUSTOMER_SERVICE: None,
+    # DOMAIN_CATALOG: None  (no agent — catalog intents still owned by order)
+    DOMAIN_CATALOG: None,
+    DOMAIN_CHAT: None,
+}
 
 
 class ConversationManager:
@@ -50,8 +71,27 @@ class ConversationManager:
         # Load enabled agents for this business (ordered by priority ascending).
         enabled_agents = business_agent_service.get_enabled_agents(business_id or "")
 
+        # Router classifier may hint the agent_type. If the hint resolves
+        # to an enabled agent, use it; otherwise fall through to the
+        # primary agent selection logic below (unchanged behavior).
+        # Domains without a dedicated agent (customer_service until Phase 2,
+        # catalog, chat) return None and go to the primary agent.
+        classifier_hint = None
+        if router_result.domain:
+            mapped = _DOMAIN_TO_AGENT_TYPE.get(router_result.domain)
+            if mapped and any(a["agent_type"] == mapped for a in enabled_agents):
+                classifier_hint = mapped
+            logging.warning(
+                "[CONVERSATION_MANAGER] Router domain=%s → agent_type=%s (hint_applied=%s)",
+                router_result.domain, mapped, classifier_hint is not None,
+            )
+
         agent_type = "booking"
-        if enabled_agents:
+        if classifier_hint:
+            # Router classifier picked a domain that resolves to an enabled agent.
+            # Take precedence over the business's `conversation_primary_agent`.
+            agent_type = classifier_hint
+        elif enabled_agents:
             biz = (business_context or {}).get("business") or {}
             settings = biz.get("settings") or {}
             primary = str(settings.get("conversation_primary_agent") or "").strip().lower()
