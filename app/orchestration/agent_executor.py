@@ -82,7 +82,9 @@ def execute_agent(
     if handoff_context:
         kwargs["handoff_context"] = handoff_context
 
-    if agent_type in ("order", "booking") and business_id:
+    # customer_service reads session (read-only — order_context.items for the
+    # "mi pedido" ambiguity guard) but only writes its own slot.
+    if agent_type in ("order", "booking", "customer_service") and business_id:
         load_result = turn_cache.current().get_session(
             wa_id, str(business_id),
             loader=lambda: session_state_service.load(wa_id, str(business_id)),

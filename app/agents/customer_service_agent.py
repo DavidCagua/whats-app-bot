@@ -53,6 +53,7 @@ from ..orchestration.customer_service_flow import (
     RESULT_KIND_ORDER_HISTORY,
     RESULT_KIND_CHAT_FALLBACK,
     RESULT_KIND_INTERNAL_ERROR,
+    RESULT_KIND_HANDOFF,
 )
 from ..database.conversation_service import conversation_service
 from ..services import business_info_service
@@ -380,8 +381,29 @@ class CustomerServiceAgent(BaseAgent):
             business_context=business_context,
             intent=intent,
             params=params,
+            session=session,
         )
         result_kind = exec_result.get("result_kind") or RESULT_KIND_CHAT_FALLBACK
+
+        # Handoff short-circuit: the flow detected this turn belongs to a
+        # different agent (e.g. "qué tengo en mi pedido?" with active cart
+        # → order/VIEW_CART). Return an empty-message AgentOutput with
+        # `handoff` set so the dispatcher runs the target agent. No LLM
+        # response call, no conversation history write — the target
+        # agent's reply is what the user sees.
+        if result_kind == RESULT_KIND_HANDOFF:
+            hand = exec_result.get("handoff") or {}
+            logging.warning(
+                "[CS_AGENT] handoff to %s (reason=%s)",
+                hand.get("to"), (hand.get("context") or {}).get("reason"),
+            )
+            tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+            return {
+                "agent_type": self.agent_type,
+                "message": "",
+                "state_update": {},
+                "handoff": hand,
+            }
 
         logging.warning(
             "[CS_TURN] wa_id=%s intent=%s result_kind=%s latency_ms=%d",

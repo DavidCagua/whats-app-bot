@@ -51,6 +51,10 @@ RESULT_KIND_NO_ORDER = "no_order"
 RESULT_KIND_ORDER_HISTORY = "order_history"
 RESULT_KIND_CHAT_FALLBACK = "cs_chat_fallback"
 RESULT_KIND_INTERNAL_ERROR = "cs_internal_error"
+# Signal that the agent should hand off mid-turn. The agent's execute()
+# translates this into the `handoff` field of its AgentOutput so the
+# dispatcher picks up the next agent.
+RESULT_KIND_HANDOFF = "cs_handoff"
 
 
 def _base_result(
@@ -91,12 +95,18 @@ def execute_customer_service_intent(
     business_context: Optional[Dict[str, Any]],
     intent: str,
     params: Dict[str, Any],
+    session: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Deterministic executor for customer service intents.
 
     Backend is single source of truth; response generator receives
     structured data and does not re-parse tool strings.
+
+    `session` is read-only (passed through from agent_executor). Used
+    to resolve ambiguous intents like "qué tengo en mi pedido?" where
+    the router may have routed here but the user's active cart means
+    the correct owner is the order agent — emit a handoff result.
     """
     intent = (intent or "").upper().strip()
     params = params or {}
@@ -110,7 +120,7 @@ def execute_customer_service_intent(
             return _handle_business_info(wa_id, business_id, business_context, params)
 
         if intent == INTENT_GET_ORDER_STATUS:
-            return _handle_order_status(wa_id, business_id)
+            return _handle_order_status(wa_id, business_id, session)
 
         if intent == INTENT_GET_ORDER_HISTORY:
             return _handle_order_history(wa_id, business_id, params)
@@ -166,7 +176,33 @@ def _handle_business_info(
     )
 
 
-def _handle_order_status(wa_id: str, business_id: str) -> Dict[str, Any]:
+def _handle_order_status(
+    wa_id: str,
+    business_id: str,
+    session: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    # Ambiguity guard: "qué tengo en mi pedido?" / "dónde está mi pedido?"
+    # might have been routed here by the language-only classifier, but if
+    # the user has an active in-progress cart the correct interpretation
+    # is VIEW_CART on the order agent. Emit a handoff instead of answering.
+    order_context = (session or {}).get("order_context") or {}
+    active_cart_items = order_context.get("items") or []
+    if active_cart_items:
+        logger.info(
+            "[CS_FLOW] order_status routed to CS but user has active cart (n=%d) "
+            "— handing off to order/VIEW_CART",
+            len(active_cart_items),
+        )
+        return _base_result(
+            wa_id, business_id,
+            RESULT_KIND_HANDOFF,
+            handoff={
+                "to": "order",
+                "segment": "qué tengo en mi pedido",
+                "context": {"reason": "mi_pedido_active_cart"},
+            },
+        )
+
     order = order_lookup_service.get_latest_order(wa_id, business_id)
     if not order:
         return _base_result(

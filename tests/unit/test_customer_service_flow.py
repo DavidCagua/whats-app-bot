@@ -74,6 +74,44 @@ class TestGetOrderStatus:
         assert result["success"] is False
 
 
+class TestGetOrderStatusActiveCartHandoff:
+    """The 'mi pedido' ambiguity: CS should defer to order when cart is active."""
+
+    def _run_with_session(self, session):
+        return csf.execute_customer_service_intent(
+            wa_id=WA, business_id=BIZ, business_context=BIZ_CTX,
+            intent=csf.INTENT_GET_ORDER_STATUS, params={},
+            session=session,
+        )
+
+    def test_active_cart_triggers_handoff_to_order(self):
+        session = {"order_context": {"items": [{"name": "Barracuda", "quantity": 1}]}}
+        # Ensure no DB lookup happens when the handoff fires — the guard
+        # must short-circuit BEFORE order_lookup_service.
+        with patch.object(csf.order_lookup_service, "get_latest_order") as m:
+            result = self._run_with_session(session)
+            m.assert_not_called()
+        assert result["result_kind"] == csf.RESULT_KIND_HANDOFF
+        assert result["handoff"]["to"] == "order"
+        assert result["handoff"]["context"]["reason"] == "mi_pedido_active_cart"
+
+    def test_empty_cart_falls_through_to_lookup(self):
+        session = {"order_context": {"items": []}}
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=None):
+            result = self._run_with_session(session)
+        assert result["result_kind"] == csf.RESULT_KIND_NO_ORDER
+
+    def test_no_session_falls_through_to_lookup(self):
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=None):
+            result = self._run_with_session(None)
+        assert result["result_kind"] == csf.RESULT_KIND_NO_ORDER
+
+    def test_missing_order_context_key_falls_through(self):
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=None):
+            result = self._run_with_session({})
+        assert result["result_kind"] == csf.RESULT_KIND_NO_ORDER
+
+
 class TestGetOrderHistory:
     def test_returns_orders_cleaned(self):
         raw = [

@@ -157,3 +157,35 @@ class TestAgentExecuteLLMResponsePath:
             )
         assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
         assert output["message"] == "Puedo ayudarte con horarios, dirección..."
+
+
+class TestAgentHandoffPropagation:
+    """When flow returns RESULT_KIND_HANDOFF, agent must surface it as output.handoff."""
+
+    def test_active_cart_mi_pedido_hands_off_to_order(self):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        # Planner picks GET_ORDER_STATUS; flow detects active cart → handoff.
+        llm.invoke.return_value = _llm_response(
+            '{"intent": "GET_ORDER_STATUS", "params": {}}'
+        )
+        session = {"order_context": {"items": [{"name": "Barracuda", "quantity": 1}]}}
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message") as m_store:
+            output = agent.execute(
+                message_body="qué tengo en mi pedido",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                session=session,
+            )
+        assert output["agent_type"] == "customer_service"
+        assert output["message"] == ""
+        assert output["handoff"]["to"] == "order"
+        assert output["handoff"]["context"]["reason"] == "mi_pedido_active_cart"
+        # Handoff path must NOT persist an assistant message — the target
+        # agent's reply is what the user sees.
+        m_store.assert_not_called()
+        # Only the planner LLM was called (no response LLM).
+        assert llm.invoke.call_count == 1

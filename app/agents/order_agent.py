@@ -21,6 +21,7 @@ from ..orchestration.order_flow import (
     INTENT_ADD_TO_CART,
     INTENT_CHAT,
     INTENT_CONFIRM,
+    INTENT_VIEW_CART,
     RESULT_KIND_CHAT,
     RESULT_KIND_MENU_CATEGORIES,
     RESULT_KIND_PRODUCTS_LIST,
@@ -42,6 +43,18 @@ from ..orchestration.order_flow import (
 from ..database.conversation_service import conversation_service
 from ..database.booking_service import booking_service
 from ..services.tracing import tracer
+
+
+# Mirror of the customer_service handoff guard. If the planner picks VIEW_CART
+# but the cart is empty AND the user's message reads like a status inquiry
+# (rather than a "what can I order" browse), the correct owner is the
+# customer_service agent which can look up completed orders. Keep the
+# regex narrow — false positives demote the user to the generic empty-cart
+# reply, which is a worse UX than a status lookup miss.
+_STATUS_INQUIRY_RE = re.compile(
+    r"\b(d[oó]nde|estado|ya sali[oó]|c[oó]mo va|qu[eé] pasa con|mi pedido ya)\b",
+    re.IGNORECASE,
+)
 
 
 PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de pedidos. Dado el estado actual del pedido y el mensaje del usuario, devuelves EXACTAMENTE una intención y sus parámetros en JSON.
@@ -999,6 +1012,31 @@ class OrderAgent(BaseAgent):
                 planner_intent_rejected,
                 int((time.time() - start_time) * 1000),
             )
+
+            # Handoff guard: empty-cart status query.
+            # Mirror of customer_service_flow's active-cart guard. If the
+            # router sent "mi pedido" style questions to order but the cart
+            # is empty AND the phrasing reads like a status query, defer
+            # to customer_service which can check completed orders.
+            if (
+                intent == INTENT_VIEW_CART
+                and (exec_result.get("cart_view") or {}).get("is_empty")
+                and _STATUS_INQUIRY_RE.search(message_body or "")
+            ):
+                logging.warning(
+                    "[ORDER_AGENT] handoff to customer_service (empty_cart_status_query)"
+                )
+                tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+                return {
+                    "agent_type": self.agent_type,
+                    "message": "",
+                    "state_update": {},
+                    "handoff": {
+                        "to": "customer_service",
+                        "segment": message_body,
+                        "context": {"reason": "empty_cart_status_query"},
+                    },
+                }
 
             # 3) Response generator.
             # Pure greetings are handled upstream by the router fast-path
