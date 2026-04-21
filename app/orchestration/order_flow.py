@@ -29,6 +29,7 @@ from ..database.product_order_service import (
 )
 from ..services import order_tools
 from ..services import catalog_cache
+from ..services import catalog_service
 from . import turn_cache
 
 
@@ -870,16 +871,19 @@ def execute_order_intent(
                 delivery_status=delivery_status,
             )
 
-        # --- read intents (call service directly, no @tool wrapper) ---
+        # --- read intents (delegated to catalog_service) ---
+        # catalog_service is the shared read-only capability for menu/search.
+        # Response generator still receives _clean_product_dict-shaped payloads
+        # so the prompt/eval contract is unchanged.
         if intent == INTENT_GET_MENU_CATEGORIES:
-            categories = catalog_cache.list_categories(business_id) or []
+            categories = catalog_service.list_categories(business_id)
             if categories:
                 return _base_result(
                     current_state, wa_id, business_id,
                     RESULT_KIND_MENU_CATEGORIES,
                     categories=list(categories),
                 )
-            all_products = catalog_cache.list_products(business_id) or []
+            all_products = catalog_service.list_products(business_id)
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCTS_LIST,
@@ -890,9 +894,9 @@ def execute_order_intent(
 
         if intent == INTENT_LIST_PRODUCTS:
             category = (params.get("category") or "").strip()
-            products = catalog_cache.list_products_with_fallback(
-                business_id=business_id, category=category,
-            ) or []
+            products = catalog_service.list_products(
+                business_id=business_id, category=category or None,
+            )
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCTS_LIST,
@@ -908,9 +912,9 @@ def execute_order_intent(
                     current_state, wa_id, business_id,
                     "Indica qué producto estás buscando.",
                 )
-            products = product_order_service.search_products(
+            products = catalog_service.search_products(
                 business_id=business_id, query=query,
-            ) or []
+            )
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCTS_LIST,
@@ -927,10 +931,10 @@ def execute_order_intent(
                     current_state, wa_id, business_id,
                     "Indica el nombre del producto que quieres conocer.",
                 )
-            product = product_order_service.get_product(
+            product = catalog_service.get_product(
+                business_id=business_id,
                 product_id=product_id or None,
                 product_name=product_name or None,
-                business_id=business_id,
             )
             if not product:
                 return _user_error_result(
