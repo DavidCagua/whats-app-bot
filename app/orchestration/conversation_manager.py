@@ -10,6 +10,7 @@ from typing import Optional
 from ..database.business_agent_service import business_agent_service
 from ..database.session_state_service import session_state_service
 from .agent_executor import execute_agent
+from .router import route as router_route
 
 
 class ConversationManager:
@@ -33,6 +34,18 @@ class ConversationManager:
             Final response text to send to user.
         """
         business_id = business_context.get("business_id") if business_context else None
+
+        # Router fast-path: pure greetings (and, in later phases, menu
+        # queries + business-info queries) are answered directly without
+        # invoking any agent. Returns None → fall through to agent dispatch.
+        router_result = router_route(
+            message_body=message_body,
+            business_context=business_context,
+            customer_name=name,
+        )
+        if router_result.direct_reply is not None:
+            logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")
+            return router_result.direct_reply
 
         # Load enabled agents for this business (ordered by priority ascending).
         enabled_agents = business_agent_service.get_enabled_agents(business_id or "")
