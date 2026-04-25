@@ -22,7 +22,6 @@ from .router import (
     route as router_route,
     DOMAIN_ORDER,
     DOMAIN_CUSTOMER_SERVICE,
-    DOMAIN_CATALOG,
     DOMAIN_CHAT,
 )
 
@@ -30,12 +29,12 @@ from .router import (
 # Maps a router-classified domain to the agent_type that should handle it.
 # Domains for which no dedicated agent/handler exists yet map to None,
 # meaning "fall back to the business's primary agent."
+#
+# Note: there is no `catalog` domain — browsing is part of the "order"
+# user concern. See docs/agents-vs-services.md for the principle.
 _DOMAIN_TO_AGENT_TYPE = {
     DOMAIN_ORDER: "order",
     DOMAIN_CUSTOMER_SERVICE: "customer_service",
-    # catalog intents are currently handled by the order agent's
-    # remaining planner branches — fall back to primary.
-    DOMAIN_CATALOG: None,
     DOMAIN_CHAT: None,
 }
 
@@ -71,12 +70,74 @@ def _resolve_primary_agent(
     return enabled_agents[0]["agent_type"]
 
 
+def _coalesce_by_domain_and_agent(
+    triples: List[Tuple[str, str, str]],
+) -> List[Tuple[str, str]]:
+    """
+    Merge consecutive segments that share BOTH the router's emitted domain
+    AND the resolved agent_type.
+
+    Why both: two segments only represent the same logical user intent
+    when the router itself called them the same domain. Different
+    router domains that happen to fall back to the same agent (e.g.
+    catalog → order via primary fallback) are distinct intents and must
+    stay as separate dispatcher invocations — otherwise the receiving
+    agent's planner has to compress N intents into one classification
+    and ends up dropping all but the most prominent one.
+
+    Returns (agent_type, text) pairs ready for the dispatcher.
+    """
+    if not triples:
+        return []
+    out: List[Tuple[str, str, str]] = []
+    for domain, agent_type, text in triples:
+        if out and out[-1][0] == domain and out[-1][1] == agent_type:
+            merged_text = f"{out[-1][2]}\n{text}"
+            out[-1] = (domain, agent_type, merged_text)
+        else:
+            out.append((domain, agent_type, text))
+    return [(agent_type, text) for _domain, agent_type, text in out]
+
+
+def _build_dispatch_segments(
+    router_segments: Optional[List[Tuple[str, str]]],
+    enabled_agents: List[dict],
+    primary_agent_type: str,
+    full_message: str,
+) -> List[Tuple[str, str]]:
+    """
+    Build the (agent_type, text) list the dispatcher will run.
+
+    Steps:
+      1. Map each router segment's domain → agent_type. Unmapped or
+         unavailable agents fall back to the primary agent.
+      2. Coalesce only when consecutive segments have the same router
+         domain AND the same final agent_type. Different domains stay
+         separate even if they end up on the same agent (preserves the
+         user's distinct intents).
+    """
+    if not router_segments:
+        # Classifier failed or empty — run primary on the whole message.
+        return [(primary_agent_type, full_message)]
+
+    enabled_types = {a["agent_type"] for a in enabled_agents}
+
+    triples: List[Tuple[str, str, str]] = []
+    for domain, text in router_segments:
+        target = _DOMAIN_TO_AGENT_TYPE.get(domain)
+        if not target or target not in enabled_types:
+            target = primary_agent_type
+        triples.append((domain, target, text))
+
+    return _coalesce_by_domain_and_agent(triples)
+
+
+# Backward-compat alias kept for tests that import the old name. The
+# old _coalesce signature took (agent_type, text) pairs; the new
+# coalesce key includes domain so we can't preserve that exact shape.
+# Tests of the old function should switch to _coalesce_by_domain_and_agent.
 def _coalesce(segments: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
-    """
-    Merge consecutive segments that resolve to the same agent_type.
-    Avoids double-invoking an agent when the router over-decomposes
-    (e.g. splits a single-domain message into adjacent segments).
-    """
+    """Deprecated: use _coalesce_by_domain_and_agent. Kept for tests."""
     if not segments:
         return segments
     out: List[Tuple[str, str]] = []
@@ -87,33 +148,6 @@ def _coalesce(segments: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
         else:
             out.append((agent_type, text))
     return out
-
-
-def _build_dispatch_segments(
-    router_segments: Optional[List[Tuple[str, str]]],
-    enabled_agents: List[dict],
-    primary_agent_type: str,
-    full_message: str,
-) -> List[Tuple[str, str]]:
-    """
-    Build the (agent_type, text) list the dispatcher will run. Applies
-    domain→agent mapping, fallback for unmapped/unavailable agents, and
-    coalesces consecutive same-agent segments.
-    """
-    if not router_segments:
-        # Classifier failed or empty — run primary on the whole message.
-        return [(primary_agent_type, full_message)]
-
-    enabled_types = {a["agent_type"] for a in enabled_agents}
-
-    mapped: List[Tuple[str, str]] = []
-    for domain, text in router_segments:
-        target = _DOMAIN_TO_AGENT_TYPE.get(domain)
-        if not target or target not in enabled_types:
-            target = primary_agent_type
-        mapped.append((target, text))
-
-    return _coalesce(mapped)
 
 
 class ConversationManager:

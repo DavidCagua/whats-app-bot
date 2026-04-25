@@ -40,15 +40,20 @@ logger = logging.getLogger(__name__)
 
 
 # Domain labels the classifier may emit.
+#
+# Design principle: domains map to USER CONCERNS, not to technical operations.
+# Browsing the catalog WHILE ordering is a sub-step of "order" — same concern.
+# A separate "catalog" domain was tried and removed (see docs/agents-vs-services.md)
+# because it overloaded two different concerns: in-bot browsing (an order sub-step)
+# and asset requests like "send me the menu URL" (a business-info request belonging
+# to customer_service).
 DOMAIN_ORDER = "order"
 DOMAIN_CUSTOMER_SERVICE = "customer_service"
-DOMAIN_CATALOG = "catalog"
 DOMAIN_CHAT = "chat"
 
 _VALID_DOMAINS = {
     DOMAIN_ORDER,
     DOMAIN_CUSTOMER_SERVICE,
-    DOMAIN_CATALOG,
     DOMAIN_CHAT,
 }
 
@@ -103,35 +108,54 @@ def _greeting_fast_path(
 
 # ── LLM classifier ──────────────────────────────────────────────────
 
-_ROUTER_SYSTEM_PROMPT = """Eres el router de un bot de WhatsApp para un restaurante. Lees el mensaje del cliente y lo divides en SEGMENTOS. Cada segmento tiene un dominio y el texto del mensaje que corresponde a ese dominio.
+_ROUTER_SYSTEM_PROMPT = """Eres el router de un bot de WhatsApp para un restaurante. Lees el mensaje del cliente y lo divides en SEGMENTOS. Cada segmento tiene un dominio (la INTENCIÓN del cliente) y el texto del mensaje que corresponde a ese dominio.
 
-La mayoría de los mensajes son UN solo segmento (una sola intención). Solo divide en múltiples segmentos cuando el cliente expresa claramente dos o más intenciones independientes en el mismo mensaje.
+La mayoría de los mensajes son UN solo segmento (una sola intención). Solo divide en múltiples segmentos cuando el cliente expresa claramente DOS O MÁS intenciones independientes en el mismo mensaje.
 
-Dominios disponibles:
-- "order": el cliente quiere ordenar, modificar su carrito o hacer checkout. Incluye nombrar productos con intención de compra, cantidades, "quiero X", "dame X", "quitar Y", "confirmar", "ya te pago", "ya listo".
-- "customer_service": preguntas sobre el negocio (horarios, ubicación, domicilio, medios de pago, teléfono) O estado/historial de pedidos propios.
-- "catalog": el cliente pregunta por productos o por el menú en general. "qué tienen", "tienen coca cola", "qué bebidas hay", "muéstrame el menú".
-- "chat": pequeña conversación o saludos con pregunta, sin intención clara en otro dominio.
+Dominios disponibles (por INTENCIÓN del cliente):
+
+- "order": el cliente quiere ORDENAR comida. Esto incluye TODO el funnel de pedido:
+    * Browsing/exploración del menú dentro del bot ("qué tienen", "qué bebidas hay", "tienen coca cola", "muéstrame el menú", "qué hamburguesas tienen", "qué trae la barracuda")
+    * Búsqueda por atributo ("algo con queso", "algo picante")
+    * Detalles de un producto específico ("qué trae la montesa")
+    * Agregar/modificar/quitar del carrito ("quiero X", "dame X", "una coca", "quita la cerveza")
+    * Checkout y confirmación ("listo", "ya te pago", "confirma", "procedamos")
+
+- "customer_service": el cliente pide INFORMACIÓN del negocio o pregunta por sus pedidos pasados/actuales:
+    * Información del negocio como ACTIVO/DATO: horarios, ubicación/dirección, teléfono, medios de pago, política de domicilio (cuánto cobran, hasta dónde llegan), LINK/URL del menú cuando lo pide enviado/compartido
+    * Estado de un pedido ya hecho ("dónde está mi pedido", "ya salió", "cuánto falta")
+    * Historial ("qué he pedido", "muéstrame mis pedidos anteriores")
+
+- "chat": pequeña conversación, agradecimientos, despedidas, sin intención clara en otro dominio.
+
+Reglas de desambiguación (claves):
+- VERBO de SOLICITAR/COMPARTIR + objeto INFORMACIÓN o LINK → customer_service.
+    "envíame la carta", "me mandas el menú", "pásame el link", "compárteme la dirección",
+    "me das el teléfono", "cuál es la dirección", "cuánto cobran de domicilio".
+    Razón: el cliente pide un dato/link del NEGOCIO como activo, no quiere navegar el menú dentro del bot.
+- VERBO de TENER/MOSTRAR + producto/categoría → order.
+    "qué tienen de bebidas", "tienen coca cola", "muéstrame el menú", "qué hamburguesas tienen",
+    "qué hay para tomar".
+    Razón: el cliente está browsing dentro del bot — eso es parte del funnel de ordenar.
+- "tienen domicilio?" → customer_service (pregunta por POLÍTICA de domicilio, no por un producto).
+- "tienen coca cola?" → order (browsing de productos).
+- "a qué hora me llega?" durante un pedido activo → customer_service (info de política/tiempo, no acción).
+- "ya te pago" / "listo" durante un pedido → order (señal de checkout).
 
 Reglas de segmentación:
-- Mensaje compuesto por UNA sola intención → UN segmento, con todo el texto del cliente.
-- Varios productos del mismo pedido → UN segmento (order), no lo separes producto por producto.
-  Ejemplo: "dame una barracuda y una cerveza" → UN segmento order.
+- UNA sola intención → UN segmento con todo el texto.
+- Varios productos del mismo pedido → UN segmento order, no separes producto por producto.
+    "dame una barracuda y una cerveza" → UN segmento order.
 - Dos intenciones DE DOMINIOS DIFERENTES → DOS segmentos.
-  Ejemplo: "dame una barracuda y a qué hora abren mañana" → order + customer_service.
-- Saludos cortos ("hola") al inicio de una pregunta → ABSORBER en el dominio principal, no como segmento "chat" aparte.
-  Ejemplo: "hola a qué hora abren" → UN segmento customer_service.
-- Nunca emitas más de 3 segmentos.
-- El texto de cada segmento puede ser un extracto del mensaje original o una reformulación breve; debe conservar todos los datos relevantes (productos, cantidades, campo pedido).
-
-Reglas de desambiguación (dentro de cada segmento):
-- "tienen coca cola?" → catalog
-- "tienen domicilio?" → customer_service (pregunta por política, no por producto)
-- "a qué hora me llega?" durante un pedido activo → customer_service
-- "ya te pago" / "listo" durante pedido → order
+    "dame una barracuda y a qué hora abren" → order + customer_service.
+    "envíame la carta y dame una barracuda" → customer_service + order.
+- Saludos al inicio de una pregunta → ABSORBER en el dominio principal.
+    "hola a qué hora abren" → UN segmento customer_service (no un "chat" aparte).
+- Máximo 3 segmentos.
+- El texto de cada segmento puede ser un extracto o una reformulación breve; debe conservar todos los datos relevantes.
 
 Responde SOLO con JSON en esta forma exacta, sin markdown, sin explicación:
-{"segments": [{"domain": "order" | "customer_service" | "catalog" | "chat", "text": "..."}]}
+{"segments": [{"domain": "order" | "customer_service" | "chat", "text": "..."}]}
 """
 
 

@@ -95,10 +95,12 @@ class TestBuildDispatchSegments:
             ("customer_service", "a qué hora abren"),
         ]
 
-    def test_catalog_domain_falls_back_to_primary(self):
-        # No dedicated catalog agent — should fall back to order.
+    def test_browsing_classifies_as_order(self):
+        # Browsing the menu inside the bot is part of the "order" user
+        # concern (see docs/agents-vs-services.md). Router should emit
+        # `order` for "qué bebidas tienen", not a separate catalog domain.
         result = _build_dispatch_segments(
-            router_segments=[(router.DOMAIN_CATALOG, "qué bebidas tienen")],
+            router_segments=[(router.DOMAIN_ORDER, "qué bebidas tienen")],
             enabled_agents=ENABLED_AGENTS,
             primary_agent_type="order",
             full_message="qué bebidas tienen",
@@ -124,34 +126,51 @@ class TestBuildDispatchSegments:
         )
         assert result == [("order", "a qué hora abren")]
 
-    def test_consecutive_catalog_and_order_coalesced_into_one_primary_call(self):
-        # Router splits "qué tienen y dame una coca" into two segments,
-        # both of which map to order (catalog → primary fallback).
-        # Result: one coalesced order call instead of two.
+    def test_repeated_same_router_domain_still_coalesces(self):
+        # Router over-decomposing a single-domain message → coalesce.
+        # Both segments are the SAME router domain (order) so they
+        # represent one logical intent the agent's planner can handle.
         result = _build_dispatch_segments(
             router_segments=[
-                (router.DOMAIN_CATALOG, "qué tienen"),
-                (router.DOMAIN_ORDER, "dame una coca"),
+                (router.DOMAIN_ORDER, "una coca"),
+                (router.DOMAIN_ORDER, "y una pepsi"),
             ],
             enabled_agents=ENABLED_AGENTS,
             primary_agent_type="order",
-            full_message="qué tienen y dame una coca",
+            full_message="una coca y una pepsi",
         )
-        assert result == [("order", "qué tienen\ndame una coca")]
+        assert result == [("order", "una coca\ny una pepsi")]
 
-    def test_mixed_with_catalog_and_cs_keeps_separation(self):
-        # catalog → order (fallback), customer_service → customer_service.
-        # Two different targets, no coalescing.
+    def test_browse_plus_cs_link_request_keeps_separation(self):
+        # The bug from 2026-04-25 reframed under the new domain layout:
+        # "envíame la carta" is now classified as customer_service (the
+        # menu URL is a business asset, not a browse action). "y dame una
+        # barracuda" is order. Different domains → kept separate so each
+        # agent runs with its proper segment, composer merges the replies.
         result = _build_dispatch_segments(
             router_segments=[
-                (router.DOMAIN_CATALOG, "qué hay"),
-                (router.DOMAIN_CUSTOMER_SERVICE, "a qué hora abren"),
+                (router.DOMAIN_CUSTOMER_SERVICE, "envíame la carta"),
+                (router.DOMAIN_ORDER, "y dame una barracuda"),
             ],
             enabled_agents=ENABLED_AGENTS,
             primary_agent_type="order",
-            full_message="qué hay y a qué hora abren",
+            full_message="envíame la carta y dame una barracuda",
         )
         assert result == [
-            ("order", "qué hay"),
-            ("customer_service", "a qué hora abren"),
+            ("customer_service", "envíame la carta"),
+            ("order", "y dame una barracuda"),
         ]
+
+    def test_browse_then_order_in_same_concern_coalesces(self):
+        # Repeated `order` domain (over-decomposed by router): both belong
+        # to the same user concern (ordering), coalesce into one call.
+        result = _build_dispatch_segments(
+            router_segments=[
+                (router.DOMAIN_ORDER, "qué bebidas tienen"),
+                (router.DOMAIN_ORDER, "y dame una coca"),
+            ],
+            enabled_agents=ENABLED_AGENTS,
+            primary_agent_type="order",
+            full_message="qué bebidas tienen y dame una coca",
+        )
+        assert result == [("order", "qué bebidas tienen\ny dame una coca")]

@@ -47,7 +47,6 @@ class TestRouterSingleSegmentClassification:
         [
             ('{"segments": [{"domain": "order", "text": "quiero una barracuda"}]}', router.DOMAIN_ORDER),
             ('{"segments": [{"domain": "customer_service", "text": "a qué hora abren"}]}', router.DOMAIN_CUSTOMER_SERVICE),
-            ('{"segments": [{"domain": "catalog", "text": "qué bebidas hay"}]}', router.DOMAIN_CATALOG),
             ('{"segments": [{"domain": "chat", "text": "gracias"}]}', router.DOMAIN_CHAT),
         ],
     )
@@ -68,10 +67,25 @@ class TestRouterSingleSegmentClassification:
         assert result.domain == router.DOMAIN_ORDER
 
     def test_extracts_json_from_wrapping_text(self):
-        mock_llm = _mock_llm_returning('Resultado: {"segments": [{"domain": "catalog", "text": "x"}]} listo.')
+        mock_llm = _mock_llm_returning('Resultado: {"segments": [{"domain": "chat", "text": "x"}]} listo.')
         with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
             result = router.route("x", BIELA_CONTEXT, "David")
-        assert result.domain == router.DOMAIN_CATALOG
+        assert result.domain == router.DOMAIN_CHAT
+
+    def test_obsolete_catalog_domain_rejected(self):
+        """`catalog` was retired (see docs/agents-vs-services.md).
+        If the classifier ever emits it the segment must be skipped, leaving
+        the segments list either filtered to the valid ones or None entirely."""
+        mock_llm = _mock_llm_returning(
+            '{"segments": ['
+            '{"domain": "catalog", "text": "qué bebidas hay"},'
+            '{"domain": "order", "text": "dame una coca"}'
+            ']}'
+        )
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("x", BIELA_CONTEXT, "David")
+        # Only the valid segment survives.
+        assert result.segments == [(router.DOMAIN_ORDER, "dame una coca")]
 
 
 class TestRouterMultiSegmentDecomposition:
@@ -100,7 +114,7 @@ class TestRouterMultiSegmentDecomposition:
             '{"segments": ['
             '{"domain": "order", "text": "a"},'
             '{"domain": "customer_service", "text": "b"},'
-            '{"domain": "catalog", "text": "c"}'
+            '{"domain": "chat", "text": "c"}'
             ']}'
         )
         mock_llm = _mock_llm_returning(raw)
