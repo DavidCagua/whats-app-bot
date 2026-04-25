@@ -547,6 +547,7 @@ class Order(Base):
     contact_phone = Column(Text, nullable=True)
     payment_method = Column(Text, nullable=True)
     cancellation_reason = Column(Text, nullable=True)
+    promo_discount_amount = Column(Numeric(12, 2), nullable=False, default=0, server_default='0')
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
@@ -554,6 +555,7 @@ class Order(Base):
     updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+    applied_promotions = relationship("OrderPromotion", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -568,6 +570,7 @@ class Order(Base):
             'contact_phone': self.contact_phone,
             'payment_method': self.payment_method,
             'cancellation_reason': self.cancellation_reason,
+            'promo_discount_amount': float(self.promo_discount_amount) if self.promo_discount_amount is not None else 0,
             'confirmed_at': self.confirmed_at.isoformat() if self.confirmed_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'cancelled_at': self.cancelled_at.isoformat() if self.cancelled_at else None,
@@ -656,6 +659,8 @@ class OrderItem(Base):
     unit_price = Column(Numeric(12, 2), nullable=False)
     line_total = Column(Numeric(12, 2), nullable=False)
     notes = Column(Text, nullable=True)
+    promotion_id = Column(UUID(as_uuid=True), ForeignKey('promotions.id', ondelete='SET NULL'), nullable=True, index=True)
+    promo_group_id = Column(UUID(as_uuid=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     order = relationship("Order", back_populates="order_items")
@@ -670,7 +675,106 @@ class OrderItem(Base):
             'unit_price': float(self.unit_price) if self.unit_price else 0,
             'line_total': float(self.line_total) if self.line_total else 0,
             'notes': self.notes,
+            'promotion_id': str(self.promotion_id) if self.promotion_id else None,
+            'promo_group_id': str(self.promo_group_id) if self.promo_group_id else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Promotion(Base):
+    """A configurable promo rule (schedule + components + pricing mode)."""
+    __tablename__ = 'promotions'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default='true')
+
+    # Pricing mode — exactly ONE non-null (DB CHECK enforces).
+    fixed_price = Column(Numeric(12, 2), nullable=True)
+    discount_amount = Column(Numeric(12, 2), nullable=True)
+    discount_pct = Column(SmallInteger, nullable=True)
+
+    # Schedule (NULL = no constraint on that dimension).
+    days_of_week = Column(ARRAY(SmallInteger), nullable=True)  # ISO 1=Mon..7=Sun
+    start_time = Column(Time, nullable=True)
+    end_time = Column(Time, nullable=True)
+    starts_on = Column(DateTime(timezone=True), nullable=True)
+    ends_on = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
+
+    components = relationship(
+        "PromotionComponent",
+        back_populates="promotion",
+        cascade="all, delete-orphan",
+    )
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'name': self.name,
+            'description': self.description,
+            'is_active': self.is_active,
+            'fixed_price': float(self.fixed_price) if self.fixed_price is not None else None,
+            'discount_amount': float(self.discount_amount) if self.discount_amount is not None else None,
+            'discount_pct': self.discount_pct,
+            'days_of_week': list(self.days_of_week) if self.days_of_week else None,
+            'start_time': self.start_time.isoformat() if self.start_time else None,
+            'end_time': self.end_time.isoformat() if self.end_time else None,
+            'starts_on': self.starts_on.isoformat() if self.starts_on else None,
+            'ends_on': self.ends_on.isoformat() if self.ends_on else None,
+            'components': [c.to_dict() for c in (self.components or [])],
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PromotionComponent(Base):
+    """One required (product, qty) pair belonging to a Promotion."""
+    __tablename__ = 'promotion_components'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    promotion_id = Column(UUID(as_uuid=True), ForeignKey('promotions.id', ondelete='CASCADE'), nullable=False, index=True)
+    product_id = Column(UUID(as_uuid=True), ForeignKey('products.id', ondelete='CASCADE'), nullable=False)
+    quantity = Column(SmallInteger, nullable=False, default=1, server_default='1')
+
+    promotion = relationship("Promotion", back_populates="components")
+    product = relationship("Product")
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'promotion_id': str(self.promotion_id),
+            'product_id': str(self.product_id),
+            'quantity': int(self.quantity or 0),
+        }
+
+
+class OrderPromotion(Base):
+    """Audit row: a promo applied to an order at place_order time."""
+    __tablename__ = 'order_promotions'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_id = Column(UUID(as_uuid=True), ForeignKey('orders.id', ondelete='CASCADE'), nullable=False, index=True)
+    promotion_id = Column(UUID(as_uuid=True), ForeignKey('promotions.id', ondelete='RESTRICT'), nullable=False, index=True)
+    promotion_name = Column(String(120), nullable=False)
+    pricing_mode = Column(String(20), nullable=False)
+    discount_applied = Column(Numeric(12, 2), nullable=False)
+    applied_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'order_id': str(self.order_id),
+            'promotion_id': str(self.promotion_id),
+            'promotion_name': self.promotion_name,
+            'pricing_mode': self.pricing_mode,
+            'discount_applied': float(self.discount_applied) if self.discount_applied is not None else 0,
+            'applied_at': self.applied_at.isoformat() if self.applied_at else None,
         }
 
 

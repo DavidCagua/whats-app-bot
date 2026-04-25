@@ -8,9 +8,10 @@ import unicodedata
 import uuid
 from typing import Dict, List, Optional, Any
 
-from .models import Product, Order, OrderItem, get_db_session
+from .models import Product, Order, OrderItem, OrderPromotion, get_db_session
 from .customer_service import customer_service
 from ..services.order_status_machine import STATUS_PENDING
+from ..services import promotion_service
 # Re-export AmbiguousProductError from the new search module for backward compat
 from ..services.product_search import (
     AmbiguousProductError,
@@ -335,7 +336,6 @@ class ProductOrderService:
                 return {"success": False, "error": "El pedido está vacío"}
 
             db_session = get_db_session()
-            total = 0.0
             order_items_data = []
 
             for item in items:
@@ -360,15 +360,29 @@ class ProductOrderService:
                     db_session.close()
                     return {"success": False, "error": f"Producto no encontrado: {product_id}"}
 
-                line_total = price * quantity
-                total += line_total
+                # Pre-promo line_total. promotion_service.match_and_apply
+                # may overwrite this and split the line into a bundled +
+                # leftover pair if a promo only consumes part of it.
                 order_items_data.append({
                     "product_id": product_id,
                     "quantity": quantity,
                     "unit_price": price,
-                    "line_total": line_total,
+                    "line_total": price * quantity,
                     "notes": (item.get("notes") or "").strip() or None,
+                    "promotion_id": item.get("promotion_id"),
+                    "promo_group_id": item.get("promo_group_id"),
                 })
+
+            # Run the promo matcher. Honors agent-set bindings, then
+            # greedily applies the best-discount promo to leftovers.
+            pricing = promotion_service.match_and_apply(
+                business_id=business_id,
+                cart_items=order_items_data,
+            )
+            order_items_data = pricing["items"]
+            subtotal = float(pricing["subtotal_after_promos"])
+            promo_discount = float(pricing["promo_discount_total"])
+            applications = pricing["applications"]
 
             # Create or update customer with delivery info
             cust = customer_service.get_customer(whatsapp_id)
@@ -392,7 +406,6 @@ class ProductOrderService:
                 )
                 customer_id = new_cust.get("id") if new_cust else None
 
-            subtotal = total
             grand_total = subtotal + float(delivery_fee)
 
             order = Order(
@@ -401,6 +414,7 @@ class ProductOrderService:
                 whatsapp_id=whatsapp_id,
                 status=STATUS_PENDING,
                 total_amount=grand_total,
+                promo_discount_amount=promo_discount,
                 notes=notes,
                 delivery_address=delivery_address,
                 contact_phone=contact_phone,
@@ -417,18 +431,41 @@ class ProductOrderService:
                     unit_price=oi["unit_price"],
                     line_total=oi["line_total"],
                     notes=oi.get("notes"),
+                    promotion_id=uuid.UUID(oi["promotion_id"]) if oi.get("promotion_id") else None,
+                    promo_group_id=uuid.UUID(oi["promo_group_id"]) if oi.get("promo_group_id") else None,
                 )
                 db_session.add(order_item)
+
+            for app in applications:
+                db_session.add(OrderPromotion(
+                    order_id=order.id,
+                    promotion_id=uuid.UUID(app["promotion_id"]),
+                    promotion_name=app["promotion_name"],
+                    pricing_mode=app["pricing_mode"],
+                    discount_applied=app["discount_applied"],
+                ))
 
             db_session.commit()
             order_id = str(order.id)
             db_session.close()
 
             logger.info(
-                f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, subtotal={subtotal}, "
-                f"delivery_fee={delivery_fee}, total={grand_total}, address={bool(delivery_address)}"
+                f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, "
+                f"subtotal={subtotal}, promo_discount={promo_discount}, "
+                f"delivery_fee={delivery_fee}, total={grand_total}, "
+                f"applied_promos={len(applications)}, address={bool(delivery_address)}"
             )
-            return {"success": True, "order_id": order_id, "subtotal": subtotal, "total": grand_total}
+            return {
+                "success": True,
+                "order_id": order_id,
+                "subtotal": subtotal,
+                "total": grand_total,
+                "promo_discount": promo_discount,
+                "applied_promos": [
+                    {"name": a["promotion_name"], "discount": a["discount_applied"]}
+                    for a in applications
+                ],
+            }
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error creating order: {e}")
             try:
