@@ -157,7 +157,8 @@ class TestHandoffChain:
 class TestAbortDuringDispatch:
     def test_abort_before_first_agent_returns_empty(self):
         with patch.object(dispatcher, "_is_aborted", return_value=True), \
-             patch.object(dispatcher, "execute_agent") as m:
+             patch.object(dispatcher, "execute_agent") as m, \
+             patch.object(dispatcher, "_consume_abort"):
             result = dispatcher.dispatch(
                 [("order", "x")],
                 wa_id="w", name="n", business_context=BIZ_CTX,
@@ -171,7 +172,8 @@ class TestAbortDuringDispatch:
         aborted_sequence = iter([False, True])
         with patch.object(dispatcher, "_is_aborted", side_effect=lambda k: next(aborted_sequence)), \
              patch.object(dispatcher, "execute_agent", return_value=_agent_output("order", "ok")), \
-             patch.object(dispatcher, "_persist_state_update"):
+             patch.object(dispatcher, "_persist_state_update"), \
+             patch.object(dispatcher, "_consume_abort"):
             result = dispatcher.dispatch(
                 [("order", "x"), ("customer_service", "y")],
                 wa_id="w", name="n", business_context=BIZ_CTX,
@@ -179,6 +181,79 @@ class TestAbortDuringDispatch:
             )
         assert result.aborted is True
         assert result.handoff_chain == ["order"]  # second segment never ran
+
+    def test_abort_preflight_consumes_flag_and_requeues_text(self):
+        """
+        Abort detected BEFORE first agent runs: dispatcher must clear the
+        flag (so next turn doesn't bail too) AND requeue the segment text
+        (so the next flusher picks up the user's lost message).
+        """
+        with patch.object(dispatcher, "_is_aborted", return_value=True), \
+             patch.object(dispatcher, "execute_agent"), \
+             patch.object(dispatcher, "_consume_abort") as m_consume:
+            dispatcher.dispatch(
+                [("order", "asi esta bien")],
+                wa_id="w", name="n", business_context=BIZ_CTX,
+                abort_key="abort:whatsapp:+57:+573177000722",
+            )
+        m_consume.assert_called_once_with(
+            "abort:whatsapp:+57:+573177000722", "asi esta bien",
+        )
+
+    def test_abort_mid_handoff_consumes_flag_without_requeue(self):
+        """
+        Abort detected mid-handoff: earlier hops already ran (partial work
+        has side effects), so we DON'T requeue text — but we still must
+        clear the flag so it doesn't strand the next turn.
+        """
+        first_output = _agent_output(
+            "order", "step 1",
+            handoff={"to": "customer_service", "segment": "info", "context": {}},
+        )
+        # First abort check (pre-flight) returns False, second (mid-handoff) returns True.
+        with patch.object(dispatcher, "_is_aborted", side_effect=[False, True]), \
+             patch.object(dispatcher, "execute_agent", return_value=first_output), \
+             patch.object(dispatcher, "_persist_state_update"), \
+             patch.object(dispatcher, "_consume_abort") as m_consume:
+            result = dispatcher.dispatch(
+                [("order", "x")],
+                wa_id="w", name="n", business_context=BIZ_CTX,
+                abort_key="abort:b:p",
+            )
+        assert result.aborted is True
+        m_consume.assert_called_once_with("abort:b:p", None)
+
+
+class TestConsumeAbortHelper:
+    """The helper itself: clear flag, optionally requeue, never raise."""
+
+    def test_clears_flag_and_requeues_when_text_provided(self):
+        with patch("app.services.debounce.clear_abort") as m_clear, \
+             patch("app.services.debounce.requeue_aborted_text") as m_requeue:
+            dispatcher._consume_abort("abort:b:p", "lost text")
+        m_requeue.assert_called_once_with("abort:b:p", "lost text")
+        m_clear.assert_called_once_with("abort:b:p")
+
+    def test_clears_flag_only_when_text_is_none(self):
+        with patch("app.services.debounce.clear_abort") as m_clear, \
+             patch("app.services.debounce.requeue_aborted_text") as m_requeue:
+            dispatcher._consume_abort("abort:b:p", None)
+        m_requeue.assert_not_called()
+        m_clear.assert_called_once_with("abort:b:p")
+
+    def test_no_op_when_abort_key_empty(self):
+        with patch("app.services.debounce.clear_abort") as m_clear, \
+             patch("app.services.debounce.requeue_aborted_text") as m_requeue:
+            dispatcher._consume_abort(None, "anything")
+            dispatcher._consume_abort("", "anything")
+        m_clear.assert_not_called()
+        m_requeue.assert_not_called()
+
+    def test_swallows_redis_exceptions(self):
+        with patch("app.services.debounce.clear_abort", side_effect=RuntimeError("boom")), \
+             patch("app.services.debounce.requeue_aborted_text", side_effect=RuntimeError("boom")):
+            # Must not raise.
+            dispatcher._consume_abort("abort:b:p", "x")
 
 
 class TestStatePersistenceBetweenHops:

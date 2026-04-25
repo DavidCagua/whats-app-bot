@@ -95,6 +95,11 @@ def dispatch(
     for (agent_type, segment_text) in segments:
         if _is_aborted(abort_key):
             logger.warning("[DISPATCHER] abort detected before starting agent=%s", agent_type)
+            # Consume the flag so it can't strand the next turn. And
+            # requeue this segment's text so the next debounce flusher
+            # picks it up coalesced with whatever newer messages
+            # triggered the abort. Without this the user's text is lost.
+            _consume_abort(abort_key, segment_text)
             result.aborted = True
             return result
 
@@ -118,6 +123,11 @@ def dispatch(
         while output.get("handoff") and len(result.handoff_chain) < MAX_HOPS:
             if _is_aborted(abort_key):
                 logger.warning("[DISPATCHER] abort detected mid-handoff chain")
+                # Mid-handoff abort: at this point earlier hops already
+                # ran, so we have a partial reply. Consume the flag and
+                # don't requeue (the partial work has visible side effects;
+                # the user can repeat their original message if needed).
+                _consume_abort(abort_key, None)
                 result.aborted = True
                 return result
 
@@ -232,6 +242,33 @@ def _is_aborted(abort_key: Optional[str]) -> bool:
         return check_abort(abort_key)
     except Exception:
         return False
+
+
+def _consume_abort(abort_key: Optional[str], requeue_text: Optional[str]) -> None:
+    """
+    Consume the abort flag once it has been honored, and (optionally)
+    push the aborted segment text back into the debounce buffer so the
+    next flusher picks it up coalesced with whatever newer messages
+    arrived.
+
+    Without consuming, the flag is sticky — every subsequent turn for
+    the same (to_number, phone) bails at the dispatcher pre-flight,
+    stranding the user with no replies. That's the production bug we
+    saw on 2026-04-25.
+
+    Without requeuing, the user's text is lost — they sent a message,
+    got nothing back, and the bot's next reply is for a later message
+    that never references the dropped one.
+    """
+    if not abort_key:
+        return
+    try:
+        from ..services.debounce import clear_abort, requeue_aborted_text
+        if requeue_text:
+            requeue_aborted_text(abort_key, requeue_text)
+        clear_abort(abort_key)
+    except Exception as exc:
+        logger.warning("[DISPATCHER] _consume_abort failed: %s", exc)
 
 
 def _error_output(agent_type: str, error_message: str) -> Dict[str, Any]:
