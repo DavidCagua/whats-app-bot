@@ -943,13 +943,18 @@ class OrderAgent(BaseAgent):
             logging.warning("[ORDER_AGENT] Planner intent=%s params=%s", intent, params)
 
             # ── Abort check: a newer message arrived while the planner ran.
-            # Skip executor + response so cart state stays clean.
+            # Skip executor + response so cart state stays clean. Requeue
+            # the aborted text into the debounce buffer so the next flusher
+            # coalesces it with newer arrivals — the planner then sees the
+            # full thread instead of only the trailing message. Scales to N
+            # consecutive aborts because requeue appends to the same buffer.
             if abort_key:
-                from ..services.debounce import check_abort, clear_abort
+                from ..services.debounce import check_abort, clear_abort, requeue_aborted_text
                 if check_abort(abort_key):
                     clear_abort(abort_key)
+                    requeue_aborted_text(abort_key, message_body)
                     logging.warning(
-                        "[ABORT] %s: aborting after planner (intent=%s) — newer message arrived",
+                        "[ABORT] %s: aborting after planner (intent=%s) — requeued for next flush",
                         wa_id, intent,
                     )
                     tracer.end_run(run_id, success=False, latency_ms=(time.time() - start_time) * 1000)

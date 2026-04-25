@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 
-DEBOUNCE_SECONDS = 0.0
+DEBOUNCE_SECONDS = float(os.getenv("DEBOUNCE_SECONDS", "1.5"))
 _FLUSHER_TTL = 90   # safety expiry on flusher lock: sleep(3) + max LLM time
 _MSG_TTL = 120      # safety expiry on buffered messages (seconds)
 _PROCESSING_TTL = 60  # safety expiry on processing flag (seconds)
@@ -72,6 +72,54 @@ def clear_abort(abort_key: str) -> None:
         r.delete(abort_key)
     except Exception:
         pass
+
+
+def requeue_aborted_text(abort_key: str, text: str) -> None:
+    """
+    On abort-after-planner, push the aborted user text back into the
+    debounce buffer so the next flusher coalesces it with newer arrivals.
+
+    We derive (to_number, phone) from the abort_key itself — format is
+    "abort:{to_number}:{phone}" — so callers don't need to thread the
+    routing info through the agent layer.
+
+    Wraps the text in a minimal Meta-shaped payload matching what
+    debounce_message() stores, so _flush()'s merge loop picks it up
+    transparently. Scales to N consecutive aborts — each call appends.
+    """
+    if not (abort_key and (text or "").strip()):
+        return
+    if not abort_key.startswith("abort:"):
+        return
+    # phone is the last segment (E.164, contains no ':'); to_number may
+    # be "whatsapp:+57..." so we rsplit instead of plain split.
+    rest = abort_key[len("abort:"):]
+    try:
+        to_number, phone = rest.rsplit(":", 1)
+    except ValueError:
+        return
+    if not (to_number and phone):
+        return
+    r = _get_redis()
+    if r is None:
+        return
+    key_msgs = f"debounce:msgs:{to_number}:{phone}"
+    payload = json.dumps({
+        "normalized_body": {
+            "entry": [{"changes": [{"value": {
+                "messages": [{"text": {"body": text.strip()}}]
+            }}]}]
+        }
+    })
+    try:
+        r.rpush(key_msgs, payload)
+        r.expire(key_msgs, _MSG_TTL)
+        logging.warning(
+            "[DEBOUNCE] %s: requeued aborted text (%d chars) to=%s",
+            phone, len(text), to_number,
+        )
+    except Exception as exc:
+        logging.warning("[DEBOUNCE] %s: requeue failed: %s", phone, exc)
 
 _redis_client = None
 _init_lock = threading.Lock()
