@@ -74,8 +74,14 @@ else
 
   echo "🧭 Alembic baseline + upgrade head..."
   cd "$REPO_ROOT"
-  DATABASE_URL="$LOCAL_DB_URL" alembic stamp head -q 2>&1 || DATABASE_URL="$LOCAL_DB_URL" alembic stamp head
-  DATABASE_URL="$LOCAL_DB_URL" alembic upgrade head
+  if ! python3 -c "import alembic" 2>/dev/null; then
+    echo "❌ Alembic no está instalado para este python3."
+    echo "   pip install -r requirements.txt"
+    echo "   (si usas venv: actívalo antes de correr este script)"
+    exit 1
+  fi
+  DATABASE_URL="$LOCAL_DB_URL" python3 -m alembic stamp head -q 2>&1 || DATABASE_URL="$LOCAL_DB_URL" python3 -m alembic stamp head
+  DATABASE_URL="$LOCAL_DB_URL" python3 -m alembic upgrade head
   echo "✅ Alembic at head."
   echo ""
 
