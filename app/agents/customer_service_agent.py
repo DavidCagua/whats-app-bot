@@ -45,12 +45,15 @@ from ..orchestration.customer_service_flow import (
     INTENT_GET_BUSINESS_INFO,
     INTENT_GET_ORDER_STATUS,
     INTENT_GET_ORDER_HISTORY,
+    INTENT_CANCEL_ORDER,
     INTENT_CUSTOMER_SERVICE_CHAT,
     RESULT_KIND_BUSINESS_INFO,
     RESULT_KIND_INFO_MISSING,
     RESULT_KIND_ORDER_STATUS,
     RESULT_KIND_NO_ORDER,
     RESULT_KIND_ORDER_HISTORY,
+    RESULT_KIND_ORDER_CANCELLED,
+    RESULT_KIND_CANCEL_NOT_ALLOWED,
     RESULT_KIND_CHAT_FALLBACK,
     RESULT_KIND_INTERNAL_ERROR,
     RESULT_KIND_HANDOFF,
@@ -60,11 +63,11 @@ from ..services import business_info_service
 from ..services.tracing import tracer
 
 
-PLANNER_SYSTEM_TEMPLATE = """Eres el clasificador de intención para el agente de servicio al cliente de un restaurante. Manejas preguntas pre-venta (horarios, ubicación, domicilio, medios de pago) Y post-venta (estado de pedido, historial).
+PLANNER_SYSTEM_TEMPLATE = """Eres el clasificador de intención para el agente de servicio al cliente de un restaurante. Manejas preguntas pre-venta (horarios, ubicación, domicilio, medios de pago) Y post-venta (estado de pedido, historial, cancelación).
 
 Devuelves EXACTAMENTE una intención en JSON. Nunca markdown, nunca explicación.
 
-Intenciones válidas: GET_BUSINESS_INFO, GET_ORDER_STATUS, GET_ORDER_HISTORY, CUSTOMER_SERVICE_CHAT.
+Intenciones válidas: GET_BUSINESS_INFO, GET_ORDER_STATUS, GET_ORDER_HISTORY, CANCEL_ORDER, CUSTOMER_SERVICE_CHAT.
 
 Reglas:
 - GET_BUSINESS_INFO con params.field: pregunta sobre el negocio. Valores de field:
@@ -78,6 +81,9 @@ Reglas:
   ("dónde está mi pedido", "ya salió?", "cuánto falta", "qué pasa con mi pedido"). Sin params.
 - GET_ORDER_HISTORY: el usuario pide ver pedidos anteriores
   ("qué he pedido antes", "muéstrame mis pedidos", "último pedido"). Sin params.
+- CANCEL_ORDER: el usuario quiere CANCELAR/anular su pedido más reciente
+  ("cancela mi pedido", "anula el pedido", "ya no quiero el pedido", "no lo manden",
+   "cancélalo", "déjalo así, no quiero pedir"). Sin params.
 - CUSTOMER_SERVICE_CHAT: cualquier otra cosa que no encaja. Sin params.
 
 Si el mensaje pregunta por varias cosas a la vez, elige la más específica. Si un dato no aparece arriba (ej. "¿hacen eventos?"), usa CUSTOMER_SERVICE_CHAT.
@@ -233,24 +239,53 @@ class CustomerServiceAgent(BaseAgent):
                 f"- {it.get('quantity')}x (${int(float(it.get('unit_price') or 0)):,})".replace(",", ".")
                 for it in items
             ) or "(sin items)"
-            # Status-aware framing rules so we don't over-promise about
-            # fulfillment state we don't track in real time.
+            cancellation_reason = (order.get("cancellation_reason") or "").strip() or None
+            eta_minutes = order.get("eta_minutes")
+
+            # State-only framing by default. Timing is conditional: only
+            # surface the ETA when the customer explicitly asks about time
+            # ("cuánto se demora", etc.). Tone should read like a polite
+            # restaurant rep — warm, brief, no filler, no time hints.
             status_rules = (
-                "REGLAS DE ESTADO:\n"
-                "- pending: 'Tu pedido está en preparación. Pronto nos comunicamos para coordinar entrega.'\n"
-                "- completed: 'Tu pedido ya fue entregado. ¿Algo más?'\n"
-                "- cancelled: 'Tu pedido fue cancelado. Si fue un error, cuéntame.'\n"
-                "- cualquier otro: reporta el estado literal y ofrece contactar al equipo."
+                "REGLAS DE ESTADO (UNA sola oración, tono cordial y profesional):\n"
+                "- pending: 'Tu pedido quedó registrado y está pendiente de confirmación. En un momento te avisamos.'\n"
+                "- confirmed: 'Tu pedido ya fue confirmado y lo estamos preparando con cuidado.'\n"
+                "- out_for_delivery: 'Tu pedido va en camino, ya casi llega.'\n"
+                "- completed: 'Tu pedido ya fue entregado. ¿Hay algo más en lo que te podamos ayudar?'\n"
+                "- cancelled: 'Tu pedido fue cancelado.' (si hay motivo de cancelación, intégralo con naturalidad)\n"
+                "- cualquier otro: reporta el estado literal sin inventar.\n"
+                "NUNCA digas 'en camino' a menos que el estado sea exactamente out_for_delivery."
+            )
+            timing_rules = (
+                "REGLAS DE TIEMPO (CRÍTICO):\n"
+                "- El cliente NO está preguntando por tiempo a menos que use frases como "
+                "'cuánto se demora', 'cuánto falta', 'en cuánto llega', 'cuándo llega', "
+                "'a qué hora', 'tarda mucho'. Preguntas como 'cómo va', 'qué pasó', "
+                "'dónde está' NO son preguntas por tiempo.\n"
+                "- Si el cliente NO pidió tiempo: NO menciones minutos, NO digas 'aproximado', "
+                "NO digas 'si quieres saber...', NO ofrezcas el ETA. Solo el estado.\n"
+                "- Si SÍ pidió tiempo y hay ETA: di 'un aproximado de X minutos' usando el "
+                "número exacto del bloque de datos.\n"
+                "- Si SÍ pidió tiempo y NO hay ETA: discúlpate breve y di que no tienes el tiempo exacto."
+            )
+            tone_rules = (
+                "TONO: profesional pero cálido (como mesero atento). "
+                "Máximo 2 oraciones. Sin emojis salvo que el cliente los use. "
+                "Sin frases relleno tipo 'si quieres saber', 'por si acaso', 'cualquier cosa'."
             )
             system = (
                 base_system
-                + "\nSITUACIÓN: El cliente pregunta por el estado de su pedido más reciente. "
-                + "Resume estado y items. NO inventes ETA exacto.\n" + status_rules
+                + "\nSITUACIÓN: El cliente pregunta por el estado de su pedido. "
+                "Responde con el estado actual. Tiempos SOLO si los pide explícitamente.\n"
+                + status_rules + "\n" + timing_rules + "\n" + tone_rules
             )
+            eta_str = f"{eta_minutes} min" if eta_minutes is not None else "—"
             total_str = f"${int(float(total or 0)):,}".replace(",", ".")
             inp = (
                 f"Pregunta del cliente: {message_body}\n"
                 f"Estado: {status}\n"
+                f"ETA aproximado: {eta_str}\n"
+                f"Motivo de cancelación: {cancellation_reason or '—'}\n"
                 f"Total: {total_str}\n"
                 f"Items:\n{items_lines}"
             )
@@ -282,6 +317,56 @@ class CustomerServiceAgent(BaseAgent):
             inp = (
                 f"Pregunta del cliente: {message_body}\n"
                 f"Pedidos:\n" + "\n".join(summaries)
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_ORDER_CANCELLED:
+            order = exec_result.get("order") or {}
+            order_id = (order.get("id") or "")[:8].upper()
+            system = (
+                base_system
+                + "\nSITUACIÓN: Acabas de cancelar el pedido del cliente exitosamente. "
+                "REGLAS:\n"
+                "- Confirma la cancelación de forma clara y profesional.\n"
+                "- Menciona el número de pedido si está disponible.\n"
+                "- Cierra ofreciendo ayuda futura ('cuando quieras volver a pedir, aquí estamos').\n"
+                "- 1-2 oraciones, tono cordial."
+            )
+            inp = (
+                f"Mensaje original del cliente: {message_body}\n"
+                f"Número de pedido cancelado: #{order_id}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_CANCEL_NOT_ALLOWED:
+            order = exec_result.get("order") or {}
+            status = order.get("status") or "desconocido"
+            order_id = (order.get("id") or "")[:8].upper()
+            phone = (
+                business_info_service.get_business_info(business_context, "phone")
+                if business_context else None
+            )
+            phone_clause = (
+                f"Si necesitas ayuda urgente, llámanos al {phone}."
+                if phone else
+                "Para cualquier ajuste, comunícate directamente con el restaurante."
+            )
+            system = (
+                base_system
+                + "\nSITUACIÓN: El cliente quiere cancelar pero el estado del pedido NO lo permite. "
+                "REGLAS POR ESTADO:\n"
+                "- out_for_delivery: 'Tu pedido ya va en camino, ya no lo podemos cancelar desde acá.'\n"
+                "- completed: 'Tu pedido ya fue entregado, no se puede cancelar.'\n"
+                "- cancelled: 'Tu pedido ya estaba cancelado.'\n"
+                "- cualquier otro: explica brevemente que no es posible cancelar en este estado.\n"
+                "Sé profesional y empático. NO inventes razones. "
+                f"Cierra con: '{phone_clause}'\n"
+                "Máximo 2 oraciones."
+            )
+            inp = (
+                f"Mensaje original del cliente: {message_body}\n"
+                f"Pedido: #{order_id}\n"
+                f"Estado actual: {status}"
             )
             return system, inp
 

@@ -21,7 +21,7 @@ from sqlalchemy import (
     MetaData,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY, ENUM as PgEnum
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from pgvector.sqlalchemy import Vector
 from datetime import datetime, timezone
@@ -515,6 +515,23 @@ class Service(Base):
         }
 
 
+# Postgres ENUM for orders.status. The type is owned by the alembic
+# migration (a1c2d3e4f5b6); create_type=False keeps SQLAlchemy from
+# trying to CREATE TYPE again on metadata.create_all in tests.
+ORDER_STATUS_VALUES = (
+    'pending',
+    'confirmed',
+    'out_for_delivery',
+    'completed',
+    'cancelled',
+)
+order_status_enum = PgEnum(
+    *ORDER_STATUS_VALUES,
+    name='order_status',
+    create_type=False,
+)
+
+
 class Order(Base):
     """Model for customer orders."""
     __tablename__ = 'orders'
@@ -523,12 +540,16 @@ class Order(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     customer_id = Column(Integer, ForeignKey('customers.id', ondelete='SET NULL'), nullable=True, index=True)
     whatsapp_id = Column(String(50), nullable=True)
-    status = Column(String(20), default='pending', index=True)
+    status = Column(order_status_enum, nullable=False, default='pending', server_default='pending', index=True)
     total_amount = Column(Numeric(12, 2), nullable=False, default=0)
     notes = Column(Text, nullable=True)
     delivery_address = Column(Text, nullable=True)
     contact_phone = Column(Text, nullable=True)
     payment_method = Column(Text, nullable=True)
+    cancellation_reason = Column(Text, nullable=True)
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
@@ -546,6 +567,10 @@ class Order(Base):
             'delivery_address': self.delivery_address,
             'contact_phone': self.contact_phone,
             'payment_method': self.payment_method,
+            'cancellation_reason': self.cancellation_reason,
+            'confirmed_at': self.confirmed_at.isoformat() if self.confirmed_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'cancelled_at': self.cancelled_at.isoformat() if self.cancelled_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

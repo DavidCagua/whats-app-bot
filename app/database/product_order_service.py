@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Any
 
 from .models import Product, Order, OrderItem, get_db_session
 from .customer_service import customer_service
+from ..services.order_status_machine import STATUS_PENDING
 # Re-export AmbiguousProductError from the new search module for backward compat
 from ..services.product_search import (
     AmbiguousProductError,
@@ -398,7 +399,7 @@ class ProductOrderService:
                 business_id=uuid.UUID(business_id),
                 customer_id=customer_id,
                 whatsapp_id=whatsapp_id,
-                status="pending",
+                status=STATUS_PENDING,
                 total_amount=grand_total,
                 notes=notes,
                 delivery_address=delivery_address,

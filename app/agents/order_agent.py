@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from .base_agent import BaseAgent, AgentOutput
 from ..services.order_tools import order_tools
+from ..services.order_eta import NOMINAL_RANGE_TEXT
 from ..orchestration.order_flow import (
     execute_order_intent,
     INTENT_ADD_TO_CART,
@@ -806,7 +807,7 @@ class OrderAgent(BaseAgent):
                 "- Celebra brevemente (ej. '¡Listo!').\n"
                 "- Muestra el número de pedido, items, subtotal, domicilio y total.\n"
                 "- Dile que pronto se comunicarán para coordinar la entrega.\n"
-                "- Indica que el pedido se demora entre 40 a 50 minutos en su entrega.\n"
+                f"- Indica que el pedido se demora {NOMINAL_RANGE_TEXT} en su entrega.\n"
                 "- 3-6 líneas."
             )
             inp = (

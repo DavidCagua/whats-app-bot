@@ -14,6 +14,7 @@ from ..database.product_order_service import (
 )
 from ..database.session_state_service import session_state_service
 from ..database.customer_service import customer_service
+from .order_eta import NOMINAL_RANGE_TEXT
 from . import catalog_cache
 
 
@@ -794,7 +795,7 @@ def place_order(injected_business_context: dict = None) -> str:
             f"🛵 Domicilio: {_format_price(delivery_fee)}\n"
             f"Total: {_format_price(total)}\n"
             f"Nos ponemos en contacto pronto para coordinar la entrega.\n"
-            f"⏱ Tiempo estimado de entrega: 40 a 50 minutos."
+            f"⏱ Tiempo estimado de entrega: {NOMINAL_RANGE_TEXT}."
         )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] place_order error: {e}")
