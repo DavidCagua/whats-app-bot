@@ -914,6 +914,13 @@ class OrderAgent(BaseAgent):
         try:
             tracer.start_run(run_id=run_id, user_id=wa_id, message_id=message_id, business_id=str(business_id))
 
+            # Handoff fast-path: when we got here via a customer-service
+            # handoff that already resolved a promo (e.g. user said "dame
+            # esa" after CS listed promos), skip the planner LLM and
+            # synthesize ADD_PROMO_TO_CART with the resolved id.
+            handoff_context = kwargs.get("handoff_context") or {}
+            handoff_promo_id = (handoff_context.get("promo_id") or "").strip() if handoff_context else ""
+
             # 1) Planner: one intent + params
             planner_system = PLANNER_SYSTEM_TEMPLATE.format(
                 order_state=order_state,
@@ -942,25 +949,37 @@ class OrderAgent(BaseAgent):
                 role = msg.get("role", "")
                 content = (msg.get("content") or msg.get("message", ""))[:400]
                 history_text += f"{role}: {content}\n"
-            planner_messages = [
-                SystemMessage(content=planner_system),
-                HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON: intent y params."),
-            ]
-            planner_response = self.llm.invoke(
-                planner_messages,
-                config={
-                    "run_name": "order_planner",
-                    "metadata": {
-                        "wa_id": wa_id,
-                        "business_id": str(business_id),
-                        "order_state": order_state,
-                        "stale_turn": stale_turn,
-                        "run_id": run_id,
+            if handoff_promo_id:
+                # Skip the planner LLM call entirely — the handoff already
+                # told us exactly what to do.
+                parsed = {
+                    "intent": "ADD_PROMO_TO_CART",
+                    "params": {"promo_id": handoff_promo_id},
+                }
+                logging.warning(
+                    "[ORDER_AGENT] handoff fast-path: promo_id=%s — skipping planner",
+                    handoff_promo_id,
+                )
+            else:
+                planner_messages = [
+                    SystemMessage(content=planner_system),
+                    HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON: intent y params."),
+                ]
+                planner_response = self.llm.invoke(
+                    planner_messages,
+                    config={
+                        "run_name": "order_planner",
+                        "metadata": {
+                            "wa_id": wa_id,
+                            "business_id": str(business_id),
+                            "order_state": order_state,
+                            "stale_turn": stale_turn,
+                            "run_id": run_id,
+                        },
                     },
-                },
-            )
-            planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
-            parsed = _parse_planner_response(planner_text)
+                )
+                planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
+                parsed = _parse_planner_response(planner_text)
             # Deterministic safety net: if the planner stripped a
             # qualifier token (e.g. "mora") from a disamb reply that
             # mapped to an exact option name, re-attach it as notes.

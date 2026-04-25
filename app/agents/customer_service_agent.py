@@ -46,6 +46,8 @@ from ..orchestration.customer_service_flow import (
     INTENT_GET_ORDER_STATUS,
     INTENT_GET_ORDER_HISTORY,
     INTENT_CANCEL_ORDER,
+    INTENT_GET_PROMOS,
+    INTENT_SELECT_LISTED_PROMO,
     INTENT_CUSTOMER_SERVICE_CHAT,
     RESULT_KIND_BUSINESS_INFO,
     RESULT_KIND_INFO_MISSING,
@@ -54,6 +56,9 @@ from ..orchestration.customer_service_flow import (
     RESULT_KIND_ORDER_HISTORY,
     RESULT_KIND_ORDER_CANCELLED,
     RESULT_KIND_CANCEL_NOT_ALLOWED,
+    RESULT_KIND_PROMOS_LIST,
+    RESULT_KIND_NO_PROMOS,
+    RESULT_KIND_PROMO_NOT_RESOLVED,
     RESULT_KIND_CHAT_FALLBACK,
     RESULT_KIND_INTERNAL_ERROR,
     RESULT_KIND_HANDOFF,
@@ -63,11 +68,11 @@ from ..services import business_info_service
 from ..services.tracing import tracer
 
 
-PLANNER_SYSTEM_TEMPLATE = """Eres el clasificador de intención para el agente de servicio al cliente de un restaurante. Manejas preguntas pre-venta (horarios, ubicación, domicilio, medios de pago) Y post-venta (estado de pedido, historial, cancelación).
+PLANNER_SYSTEM_TEMPLATE = """Eres el clasificador de intención para el agente de servicio al cliente de un restaurante. Manejas preguntas pre-venta (horarios, ubicación, domicilio, medios de pago, promos) Y post-venta (estado de pedido, historial, cancelación).
 
 Devuelves EXACTAMENTE una intención en JSON. Nunca markdown, nunca explicación.
 
-Intenciones válidas: GET_BUSINESS_INFO, GET_ORDER_STATUS, GET_ORDER_HISTORY, CANCEL_ORDER, CUSTOMER_SERVICE_CHAT.
+Intenciones válidas: GET_BUSINESS_INFO, GET_ORDER_STATUS, GET_ORDER_HISTORY, CANCEL_ORDER, GET_PROMOS, SELECT_LISTED_PROMO, CUSTOMER_SERVICE_CHAT.
 
 Reglas:
 - GET_BUSINESS_INFO con params.field: pregunta sobre el negocio. Valores de field:
@@ -84,6 +89,20 @@ Reglas:
 - CANCEL_ORDER: el usuario quiere CANCELAR/anular su pedido más reciente
   ("cancela mi pedido", "anula el pedido", "ya no quiero el pedido", "no lo manden",
    "cancélalo", "déjalo así, no quiero pedir"). Sin params.
+- GET_PROMOS: el usuario pregunta SI HAY promos / ofertas / combos disponibles, sin
+  identificar una en particular ("qué promos tienen", "tienen ofertas hoy",
+  "hay alguna promo", "qué combos manejan", "promos del lunes"). Sin params.
+  NO uses GET_PROMOS si el usuario nombra una promo específica que quiere — ese caso
+  va a SELECT_LISTED_PROMO o lo maneja el agente de pedido.
+- SELECT_LISTED_PROMO: cuando el bot ACABA DE LISTAR promos (turno anterior) y el
+  usuario eligió UNA. Pasa params según cómo eligió:
+    * params.selector="primera" / "segunda" / "1" / "2" cuando usa ordinal
+      ("la primera", "esa segunda", "dame la 1").
+    * params.query="<frase>" cuando nombra parte del título ("la del honey",
+      "el combo familiar", "esa de hamburguesa").
+    * params.promo_id="<uuid>" si el usuario por algún motivo cita el id.
+  Frases típicas: "dame esa", "quiero la primera", "la del honey burger",
+  "esa segunda", "sí, esa". El handoff al agente de pedido lo hace el backend.
 - CUSTOMER_SERVICE_CHAT: cualquier otra cosa que no encaja. Sin params.
 
 Si el mensaje pregunta por varias cosas a la vez, elige la más específica. Si un dato no aparece arriba (ej. "¿hacen eventos?"), usa CUSTOMER_SERVICE_CHAT.
@@ -370,6 +389,65 @@ class CustomerServiceAgent(BaseAgent):
             )
             return system, inp
 
+        if result_kind == RESULT_KIND_PROMOS_LIST:
+            promos = exec_result.get("promos") or []
+            promo_lines = []
+            for idx, p in enumerate(promos, start=1):
+                # Each line: "1. Nombre — precio promo $X (lunes y viernes)"
+                bits = [f"{idx}. {p.get('name')}"]
+                if p.get("price_kind"):
+                    bits.append(f"— {p['price_kind']}")
+                if p.get("schedule_label"):
+                    bits.append(f"({p['schedule_label']})")
+                if p.get("description"):
+                    bits.append(f"\n   {p['description']}")
+                promo_lines.append(" ".join(bits))
+            system = (
+                base_system
+                + "\nSITUACIÓN: El cliente preguntó por las promos disponibles. "
+                "REGLAS:\n"
+                "- Lista cada promo con su número (1., 2., ...), nombre, precio "
+                "y horario en una línea por promo.\n"
+                "- NO inventes promos; solo las del bloque de datos.\n"
+                "- Cierra con una invitación natural: 'Si quieres alguna, dime cuál' "
+                "o equivalente — corta.\n"
+                "- Tono cordial y breve."
+            )
+            inp = (
+                f"Pregunta del cliente: {message_body}\n"
+                f"Promos disponibles ahora:\n" + ("\n".join(promo_lines) if promo_lines else "(ninguna)")
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_NO_PROMOS:
+            system = (
+                base_system
+                + "\nSITUACIÓN: El cliente preguntó por promos pero hoy no hay ninguna activa. "
+                "REGLAS:\n"
+                "- Dile claro y amable que por hoy no hay promos activas.\n"
+                "- Ofrece ayudarle con el menú o un pedido normal.\n"
+                "- 1-2 oraciones."
+            )
+            inp = f"Pregunta del cliente: {message_body}"
+            return system, inp
+
+        if result_kind == RESULT_KIND_PROMO_NOT_RESOLVED:
+            listed_count = int(exec_result.get("listed_count") or 0)
+            system = (
+                base_system
+                + "\nSITUACIÓN: El cliente eligió una promo pero no pude identificar cuál. "
+                "REGLAS:\n"
+                "- Discúlpate breve y pídele que la nombre o use el número (ej. "
+                "'la primera', 'la 2').\n"
+                "- Si listed_count=0, primero ofrece volver a listar las promos.\n"
+                "- 1-2 oraciones, tono cordial."
+            )
+            inp = (
+                f"Pregunta del cliente: {message_body}\n"
+                f"Promos previamente listadas: {listed_count}"
+            )
+            return system, inp
+
         if result_kind == RESULT_KIND_CHAT_FALLBACK:
             fields = exec_result.get("available_fields") or []
             system = (
@@ -538,11 +616,20 @@ class CustomerServiceAgent(BaseAgent):
 
         tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
 
+        cs_ctx_update: Dict[str, Any] = {
+            "last_intent": intent,
+            "last_result_kind": result_kind,
+        }
+        # Persist the listed promo set so the next turn can resolve
+        # "dame esa" / "la primera" via SELECT_LISTED_PROMO.
+        if result_kind == RESULT_KIND_PROMOS_LIST:
+            cs_ctx_update["last_listed_promos"] = [
+                {"id": p.get("id"), "name": p.get("name")}
+                for p in (exec_result.get("promos") or [])
+            ]
+
         state_update = {
-            "customer_service_context": {
-                "last_intent": intent,
-                "last_result_kind": result_kind,
-            },
+            "customer_service_context": cs_ctx_update,
             "active_agents": ["customer_service"],
         }
 

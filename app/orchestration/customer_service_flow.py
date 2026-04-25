@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from ..database import order_lookup_service
 from ..database import order_modification_service
 from ..services import business_info_service
+from ..services import promotion_service
 from ..services.order_eta import estimate_remaining_minutes
 from ..services.order_modification_policy import (
     can_customer_cancel,
@@ -41,6 +42,8 @@ INTENT_GET_BUSINESS_INFO = "GET_BUSINESS_INFO"
 INTENT_GET_ORDER_STATUS = "GET_ORDER_STATUS"
 INTENT_GET_ORDER_HISTORY = "GET_ORDER_HISTORY"
 INTENT_CANCEL_ORDER = "CANCEL_ORDER"
+INTENT_GET_PROMOS = "GET_PROMOS"
+INTENT_SELECT_LISTED_PROMO = "SELECT_LISTED_PROMO"
 INTENT_CUSTOMER_SERVICE_CHAT = "CUSTOMER_SERVICE_CHAT"
 
 VALID_INTENTS = {
@@ -48,6 +51,8 @@ VALID_INTENTS = {
     INTENT_GET_ORDER_STATUS,
     INTENT_GET_ORDER_HISTORY,
     INTENT_CANCEL_ORDER,
+    INTENT_GET_PROMOS,
+    INTENT_SELECT_LISTED_PROMO,
     INTENT_CUSTOMER_SERVICE_CHAT,
 }
 
@@ -60,6 +65,9 @@ RESULT_KIND_NO_ORDER = "no_order"
 RESULT_KIND_ORDER_HISTORY = "order_history"
 RESULT_KIND_ORDER_CANCELLED = "order_cancelled"
 RESULT_KIND_CANCEL_NOT_ALLOWED = "cancel_not_allowed"
+RESULT_KIND_PROMOS_LIST = "promos_list"
+RESULT_KIND_NO_PROMOS = "no_promos"
+RESULT_KIND_PROMO_NOT_RESOLVED = "promo_not_resolved"
 RESULT_KIND_CHAT_FALLBACK = "cs_chat_fallback"
 RESULT_KIND_INTERNAL_ERROR = "cs_internal_error"
 # Signal that the agent should hand off mid-turn. The agent's execute()
@@ -149,6 +157,12 @@ def execute_customer_service_intent(
 
         if intent == INTENT_CANCEL_ORDER:
             return _handle_cancel_order(wa_id, business_id)
+
+        if intent == INTENT_GET_PROMOS:
+            return _handle_get_promos(wa_id, business_id)
+
+        if intent == INTENT_SELECT_LISTED_PROMO:
+            return _handle_select_listed_promo(wa_id, business_id, params, session)
 
         # CUSTOMER_SERVICE_CHAT fallback.
         return _base_result(
@@ -308,3 +322,164 @@ def _handle_cancel_order(
         RESULT_KIND_ORDER_CANCELLED,
         order=_clean_order_for_response(updated),
     )
+
+
+# ── Promo handlers ───────────────────────────────────────────────────
+
+
+def _summarize_promo_for_listing(promo: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Trim a Promotion.to_dict() down to what the response generator needs
+    to render a one-line summary, plus what the agent needs to remember
+    in `last_listed_promos` for ordinal/anaphora resolution next turn.
+    """
+    if promo.get("fixed_price") is not None:
+        price_label = f"${int(float(promo['fixed_price'])):,}".replace(",", ".")
+        price_kind = f"precio promo {price_label}"
+    elif promo.get("discount_amount") is not None:
+        amt = f"${int(float(promo['discount_amount'])):,}".replace(",", ".")
+        price_kind = f"descuento de {amt}"
+    elif promo.get("discount_pct") is not None:
+        price_kind = f"descuento del {int(promo['discount_pct'])}%"
+    else:
+        price_kind = ""
+
+    days = promo.get("days_of_week") or []
+    schedule_label = _spanish_days_label(days) if days else None
+
+    return {
+        "id": promo.get("id"),
+        "name": promo.get("name"),
+        "description": promo.get("description"),
+        "price_kind": price_kind,
+        "schedule_label": schedule_label,
+    }
+
+
+_DAY_NAMES_ES = {
+    1: "lunes", 2: "martes", 3: "miércoles", 4: "jueves",
+    5: "viernes", 6: "sábado", 7: "domingo",
+}
+
+
+def _spanish_days_label(days: List[int]) -> str:
+    """[1,5] → 'lunes y viernes'. Sorted, oxford-style join."""
+    names = [_DAY_NAMES_ES[d] for d in sorted(set(days)) if d in _DAY_NAMES_ES]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " y " + names[-1]
+
+
+def _handle_get_promos(wa_id: str, business_id: str) -> Dict[str, Any]:
+    """
+    Return promos that are active right now (schedule-filtered). The
+    agent persists the listed set into `customer_service_context.
+    last_listed_promos` so a follow-up "dame esa" / "la primera" can
+    resolve back to a concrete promo_id.
+    """
+    promos = promotion_service.list_active_promos(business_id)
+    if not promos:
+        return _base_result(wa_id, business_id, RESULT_KIND_NO_PROMOS)
+
+    summaries = [_summarize_promo_for_listing(p) for p in promos]
+    return _base_result(
+        wa_id, business_id,
+        RESULT_KIND_PROMOS_LIST,
+        promos=summaries,
+    )
+
+
+def _handle_select_listed_promo(
+    wa_id: str,
+    business_id: str,
+    params: Dict[str, Any],
+    session: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Resolve "dame una de esas" / "la primera" / "el combo de honey" against
+    the most recently listed promos (stored by the agent after GET_PROMOS).
+
+    Resolution priority (in order):
+      1. params.promo_id — already an exact id (rare; planner could pass it).
+      2. params.selector — ordinal: "first" | "second" | "1" | "2" | etc.
+      3. params.query — fuzzy substring match on name/description.
+
+    On success: emit RESULT_KIND_HANDOFF to the order agent with
+    `context.promo_id` so ADD_PROMO_TO_CART runs there. On miss: emit
+    RESULT_KIND_PROMO_NOT_RESOLVED so the agent re-lists / asks again.
+    """
+    cs_ctx = (session or {}).get("customer_service_context") or {}
+    listed = cs_ctx.get("last_listed_promos") or []
+
+    promo_id: Optional[str] = None
+
+    # 1) explicit id
+    raw_id = (params.get("promo_id") or "").strip()
+    if raw_id:
+        if any(p.get("id") == raw_id for p in listed):
+            promo_id = raw_id
+
+    # 2) ordinal selector
+    if promo_id is None:
+        selector = (params.get("selector") or "").strip().lower()
+        idx = _ordinal_to_index(selector) if selector else None
+        if idx is not None and 0 <= idx < len(listed):
+            promo_id = listed[idx].get("id")
+
+    # 3) fuzzy query
+    if promo_id is None:
+        query = (params.get("query") or "").strip().lower()
+        if query and listed:
+            matches = [
+                p for p in listed
+                if query in (p.get("name") or "").lower()
+            ]
+            if len(matches) == 1:
+                promo_id = matches[0].get("id")
+
+    if promo_id is None:
+        # Couldn't resolve. Surface to the agent so it can ask again
+        # (and possibly re-list).
+        return _base_result(
+            wa_id, business_id,
+            RESULT_KIND_PROMO_NOT_RESOLVED,
+            listed_count=len(listed),
+        )
+
+    # Hand off to the order agent. The order agent's planner will pick
+    # ADD_PROMO_TO_CART with promo_id from the handoff context segment.
+    return _base_result(
+        wa_id, business_id,
+        RESULT_KIND_HANDOFF,
+        handoff={
+            "to": "order",
+            "segment": "agregar promo seleccionada",
+            "context": {"promo_id": promo_id},
+        },
+    )
+
+
+_ORDINAL_WORDS_ES = {
+    "primer": 0, "primero": 0, "primera": 0, "1": 0, "uno": 0, "una": 0,
+    "segundo": 1, "segunda": 1, "2": 1, "dos": 1,
+    "tercero": 2, "tercera": 2, "3": 2, "tres": 2,
+    "cuarto": 3, "cuarta": 3, "4": 3, "cuatro": 3,
+    "quinto": 4, "quinta": 4, "5": 4, "cinco": 4,
+}
+
+
+def _ordinal_to_index(selector: str) -> Optional[int]:
+    """'la primera' → 0, '2' → 1, 'tercero' → 2. Returns None on miss."""
+    if not selector:
+        return None
+    s = selector.lower().strip()
+    # Strip leading articles / common framing tokens.
+    for prefix in ("la ", "el ", "los ", "las ", "esa ", "ese ", "esos ", "esas "):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+    for token in s.split():
+        if token in _ORDINAL_WORDS_ES:
+            return _ORDINAL_WORDS_ES[token]
+    return _ORDINAL_WORDS_ES.get(s)
