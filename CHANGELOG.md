@@ -11,6 +11,21 @@ context.
 
 ---
 
+## 2026-04-25 (debounce coalescing + abort carry-forward)
+
+- `85b8641` fix(debounce): coalesce burst messages and carry-forward on
+  abort. Bursts within `DEBOUNCE_SECONDS` (now env-driven, default
+  `1.5`) collapse into one planner call; aborted turns RPUSH their text
+  back into the same Redis list so the next flusher merges aborted +
+  newer messages. Fixes the Biela `+573150490281` / `+573177000722`
+  case where "una picada" + "que valor?" produced a generic "¿en qué
+  puedo ayudar?" reply because only the last message reached the
+  planner. Scales to N consecutive aborts. State machine untouched —
+  abort still fires before executor, so no rollback needed. 16 new
+  unit tests. Set `DEBOUNCE_SECONDS=1.5` on Railway.
+
+---
+
 ## 2026-04-16 (disambiguation overhaul + perf caching)
 
 Big day. Two debug sessions on Biela wa_ids `+573242261188` and
