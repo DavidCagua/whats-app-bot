@@ -223,8 +223,27 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
         if not entries:
             return
 
-        # ── Merge: concat text bodies into the first message's payload ─
-        combined_body = entries[0]["normalized_body"]
+        # ── Merge: concat text bodies into a base payload that has full
+        # identity (contacts.wa_id, messages.from, metadata). When abort
+        # carry-forward is in play, entries[0] may be a stripped requeue
+        # payload missing those fields — picking it as base would yield
+        # an empty wa_id and a Twilio "whatsapp:+" send error. So we
+        # pick the first entry whose contacts.wa_id is populated, and
+        # fall back to entries[0] only if none qualify.
+        def _has_full_identity(entry: dict) -> bool:
+            try:
+                contacts = (
+                    entry["normalized_body"]["entry"][0]["changes"][0]
+                    ["value"].get("contacts") or []
+                )
+                return bool(contacts and contacts[0].get("wa_id"))
+            except (KeyError, IndexError, TypeError):
+                return False
+
+        base_entry = next(
+            (e for e in entries if _has_full_identity(e)), entries[0]
+        )
+        combined_body = base_entry["normalized_body"]
         if len(entries) > 1:
             texts = []
             for entry in entries:

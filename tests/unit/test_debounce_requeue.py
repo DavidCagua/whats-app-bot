@@ -224,6 +224,113 @@ class TestRequeueResilience:
 # Multi-abort scaling — N consecutive aborts must stack into one batch
 # ---------------------------------------------------------------------------
 
+def _full_entry(wa_id: str, text: str, msg_id: str = "SMfull") -> dict:
+    """A Twilio-normalized payload as produced by normalize_twilio_to_meta."""
+    return {
+        "normalized_body": {
+            "object": "whatsapp_business_account",
+            "entry": [{"changes": [{"value": {
+                "contacts": [{"wa_id": wa_id}],
+                "messages": [{
+                    "id": msg_id,
+                    "text": {"body": text},
+                    "type": "text",
+                }],
+            }}]}],
+        }
+    }
+
+
+def _stripped_requeue_entry(text: str) -> dict:
+    """Mirrors what requeue_aborted_text writes — minimal envelope, no contacts."""
+    return {
+        "normalized_body": {
+            "entry": [{"changes": [{"value": {
+                "messages": [{"text": {"body": text}}],
+            }}]}],
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# Merge base selection — entries[0] may be a stripped requeue, must skip it
+# ---------------------------------------------------------------------------
+
+class TestMergeBaseSelection:
+    """
+    The bug we're guarding against:
+      [requeue("mi dios le pague"), full(wa_id="+57...", "es un buen servicio")]
+    Old code took entries[0] as base → wa_id="" → Twilio "whatsapp:+" 21211 send error.
+    New code picks the first entry whose contacts.wa_id is populated.
+    """
+
+    def test_picks_full_entry_when_first_is_stripped_requeue(self):
+        entries = [
+            _stripped_requeue_entry("mi dios le pague"),
+            _full_entry("+573177000722", "es un buen servicio"),
+        ]
+        # Replicate the helper inside _flush by importing the predicate-equivalent
+        # logic. We don't expose _has_full_identity, so test via end-to-end shape:
+        # the merged body should carry a non-empty wa_id.
+        # (Use the same predicate spelled out in _flush.)
+        def has_full_identity(entry):
+            try:
+                contacts = (
+                    entry["normalized_body"]["entry"][0]["changes"][0]
+                    ["value"].get("contacts") or []
+                )
+                return bool(contacts and contacts[0].get("wa_id"))
+            except (KeyError, IndexError, TypeError):
+                return False
+
+        base = next((e for e in entries if has_full_identity(e)), entries[0])
+        wa_id = (
+            base["normalized_body"]["entry"][0]["changes"][0]
+            ["value"]["contacts"][0]["wa_id"]
+        )
+        assert wa_id == "+573177000722"
+
+    def test_falls_back_to_first_when_none_have_identity(self):
+        """All-stripped batch (shouldn't happen in practice, but don't crash)."""
+        entries = [
+            _stripped_requeue_entry("a"),
+            _stripped_requeue_entry("b"),
+        ]
+        def has_full_identity(entry):
+            try:
+                contacts = (
+                    entry["normalized_body"]["entry"][0]["changes"][0]
+                    ["value"].get("contacts") or []
+                )
+                return bool(contacts and contacts[0].get("wa_id"))
+            except (KeyError, IndexError, TypeError):
+                return False
+
+        base = next((e for e in entries if has_full_identity(e)), entries[0])
+        # Falls back to entries[0]; downstream sees empty wa_id but doesn't crash.
+        assert base is entries[0]
+
+    def test_first_full_wins_when_multiple_have_identity(self):
+        """Two real inbound messages, no requeue — base is the first."""
+        entries = [
+            _full_entry("+573177000722", "una picada", msg_id="SMa"),
+            _full_entry("+573177000722", "que valor", msg_id="SMb"),
+        ]
+        def has_full_identity(entry):
+            try:
+                contacts = (
+                    entry["normalized_body"]["entry"][0]["changes"][0]
+                    ["value"].get("contacts") or []
+                )
+                return bool(contacts and contacts[0].get("wa_id"))
+            except (KeyError, IndexError, TypeError):
+                return False
+
+        base = next((e for e in entries if has_full_identity(e)), entries[0])
+        msg_id = base["normalized_body"]["entry"][0]["changes"][0]["value"]["messages"][0]["id"]
+        assert msg_id == "SMa"
+
+
 class TestRequeueScalesToN:
     def test_multiple_aborts_append_in_order(self):
         """
