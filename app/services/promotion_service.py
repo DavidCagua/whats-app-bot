@@ -32,13 +32,14 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import defaultdict
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import joinedload
 
-from ..database.models import Promotion, get_db_session
+from ..database.models import Business, Promotion, get_db_session
 
 
 logger = logging.getLogger(__name__)
@@ -48,18 +49,75 @@ PRICING_FIXED_PRICE = "fixed_price"
 PRICING_DISCOUNT_AMOUNT = "discount_amount"
 PRICING_DISCOUNT_PCT = "discount_pct"
 
+# Default for when a business has no timezone configured. Matches the
+# default in business_config_service.get_business_info.
+_DEFAULT_TIMEZONE = "America/Bogota"
+
+
+def _to_zoneinfo(tz_name: Optional[str]) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name or _DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning("[PROMO] unknown timezone %r, falling back to %s", tz_name, _DEFAULT_TIMEZONE)
+        return ZoneInfo(_DEFAULT_TIMEZONE)
+
+
+def _to_local(when: datetime, tz: ZoneInfo) -> datetime:
+    """Convert a datetime to the business's local timezone.
+    Naive inputs are treated as UTC (consistent with `datetime.now(timezone.utc)`)."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(tz)
+
+
+def timezone_from_business_context(business_context: Optional[Dict[str, Any]]) -> str:
+    """Pull the IANA tz name from business_context, defaulting safely.
+    Used by callers (CS flow, order_flow) to thread tz into the matcher."""
+    if not business_context:
+        return _DEFAULT_TIMEZONE
+    biz = business_context.get("business") or {}
+    settings = biz.get("settings") or {}
+    return settings.get("timezone") or _DEFAULT_TIMEZONE
+
+
+def _resolve_timezone(business_id: str, override: Optional[str]) -> str:
+    """Return the timezone to use. Caller-supplied override wins; otherwise
+    look up the business's stored setting; otherwise default."""
+    if override:
+        return override
+    if not business_id:
+        return _DEFAULT_TIMEZONE
+    session = get_db_session()
+    try:
+        row = (
+            session.query(Business)
+            .filter(Business.id == uuid.UUID(business_id))
+            .first()
+        )
+        if not row:
+            return _DEFAULT_TIMEZONE
+        settings = row.settings or {}
+        return settings.get("timezone") or _DEFAULT_TIMEZONE
+    except Exception as exc:
+        logger.warning("[PROMO] _resolve_timezone failed: %s", exc)
+        return _DEFAULT_TIMEZONE
+    finally:
+        session.close()
+
 
 def list_active_promos(
     business_id: str,
     when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Return active promos for a business that are valid at `when`
-    (default: now, UTC). Each item is `Promotion.to_dict()` shape.
+    (default: now). Schedule math runs in the business's local timezone.
     """
     if not business_id:
         return []
     when = when or datetime.now(timezone.utc)
+    tz = _to_zoneinfo(_resolve_timezone(business_id, timezone_name))
 
     session = get_db_session()
     try:
@@ -72,13 +130,72 @@ def list_active_promos(
             )
             .all()
         )
-        valid = [r for r in rows if _schedule_matches(r, when)]
+        valid = [r for r in rows if _schedule_matches(r, when, tz)]
         return [r.to_dict() for r in valid]
     except Exception as exc:
         logger.error("[PROMO] list_active_promos failed: %s", exc, exc_info=True)
         return []
     finally:
         session.close()
+
+
+def list_promos_for_listing(
+    business_id: str,
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Two-bucket view of active promos for the customer-service listing
+    surface: what's on RIGHT NOW vs. what's coming up later this week.
+
+    Returns:
+        {
+          "active_now": [<promo_dict>, ...],
+          "upcoming":   [<promo_dict + next_active_day>, ...],
+        }
+
+    "upcoming" only contains promos that are NOT active now AND that
+    have at least one day_of_week (or future starts_on/ends_on) where
+    they'd light up within the next 7 days. Each upcoming entry adds a
+    `next_active_day` field with the ISO weekday number of the next
+    occurrence so the response template can name it.
+    """
+    if not business_id:
+        return {"active_now": [], "upcoming": []}
+    when = when or datetime.now(timezone.utc)
+    tz = _to_zoneinfo(_resolve_timezone(business_id, timezone_name))
+    when_local = _to_local(when, tz)
+
+    session = get_db_session()
+    try:
+        rows = (
+            session.query(Promotion)
+            .options(joinedload(Promotion.components))
+            .filter(
+                Promotion.business_id == uuid.UUID(business_id),
+                Promotion.is_active.is_(True),
+            )
+            .all()
+        )
+    except Exception as exc:
+        logger.error("[PROMO] list_promos_for_listing failed: %s", exc, exc_info=True)
+        return {"active_now": [], "upcoming": []}
+    finally:
+        session.close()
+
+    active_now: List[Dict[str, Any]] = []
+    upcoming: List[Dict[str, Any]] = []
+    for r in rows:
+        if _schedule_matches(r, when, tz):
+            active_now.append(r.to_dict())
+            continue
+        next_day = _next_active_iso_weekday(r, when_local)
+        if next_day is not None:
+            d = r.to_dict()
+            d["next_active_day"] = next_day
+            upcoming.append(d)
+
+    return {"active_now": active_now, "upcoming": upcoming}
 
 
 def get_promotion(business_id: str, promotion_id: str) -> Optional[Dict[str, Any]]:
@@ -109,6 +226,7 @@ def match_and_apply(
     business_id: str,
     cart_items: List[Dict[str, Any]],
     when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Decide which promos apply to a cart and return pricing decisions.
@@ -177,7 +295,9 @@ def match_and_apply(
 
     # Step 2: matcher runs on the remaining unbound items.
     unbound_items = [it for it in items if not it["promotion_id"]]
-    available_promos = list_active_promos(business_id, when=when)
+    available_promos = list_active_promos(
+        business_id, when=when, timezone_name=timezone_name,
+    )
     # Promos with zero components (cart-wide discounts) require special
     # handling — defer those past Phase 1.
     component_promos = [p for p in available_promos if p.get("components")]
@@ -219,14 +339,25 @@ def _normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _schedule_matches(promo: Promotion, when: datetime) -> bool:
-    """True if `promo` is valid at `when` per its schedule columns."""
-    when_local = when  # business_timezone handling deferred to Phase 1.5
+def _promo_date(value: Any) -> Optional[date]:
+    """Coerce starts_on/ends_on (datetime or date) to a plain date."""
+    if value is None:
+        return None
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _schedule_matches(promo: Promotion, when: datetime, tz: ZoneInfo) -> bool:
+    """True if `promo` is valid at `when`, evaluated in the business's tz.
+    Comparing day-of-week / start_time / end_time in UTC misfires for
+    schedules that straddle midnight (e.g. 22:00–02:00) — must be local."""
+    when_local = _to_local(when, tz)
     today = when_local.date()
 
-    if promo.starts_on and today < (promo.starts_on.date() if isinstance(promo.starts_on, datetime) else promo.starts_on):
+    starts = _promo_date(promo.starts_on)
+    ends = _promo_date(promo.ends_on)
+    if starts and today < starts:
         return False
-    if promo.ends_on and today > (promo.ends_on.date() if isinstance(promo.ends_on, datetime) else promo.ends_on):
+    if ends and today > ends:
         return False
 
     if promo.days_of_week:
@@ -241,6 +372,35 @@ def _schedule_matches(promo: Promotion, when: datetime) -> bool:
         return False
 
     return True
+
+
+def _next_active_iso_weekday(promo: Promotion, when_local: datetime) -> Optional[int]:
+    """
+    Return the ISO weekday (1=Mon..7=Sun) of the next day in the next 7
+    on which `promo` would be active (ignoring time-of-day window).
+    Returns None when the promo has no day_of_week constraint (it'd be
+    "active today" by definition then), is past `ends_on`, or has no
+    matching day in the lookahead window.
+    """
+    days = promo.days_of_week or []
+    if not days:
+        return None  # always-on; not "upcoming", it's just not active right now (probably outside time window)
+    today = when_local.date()
+    ends = _promo_date(promo.ends_on)
+    starts = _promo_date(promo.starts_on)
+    today_iso = when_local.isoweekday()
+
+    for offset in range(1, 8):
+        candidate_date = today + timedelta(days=offset)
+        candidate_iso = ((today_iso - 1 + offset) % 7) + 1
+        if candidate_iso not in days:
+            continue
+        if starts and candidate_date < starts:
+            continue
+        if ends and candidate_date > ends:
+            continue
+        return candidate_iso
+    return None
 
 
 def _apply_promo_to_items(

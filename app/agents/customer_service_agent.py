@@ -391,9 +391,9 @@ class CustomerServiceAgent(BaseAgent):
 
         if result_kind == RESULT_KIND_PROMOS_LIST:
             promos = exec_result.get("promos") or []
-            promo_lines = []
-            for idx, p in enumerate(promos, start=1):
-                # Each line: "1. Nombre — precio promo $X (lunes y viernes)"
+            upcoming = exec_result.get("upcoming_promos") or []
+
+            def render(p: Dict[str, Any], idx: int) -> str:
                 bits = [f"{idx}. {p.get('name')}"]
                 if p.get("price_kind"):
                     bits.append(f"— {p['price_kind']}")
@@ -401,21 +401,32 @@ class CustomerServiceAgent(BaseAgent):
                     bits.append(f"({p['schedule_label']})")
                 if p.get("description"):
                     bits.append(f"\n   {p['description']}")
-                promo_lines.append(" ".join(bits))
+                return " ".join(bits)
+
+            active_lines = "\n".join(render(p, i) for i, p in enumerate(promos, start=1))
+            upcoming_lines = "\n".join(
+                render(p, i) for i, p in enumerate(upcoming, start=1)
+            )
+
             system = (
                 base_system
                 + "\nSITUACIÓN: El cliente preguntó por las promos disponibles. "
                 "REGLAS:\n"
-                "- Lista cada promo con su número (1., 2., ...), nombre, precio "
-                "y horario en una línea por promo.\n"
-                "- NO inventes promos; solo las del bloque de datos.\n"
-                "- Cierra con una invitación natural: 'Si quieres alguna, dime cuál' "
-                "o equivalente — corta.\n"
-                "- Tono cordial y breve."
+                "- Si hay 'Promos activas hoy', preséntalas primero (numeradas) y "
+                "  cierra invitando a elegir ('si quieres alguna, dime cuál').\n"
+                "- Si NO hay activas hoy pero SÍ hay 'Próximas promos', dile "
+                "  amablemente que hoy no hay promos disponibles, y menciona qué "
+                "  días aplican las próximas (ej. 'pero el viernes tenemos X').\n"
+                "- Si hay AMBAS (activas + próximas), prioriza las activas. Puedes "
+                "  añadir UNA línea breve mencionando que también hay otras durante "
+                "  la semana, sin listarlas todas.\n"
+                "- NO inventes promos; usa solo lo del bloque de datos.\n"
+                "- Tono cordial y breve. Una promo por línea."
             )
             inp = (
                 f"Pregunta del cliente: {message_body}\n"
-                f"Promos disponibles ahora:\n" + ("\n".join(promo_lines) if promo_lines else "(ninguna)")
+                f"Promos activas hoy:\n{active_lines or '(ninguna)'}\n\n"
+                f"Próximas promos esta semana:\n{upcoming_lines or '(ninguna)'}"
             )
             return system, inp
 

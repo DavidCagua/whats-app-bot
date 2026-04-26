@@ -159,7 +159,7 @@ def execute_customer_service_intent(
             return _handle_cancel_order(wa_id, business_id)
 
         if intent == INTENT_GET_PROMOS:
-            return _handle_get_promos(wa_id, business_id)
+            return _handle_get_promos(wa_id, business_id, business_context)
 
         if intent == INTENT_SELECT_LISTED_PROMO:
             return _handle_select_listed_promo(wa_id, business_id, params, session)
@@ -372,22 +372,36 @@ def _spanish_days_label(days: List[int]) -> str:
     return ", ".join(names[:-1]) + " y " + names[-1]
 
 
-def _handle_get_promos(wa_id: str, business_id: str) -> Dict[str, Any]:
+def _handle_get_promos(
+    wa_id: str,
+    business_id: str,
+    business_context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
     """
-    Return promos that are active right now (schedule-filtered). The
-    agent persists the listed set into `customer_service_context.
+    List promos in two buckets — active right now and upcoming this
+    week — so the response can say "hoy no tenemos, pero el viernes
+    sale X". Schedule math runs in the business's local timezone.
+
+    Persists the active set into `customer_service_context.
     last_listed_promos` so a follow-up "dame esa" / "la primera" can
-    resolve back to a concrete promo_id.
+    resolve back to a concrete promo_id. Upcoming promos aren't
+    persisted because the customer can't add a promo that isn't active.
     """
-    promos = promotion_service.list_active_promos(business_id)
-    if not promos:
+    tz_name = promotion_service.timezone_from_business_context(business_context)
+    buckets = promotion_service.list_promos_for_listing(
+        business_id, timezone_name=tz_name,
+    )
+    active = buckets.get("active_now") or []
+    upcoming = buckets.get("upcoming") or []
+
+    if not active and not upcoming:
         return _base_result(wa_id, business_id, RESULT_KIND_NO_PROMOS)
 
-    summaries = [_summarize_promo_for_listing(p) for p in promos]
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_PROMOS_LIST,
-        promos=summaries,
+        promos=[_summarize_promo_for_listing(p) for p in active],
+        upcoming_promos=[_summarize_promo_for_listing(p) for p in upcoming],
     )
 
 
