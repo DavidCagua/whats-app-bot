@@ -597,6 +597,7 @@ class OrderAgent(BaseAgent):
             # the customer will pay. Items bound to a promo collapse into
             # one labeled bundle line so the LLM doesn't talk about base
             # prices for items the customer got via a promo.
+            business_id = (business_context or {}).get("business_id") or ""
             preview = promotion_service.preview_cart(str(business_id), cart_after)
             total_after = int(preview["subtotal"])
             applied_promos = preview.get("applications") or []
@@ -886,6 +887,7 @@ class OrderAgent(BaseAgent):
             # Render the items list bundle-aware: items bound to a promo
             # collapse into a single "PROMO X" line so the customer sees
             # the promo as a unit, not as base-priced individual items.
+            business_id = (business_context or {}).get("business_id") or ""
             preview = promotion_service.preview_cart(str(business_id), items)
             items_lines = "\n".join(
                 (
