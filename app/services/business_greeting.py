@@ -35,6 +35,19 @@ def is_pure_greeting(message: Optional[str]) -> bool:
     return bool(_PURE_GREETING_RE.match(message.strip()))
 
 
+def _first_name(full_name: Optional[str]) -> str:
+    """First whitespace-split token, capitalized. Empty string when blank.
+
+    'david caguazango' → 'David'. 'MARÍA JOSÉ' → 'María'. Greeting reads
+    warmer with just the given name; full-name display belongs in formal
+    surfaces (receipts, courier tickets), not conversational openers.
+    """
+    if not full_name:
+        return ""
+    tokens = full_name.strip().split()
+    return tokens[0].capitalize() if tokens else ""
+
+
 # Hardcoded Biela defaults preserved from the prior order-agent GREET
 # branch so migrating this logic out doesn't change Biela's behavior.
 # Remove once every business has settings.hours_text + settings.menu_url.
@@ -70,7 +83,7 @@ def get_greeting(
         if custom_hours:
             hours_line = custom_hours
 
-    customer_name = (customer_name or "").strip()
+    customer_name = _first_name(customer_name)
     has_real_name = (
         customer_name
         and customer_name.lower() not in ("usuario", "cliente", "user")
