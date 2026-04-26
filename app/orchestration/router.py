@@ -125,6 +125,11 @@ Dominios disponibles (por INTENCIÓN del cliente):
     * Información del negocio como ACTIVO/DATO: horarios, ubicación/dirección, teléfono, medios de pago, política de domicilio (cuánto cobran, hasta dónde llegan), LINK/URL del menú cuando lo pide enviado/compartido
     * Estado de un pedido ya hecho ("dónde está mi pedido", "ya salió", "cuánto falta")
     * Historial ("qué he pedido", "muéstrame mis pedidos anteriores")
+    * PROMOCIONES como información — preguntas sobre qué promos / ofertas / combos hay:
+      "qué promos tienes", "qué promos tienen hoy", "tienes alguna promo",
+      "hay ofertas", "qué combos manejan", "promociones del lunes".
+      Razón: el cliente pregunta SI hay promos disponibles, no está pidiendo
+      una específica para agregar al carrito.
 
 - "chat": pequeña conversación, agradecimientos, despedidas, sin intención clara en otro dominio.
 
@@ -139,6 +144,10 @@ Reglas de desambiguación (claves):
     Razón: el cliente está browsing dentro del bot — eso es parte del funnel de ordenar.
 - "tienen domicilio?" → customer_service (pregunta por POLÍTICA de domicilio, no por un producto).
 - "tienen coca cola?" → order (browsing de productos).
+- "qué promos tienen?" / "tienes alguna promo?" / "qué combos manejan?" → customer_service
+  (pregunta por DISPONIBILIDAD de promos como dato, NO está agregando una al carrito).
+- "dame la promo del honey" / "agrega esa promo" / "quiero el combo lunes" → order
+  (acción sobre el carrito; el order agent resuelve la promo y la agrega).
 - "a qué hora me llega?" durante un pedido activo → customer_service (info de política/tiempo, no acción).
 - "ya te pago" / "listo" durante un pedido → order (señal de checkout).
 

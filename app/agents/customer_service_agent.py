@@ -59,6 +59,7 @@ from ..orchestration.customer_service_flow import (
     RESULT_KIND_PROMOS_LIST,
     RESULT_KIND_NO_PROMOS,
     RESULT_KIND_PROMO_NOT_RESOLVED,
+    RESULT_KIND_PROMO_AMBIGUOUS,
     RESULT_KIND_CHAT_FALLBACK,
     RESULT_KIND_INTERNAL_ERROR,
     RESULT_KIND_HANDOFF,
@@ -444,18 +445,46 @@ class CustomerServiceAgent(BaseAgent):
 
         if result_kind == RESULT_KIND_PROMO_NOT_RESOLVED:
             listed_count = int(exec_result.get("listed_count") or 0)
+            query = exec_result.get("query")
             system = (
                 base_system
-                + "\nSITUACIÓN: El cliente eligió una promo pero no pude identificar cuál. "
+                + "\nSITUACIÓN: El cliente pidió una promo pero no encontré ninguna que coincida. "
                 "REGLAS:\n"
-                "- Discúlpate breve y pídele que la nombre o use el número (ej. "
-                "'la primera', 'la 2').\n"
-                "- Si listed_count=0, primero ofrece volver a listar las promos.\n"
+                "- Si el cliente nombró algo (hay 'Texto buscado'), dile que no hay una promo "
+                "  activa con ese nombre y ofrece listar las que sí están disponibles hoy.\n"
+                "- Si NO nombró nada (solo 'dame una de esas') y listed_count=0, ofrece "
+                "  primero listar las promos disponibles.\n"
+                "- Si listed_count > 0 y NO nombró nada, pide que la identifique por "
+                "  número (ej. 'la primera', 'la 2') o por nombre.\n"
                 "- 1-2 oraciones, tono cordial."
             )
             inp = (
                 f"Pregunta del cliente: {message_body}\n"
+                f"Texto buscado: {query or '(ninguno)'}\n"
                 f"Promos previamente listadas: {listed_count}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_PROMO_AMBIGUOUS:
+            query = exec_result.get("query") or ""
+            candidates = exec_result.get("candidates") or []
+            options_lines = "\n".join(
+                f"{idx}. {c.get('name')}"
+                for idx, c in enumerate(candidates, start=1)
+            )
+            system = (
+                base_system
+                + "\nSITUACIÓN: El cliente pidió una promo y varias coinciden. "
+                "REGLAS:\n"
+                "- Lista las opciones numeradas (1., 2., ...) en una línea cada una.\n"
+                "- Pide al cliente que indique cuál — por número o por nombre.\n"
+                "- NO inventes opciones; usa solo las del bloque de datos.\n"
+                "- 2-3 líneas, tono cordial."
+            )
+            inp = (
+                f"Pregunta del cliente: {message_body}\n"
+                f"Texto buscado: {query}\n"
+                f"Opciones que coinciden:\n{options_lines}"
             )
             return system, inp
 

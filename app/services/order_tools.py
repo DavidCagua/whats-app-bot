@@ -63,61 +63,6 @@ def _is_ingredient_like_query(query: str) -> bool:
     return bool(words & _INGREDIENT_LIKE_WORDS)
 
 
-# Filler tokens to drop before fuzzy-matching a promo by name. Lets us
-# resolve "dame una promo de honey" → just "honey" → match against
-# "2 Honey Burger con papas".
-_PROMO_QUERY_STOPWORDS = frozenset({
-    "promo", "promos", "promocion", "promoción", "promociones",
-    "combo", "combos", "oferta", "ofertas",
-    "el", "la", "los", "las", "un", "una", "unos", "unas",
-    "de", "del", "para", "por", "con",
-    "dame", "quiero", "ese", "esa", "esos", "esas", "este", "esta",
-    "ese", "mi", "tu", "su",
-})
-
-
-def _normalize_promo_query(query: str) -> List[str]:
-    """Lowercase, strip filler tokens, return remaining content tokens."""
-    if not query:
-        return []
-    raw = [t for t in query.lower().strip().split() if t]
-    return [t for t in raw if t not in _PROMO_QUERY_STOPWORDS]
-
-
-def _match_promos_by_query(query: str, promos: List[Dict]) -> List[Dict]:
-    """
-    Loose substring + token-overlap matching against promo names.
-    Three passes, return the best:
-      1. Exact whole-query substring (after stopword strip) — most precise.
-      2. Token-overlap: every content token from the query must appear in
-         the promo name. Catches "promo de honey" → "2 Honey Burger".
-      3. Any-token overlap as a fallback when above misses.
-    """
-    if not promos:
-        return []
-    tokens = _normalize_promo_query(query)
-    if not tokens:
-        return []
-    joined = " ".join(tokens)
-
-    def name_lower(p: Dict) -> str:
-        return (p.get("name") or "").lower()
-
-    # Pass 1: stripped full-query substring.
-    pass1 = [p for p in promos if joined in name_lower(p)]
-    if pass1:
-        return pass1
-
-    # Pass 2: every content token present.
-    pass2 = [p for p in promos if all(t in name_lower(p) for t in tokens)]
-    if pass2:
-        return pass2
-
-    # Pass 3: at least one content token present (most lenient).
-    pass3 = [p for p in promos if any(t in name_lower(p) for t in tokens)]
-    return pass3
-
-
 def _get_context(injected_business_context: Optional[Dict]) -> tuple:
     """Extract business_id and wa_id from injected context."""
     ctx = injected_business_context or {}
@@ -907,7 +852,9 @@ def add_promo_to_cart(
                     return "❌ Esa promo no aplica en este horario."
                 return "❌ No encontré esa promo."
         elif promo_query:
-            matches = _match_promos_by_query(promo_query, active_promos)
+            matches = promotion_service.find_promo_by_query(
+                business_id, promo_query, timezone_name=tz_name,
+            )
             if not matches:
                 return f"❌ No encontré una promo activa que coincida con '{promo_query}'."
             if len(matches) > 1:

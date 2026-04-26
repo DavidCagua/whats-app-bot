@@ -68,6 +68,7 @@ RESULT_KIND_CANCEL_NOT_ALLOWED = "cancel_not_allowed"
 RESULT_KIND_PROMOS_LIST = "promos_list"
 RESULT_KIND_NO_PROMOS = "no_promos"
 RESULT_KIND_PROMO_NOT_RESOLVED = "promo_not_resolved"
+RESULT_KIND_PROMO_AMBIGUOUS = "promo_ambiguous"
 RESULT_KIND_CHAT_FALLBACK = "cs_chat_fallback"
 RESULT_KIND_INTERNAL_ERROR = "cs_internal_error"
 # Signal that the agent should hand off mid-turn. The agent's execute()
@@ -412,17 +413,27 @@ def _handle_select_listed_promo(
     session: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    Resolve "dame una de esas" / "la primera" / "el combo de honey" against
-    the most recently listed promos (stored by the agent after GET_PROMOS).
+    Resolve a promo reference into a concrete `promo_id` and hand off
+    to the order agent for cart-add. Two surfaces feed in here:
 
-    Resolution priority (in order):
-      1. params.promo_id — already an exact id (rare; planner could pass it).
-      2. params.selector — ordinal: "first" | "second" | "1" | "2" | etc.
-      3. params.query — fuzzy substring match on name/description.
+    A) Anaphora after a list: the planner saw "dame esa" / "la primera"
+       / "la del honey" and we lean on `last_listed_promos`.
+    B) Cold ask: planner ambiguates a fresh "dame una promo de honey"
+       as SELECT_LISTED_PROMO too. There's no list to select from, so
+       fall through to a query against ALL active promos via the shared
+       matcher.
 
-    On success: emit RESULT_KIND_HANDOFF to the order agent with
-    `context.promo_id` so ADD_PROMO_TO_CART runs there. On miss: emit
-    RESULT_KIND_PROMO_NOT_RESOLVED so the agent re-lists / asks again.
+    Resolution priority:
+      1. params.promo_id — exact id (rare; planner could pass it).
+      2. params.selector — ordinal against `last_listed_promos`.
+      3. params.query against `last_listed_promos` (anaphora pass).
+      4. params.query against ALL active promos (cold-ask pass).
+
+    Outcomes:
+      - 1 match → RESULT_KIND_HANDOFF with concrete promo_id.
+      - 2+ matches → RESULT_KIND_PROMO_AMBIGUOUS (asks the customer
+        to be more specific).
+      - 0 matches → RESULT_KIND_PROMO_NOT_RESOLVED.
     """
     cs_ctx = (session or {}).get("customer_service_context") or {}
     listed = cs_ctx.get("last_listed_promos") or []
@@ -435,35 +446,50 @@ def _handle_select_listed_promo(
         if any(p.get("id") == raw_id for p in listed):
             promo_id = raw_id
 
-    # 2) ordinal selector
+    # 2) ordinal selector against the listed set
     if promo_id is None:
         selector = (params.get("selector") or "").strip().lower()
         idx = _ordinal_to_index(selector) if selector else None
         if idx is not None and 0 <= idx < len(listed):
             promo_id = listed[idx].get("id")
 
-    # 3) fuzzy query
-    if promo_id is None:
-        query = (params.get("query") or "").strip().lower()
-        if query and listed:
-            matches = [
-                p for p in listed
-                if query in (p.get("name") or "").lower()
-            ]
-            if len(matches) == 1:
-                promo_id = matches[0].get("id")
+    # 3) fuzzy query against the listed set (anaphora pass).
+    raw_query = (params.get("query") or "").strip()
+    if promo_id is None and raw_query and listed:
+        q = raw_query.lower()
+        matches = [p for p in listed if q in (p.get("name") or "").lower()]
+        if len(matches) == 1:
+            promo_id = matches[0].get("id")
+
+    # 4) Cold-ask pass: query against ALL active promos via shared matcher.
+    # Triggered when the planner picked SELECT_LISTED_PROMO but there's no
+    # listed set (or the anaphora pass missed). This is the bridge that
+    # lets a fresh "me das una promo de honey" still resolve correctly.
+    if promo_id is None and raw_query:
+        all_matches = promotion_service.find_promo_by_query(business_id, raw_query)
+        if len(all_matches) == 1:
+            promo_id = all_matches[0].get("id")
+        elif len(all_matches) >= 2:
+            return _base_result(
+                wa_id, business_id,
+                RESULT_KIND_PROMO_AMBIGUOUS,
+                query=raw_query,
+                candidates=[
+                    {"id": p.get("id"), "name": p.get("name")}
+                    for p in all_matches[:5]
+                ],
+            )
 
     if promo_id is None:
-        # Couldn't resolve. Surface to the agent so it can ask again
-        # (and possibly re-list).
         return _base_result(
             wa_id, business_id,
             RESULT_KIND_PROMO_NOT_RESOLVED,
             listed_count=len(listed),
+            query=raw_query or None,
         )
 
-    # Hand off to the order agent. The order agent's planner will pick
-    # ADD_PROMO_TO_CART with promo_id from the handoff context segment.
+    # Hand off to the order agent. The order agent's fast-path consumes
+    # context.promo_id and synthesizes ADD_PROMO_TO_CART directly.
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_HANDOFF,

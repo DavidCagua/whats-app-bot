@@ -221,6 +221,77 @@ def get_promotion(business_id: str, promotion_id: str) -> Optional[Dict[str, Any
         session.close()
 
 
+# Filler tokens to drop before fuzzy-matching a promo by name. Lets us
+# resolve "dame una promo de honey" → just "honey" → match against
+# "2 Honey Burger con papas".
+_PROMO_QUERY_STOPWORDS = frozenset({
+    "promo", "promos", "promocion", "promoción", "promociones",
+    "combo", "combos", "oferta", "ofertas",
+    "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "para", "por", "con",
+    "dame", "quiero", "ese", "esa", "esos", "esas", "este", "esta",
+    "mi", "tu", "su",
+})
+
+
+def _normalize_promo_query(query: str) -> List[str]:
+    """Lowercase, strip filler tokens, return remaining content tokens."""
+    if not query:
+        return []
+    raw = [t for t in query.lower().strip().split() if t]
+    return [t for t in raw if t not in _PROMO_QUERY_STOPWORDS]
+
+
+def find_promo_by_query(
+    business_id: str,
+    query: str,
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Resolve a free-text promo reference against the active list.
+
+    Three matching passes against each promo's `name`, returning the
+    most-precise non-empty result:
+      1. Stripped full-query substring.
+      2. All content tokens present.
+      3. Any content token present (most lenient).
+
+    Returns 0, 1, or many matches. Caller decides UX:
+      - 0 → "no encontré esa promo"
+      - 1 → resolve to that promo (`promo["id"]`)
+      - many → ambiguity, ask the customer to be more specific
+
+    Schedule-filtered: only matches promos active at `when` in the
+    business's local timezone.
+    """
+    if not business_id or not query:
+        return []
+
+    promos = list_active_promos(business_id, when=when, timezone_name=timezone_name)
+    if not promos:
+        return []
+
+    tokens = _normalize_promo_query(query)
+    if not tokens:
+        return []
+    joined = " ".join(tokens)
+
+    def name_lower(p: Dict[str, Any]) -> str:
+        return (p.get("name") or "").lower()
+
+    pass1 = [p for p in promos if joined in name_lower(p)]
+    if pass1:
+        return pass1
+
+    pass2 = [p for p in promos if all(t in name_lower(p) for t in tokens)]
+    if pass2:
+        return pass2
+
+    pass3 = [p for p in promos if any(t in name_lower(p) for t in tokens)]
+    return pass3
+
+
 def match_and_apply(
     *,
     business_id: str,

@@ -310,6 +310,32 @@ def apply_disamb_reply_flavor_fallback(
     return parsed
 
 
+# Tokens that indicate the customer is asking ABOUT promos (discovery /
+# listing) rather than naming one to add. Used as a defensive override
+# when the order planner falls through to CHAT — those messages belong
+# to the customer service agent's GET_PROMOS path. Action verbs like
+# "dame", "quiero" deliberately excluded: those are cart-add and stay
+# on the order side via ADD_PROMO_TO_CART.
+_PROMO_DISCOVERY_PATTERN = re.compile(
+    r"\b(promo|promos|promoci(?:o|ó)n(?:es)?|oferta|ofertas|combo|combos)\b",
+    re.IGNORECASE,
+)
+_PROMO_ACTION_VERBS = re.compile(
+    r"\b(dame|quiero|agrega(?:me)?|p[oó]ngame|m[ae]te|añade|sumame|me das)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_promo_discovery(message: str) -> bool:
+    """True when message mentions a promo concept WITHOUT a cart-add verb.
+    Lets a misrouted "qué promos tienen?" reach customer_service."""
+    if not message:
+        return False
+    if not _PROMO_DISCOVERY_PATTERN.search(message):
+        return False
+    return _PROMO_ACTION_VERBS.search(message) is None
+
+
 def _parse_planner_response(text: str) -> Dict[str, Any]:
     """Extract intent and params from planner LLM response (JSON only or embedded)."""
     text = (text or "").strip()
@@ -989,6 +1015,33 @@ class OrderAgent(BaseAgent):
             intent = (parsed.get("intent") or INTENT_CHAT).upper().replace(" ", "_")
             params = parsed.get("params") or {}
             logging.warning("[ORDER_AGENT] Planner intent=%s params=%s", intent, params)
+
+            # Defensive promo-discovery handoff: when the router misclassifies
+            # a "qué promos hay" question as `order` and our planner picks
+            # CHAT (because there's no add-to-cart intent expressed), bounce
+            # it to customer_service which owns promo listings. Empty cart
+            # only — once a cart exists, an order-side CHAT is more likely
+            # to be a real conversational reply than a promo question.
+            if (
+                intent == INTENT_CHAT
+                and not items
+                and _looks_like_promo_discovery(message_body)
+            ):
+                logging.warning(
+                    "[ORDER_AGENT] promo-discovery defensive handoff -> customer_service (msg=%r)",
+                    message_body[:80],
+                )
+                tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+                return {
+                    "agent_type": self.agent_type,
+                    "message": "",
+                    "state_update": {},
+                    "handoff": {
+                        "to": "customer_service",
+                        "segment": message_body,
+                        "context": {"reason": "promo_discovery_misroute"},
+                    },
+                }
 
             # ── Abort check: a newer message arrived while the planner ran.
             # Skip executor + response so cart state stays clean. Requeue
