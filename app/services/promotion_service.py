@@ -669,3 +669,129 @@ def _compute_discount(promo: Dict[str, Any], base_total: Decimal) -> Tuple[Decim
         pct = Decimal(str(promo["discount_pct"]))
         return ((base_total * pct / Decimal(100)).quantize(Decimal("0.01")), PRICING_DISCOUNT_PCT)
     return (Decimal(0), "")
+
+
+# ── display preview ────────────────────────────────────────────────
+
+
+def preview_cart(
+    business_id: str,
+    cart_items: List[Dict[str, Any]],
+    timezone_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Compute matcher-aware totals + display-grouped lines for an in-progress
+    cart, so every surface (planner prompts, response templates, tool return
+    strings) shows the same numbers the customer will actually pay.
+
+    Two output shapes:
+
+    `display_groups`: bundle-aware ordering for human display.
+      [
+        # When a promo applied, its components collapse into one group.
+        {
+          "kind": "promo_bundle",
+          "promotion_name": str,
+          "promo_price": float,         # what the bundle costs after discount
+          "components": [{"name", "quantity"}, ...],
+          "discount_applied": float,
+        },
+        # Items not bound to any promo render as plain rows.
+        {
+          "kind": "item",
+          "name": str,
+          "quantity": int,
+          "unit_price": float,
+          "line_total": float,
+          "notes": str | None,
+        },
+        ...
+      ]
+
+    Plus the scalar totals from the matcher run:
+      `subtotal_before_promos`, `promo_discount_total`, `subtotal`.
+    """
+    cart_input = [
+        {
+            "product_id": it.get("product_id"),
+            "quantity": int(it.get("quantity") or 0),
+            "unit_price": float(it.get("price") or it.get("unit_price") or 0),
+            "notes": it.get("notes"),
+            "promotion_id": it.get("promotion_id"),
+            "promo_group_id": it.get("promo_group_id"),
+            "name": it.get("name"),  # carried through for display
+        }
+        for it in (cart_items or [])
+    ]
+    if not cart_input:
+        return {
+            "display_groups": [],
+            "subtotal_before_promos": 0.0,
+            "promo_discount_total": 0.0,
+            "subtotal": 0.0,
+            "applications": [],
+        }
+
+    pricing = match_and_apply(
+        business_id=business_id,
+        cart_items=cart_input,
+        timezone_name=timezone_name,
+    )
+
+    # Index applications by promo_group_id so we can attach the bundle
+    # name + discount to its component rows.
+    apps_by_group: Dict[str, Dict[str, Any]] = {
+        a.get("promo_group_id"): a for a in (pricing.get("applications") or [])
+        if a.get("promo_group_id")
+    }
+
+    # Walk the priced items and bucket them into display groups. Items
+    # that share a promo_group_id collapse into one promo_bundle group.
+    seen_groups: set = set()
+    groups: List[Dict[str, Any]] = []
+    for it in pricing["items"]:
+        gid = it.get("promo_group_id")
+        if gid:
+            if gid in seen_groups:
+                continue
+            seen_groups.add(gid)
+            app = apps_by_group.get(gid) or {}
+            members = [m for m in pricing["items"] if m.get("promo_group_id") == gid]
+            base_total = sum(
+                float(m.get("unit_price") or 0) * int(m.get("quantity") or 0)
+                for m in members
+            )
+            promo_total = float(base_total) - float(app.get("discount_applied") or 0)
+            # Use the original cart_input names so we keep the human label.
+            name_by_pid = {str(c["product_id"]): c.get("name") for c in cart_input if c.get("name")}
+            groups.append({
+                "kind": "promo_bundle",
+                "promotion_name": app.get("promotion_name") or "Promo",
+                "promo_price": promo_total,
+                "discount_applied": float(app.get("discount_applied") or 0),
+                "components": [
+                    {
+                        "name": name_by_pid.get(str(m["product_id"])) or m["product_id"],
+                        "quantity": int(m.get("quantity") or 0),
+                    }
+                    for m in members
+                ],
+            })
+        else:
+            name_by_pid = {str(c["product_id"]): c.get("name") for c in cart_input if c.get("name")}
+            groups.append({
+                "kind": "item",
+                "name": name_by_pid.get(str(it["product_id"])) or it.get("product_id"),
+                "quantity": int(it.get("quantity") or 0),
+                "unit_price": float(it.get("unit_price") or 0),
+                "line_total": float(it.get("line_total") or 0),
+                "notes": it.get("notes"),
+            })
+
+    return {
+        "display_groups": groups,
+        "subtotal_before_promos": float(pricing["subtotal_before_promos"]),
+        "promo_discount_total": float(pricing["promo_discount_total"]),
+        "subtotal": float(pricing["subtotal_after_promos"]),
+        "applications": pricing.get("applications") or [],
+    }

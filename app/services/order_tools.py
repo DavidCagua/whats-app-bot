@@ -361,8 +361,14 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         new_cart = {"items": items, "total": total}
         _save_cart(wa_id, business_id, new_cart)
 
+        # Show the matcher-aware subtotal so the customer sees what they
+        # will actually pay if a promo is bound on the cart.
+        preview = promotion_service.preview_cart(business_id, items)
         notes_str = f" ({notes})" if notes else ""
-        return f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. Subtotal: {_format_price(total)}"
+        return (
+            f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. "
+            f"Subtotal: {_format_price(preview['subtotal'])}"
+        )
     except AmbiguousProductError:
         raise
     except ProductNotFoundError:
@@ -389,30 +395,48 @@ def view_cart(injected_business_context: dict = None) -> str:
 
         cart = _cart_from_session(wa_id, business_id)
         items = cart.get("items") or []
-        subtotal = cart.get("total") or 0
 
         if not items:
             return "Tu pedido está vacío. ¿Qué te gustaría ordenar? Pregunta por el menú o una categoría (ej. qué tienes de bebidas)."
 
-        lines = []
-        for it in items:
-            price_str = _format_price(it.get("price", 0) * it.get("quantity", 0))
-            notes_str = f" ({it['notes']})" if it.get("notes") else ""
-            lines.append(f"• {it.get('quantity', 0)}x {it.get('name', '')}{notes_str} - {price_str}")
-
+        # Run the matcher so totals + display reflect any active promo bindings.
+        preview = promotion_service.preview_cart(business_id, items)
         delivery_fee = _get_delivery_fee(injected_business_context)
+        subtotal = preview["subtotal"]
+        promo_discount = preview["promo_discount_total"]
         grand_total = subtotal + delivery_fee
-        summary = (
-            "Tu pedido:\n\n"
-            + "\n".join(lines)
-            + f"\n\nSubtotal: {_format_price(subtotal)}"
-            + f"\n🛵 Domicilio: {_format_price(delivery_fee)}"
-            + f"\n**Total: {_format_price(grand_total)}**"
-        )
-        return summary
+
+        lines = _format_cart_display_lines(preview["display_groups"])
+        parts = ["Tu pedido:", "", *lines, "", f"Subtotal: {_format_price(subtotal)}"]
+        if promo_discount > 0:
+            parts.append(f"🏷 Ahorro con promo: -{_format_price(promo_discount)}")
+        parts.append(f"🛵 Domicilio: {_format_price(delivery_fee)}")
+        parts.append(f"**Total: {_format_price(grand_total)}**")
+        return "\n".join(parts)
     except Exception as e:
         logger.error(f"[ORDER_TOOL] view_cart error: {e}")
         return f"❌ Error al ver el pedido: {str(e)}"
+
+
+def _format_cart_display_lines(display_groups: List[Dict]) -> List[str]:
+    """Render preview_cart's display_groups as bullet lines for tool replies."""
+    lines: List[str] = []
+    for g in display_groups:
+        if g.get("kind") == "promo_bundle":
+            comps = ", ".join(
+                f"{c.get('quantity')}x {c.get('name')}"
+                for c in (g.get("components") or [])
+            )
+            price_str = _format_price(g.get("promo_price") or 0)
+            lines.append(f"• 🏷 Promo *{g.get('promotion_name')}* ({comps}) — {price_str}")
+        else:
+            qty = int(g.get("quantity") or 0)
+            name = g.get("name") or ""
+            notes = g.get("notes")
+            notes_str = f" ({notes})" if notes else ""
+            price_str = _format_price(float(g.get("line_total") or 0))
+            lines.append(f"• {qty}x {name}{notes_str} - {price_str}")
+    return lines
 
 
 @tool
@@ -468,8 +492,9 @@ def update_cart_item(product_id: str = "", quantity: int = 0, notes: str = "", i
 
         if effective_quantity == 0:
             return "✅ Producto quitado de tu pedido."
+        preview = promotion_service.preview_cart(business_id, items)
         notes_str = f" ({notes})" if notes else ""
-        return f"✅ Ítem actualizado{notes_str}. Subtotal: {_format_price(total)}"
+        return f"✅ Ítem actualizado{notes_str}. Subtotal: {_format_price(preview['subtotal'])}"
     except Exception as e:
         logger.error(f"[ORDER_TOOL] update_cart_item error: {e}")
         return f"❌ Error al actualizar tu pedido: {str(e)}"
@@ -898,20 +923,15 @@ def add_promo_to_cart(
         new_cart = {"items": items, "total": total}
         _save_cart(wa_id, business_id, new_cart)
 
-        # Quote the promo price so the customer knows what they'll pay.
-        if promo.get("fixed_price") is not None:
-            price_clause = f"Precio promo: {_format_price(float(promo['fixed_price']))}"
-        elif promo.get("discount_amount") is not None:
-            price_clause = f"Descuento: -{_format_price(float(promo['discount_amount']))}"
-        elif promo.get("discount_pct") is not None:
-            price_clause = f"Descuento: {int(promo['discount_pct'])}%"
-        else:
-            price_clause = ""
-
+        # Use the matcher to compute what this addition will actually cost
+        # the customer (promo binding honored). Avoids the "you'll see $56k
+        # then $30k at checkout" bait pattern.
+        preview = promotion_service.preview_cart(business_id, items)
         items_str = ", ".join(added_lines)
         return (
-            f"✅ Agregué la promo '{promo['name']}' ({items_str}). {price_clause}"
-        ).strip()
+            f"✅ Agregué la promo *{promo['name']}* ({items_str}). "
+            f"Subtotal: {_format_price(preview['subtotal'])}"
+        )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] add_promo_to_cart error: {e}", exc_info=True)
         return f"❌ Error al agregar la promo: {str(e)}"

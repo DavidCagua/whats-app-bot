@@ -369,13 +369,18 @@ def _clean_product_dict(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _clean_cart_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Strip UUIDs from cart items for the response generator."""
+    """Trim cart items for the response generator. Keeps product_id +
+    promotion_id + promo_group_id so the response side can re-run the
+    matcher and group bundle items in display."""
     return [
         {
+            "product_id": it.get("product_id"),
             "name": it.get("name") or "",
             "quantity": int(it.get("quantity") or 0),
             "price": float(it.get("price") or 0),
             "notes": (it.get("notes") or "").strip() or None,
+            "promotion_id": it.get("promotion_id"),
+            "promo_group_id": it.get("promo_group_id"),
         }
         for it in (items or [])
     ]

@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .base_agent import BaseAgent, AgentOutput
 from ..services.order_tools import order_tools
 from ..services.order_eta import NOMINAL_RANGE_TEXT
+from ..services import promotion_service
 from ..orchestration.order_flow import (
     execute_order_intent,
     INTENT_ADD_TO_CART,
@@ -591,7 +592,26 @@ class OrderAgent(BaseAgent):
             removed = cc.get("removed") or []
             updated = cc.get("updated") or []
             cart_after = cc.get("cart_after") or []
-            total_after = cc.get("total_after") or 0
+
+            # Re-run the matcher so the response shows the same totals
+            # the customer will pay. Items bound to a promo collapse into
+            # one labeled bundle line so the LLM doesn't talk about base
+            # prices for items the customer got via a promo.
+            preview = promotion_service.preview_cart(str(business_id), cart_after)
+            total_after = int(preview["subtotal"])
+            applied_promos = preview.get("applications") or []
+            promo_just_added = (
+                action == CART_ACTION_ADDED
+                and any(it.get("promotion_id") for it in (added or []))
+            )
+            new_promo_name = ""
+            if promo_just_added:
+                # Find the promo name for the bundle that was just added.
+                added_pgids = {it.get("promo_group_id") for it in added if it.get("promo_group_id")}
+                for app in applied_promos:
+                    if app.get("promo_group_id") in added_pgids:
+                        new_promo_name = app.get("promotion_name") or ""
+                        break
 
             def fmt_items(items):
                 return "\n".join(
@@ -600,7 +620,26 @@ class OrderAgent(BaseAgent):
                     for it in items
                 )
 
-            cart_lines = fmt_items(cart_after) or "(vacío)"
+            def fmt_groups(groups):
+                lines = []
+                for g in groups:
+                    if g.get("kind") == "promo_bundle":
+                        comps = ", ".join(
+                            f"{c.get('quantity')}x {c.get('name')}"
+                            for c in (g.get("components") or [])
+                        )
+                        lines.append(
+                            f"- 🏷 PROMO {g.get('promotion_name')} ({comps}) — {money(g.get('promo_price'))}"
+                        )
+                    else:
+                        notes = g.get("notes")
+                        notes_part = f" ({notes})" if notes else ""
+                        lines.append(
+                            f"- {g.get('quantity')}x {g.get('name')}{notes_part}"
+                        )
+                return "\n".join(lines)
+
+            cart_lines = fmt_groups(preview["display_groups"]) or "(vacío)"
 
             if action == CART_ACTION_NOOP:
                 system = base_system + (
@@ -726,14 +765,32 @@ class OrderAgent(BaseAgent):
                 )
                 return system, inp
 
+            promo_added_rule = ""
+            if new_promo_name:
+                promo_added_rule = (
+                    f"- ESTA RESPUESTA AGREGÓ UNA PROMO ('{new_promo_name}'). Confirma que "
+                    "agregaste LA PROMO por nombre (no enumeres los productos individuales "
+                    "con sus precios base — el cliente pidió un combo/promo, no productos sueltos).\n"
+                )
+            promo_total_rule = ""
+            if applied_promos:
+                promo_total_rule = (
+                    "- El subtotal que te doy YA incluye los descuentos de la promo. NO digas "
+                    "el precio sin descuento como si fuera el total. NO sumes precios base "
+                    "tú mismo.\n"
+                )
             system = base_system + (
                 f"\n\nSITUACIÓN: {situation}\n"
                 "REGLAS:\n"
                 "- Confirma brevemente el cambio que hizo el backend (está en 'Cambio realizado').\n"
+                + promo_added_rule +
                 "- Muestra el resumen del pedido actual usando los nombres EXACTOS de la lista "
-                "'Pedido actual' que te doy. Copia el nombre del producto tal cual aparece "
-                "(con mayúsculas, acentos y notas entre paréntesis). NO los reemplaces por las "
-                "palabras que usó el cliente en su mensaje.\n"
+                "'Pedido actual' que te doy. Si una línea empieza con '🏷 PROMO', preséntala como "
+                "una sola promo con su nombre y precio promocional — NO enumeres sus componentes "
+                "como ítems separados con precios base.\n"
+                "- Copia el nombre del producto tal cual aparece (con mayúsculas, acentos y notas "
+                "entre paréntesis). NO los reemplaces por las palabras que usó el cliente.\n"
+                + promo_total_rule +
                 "- Sugiere el siguiente paso: preguntar si quiere agregar algo más (ej. bebida si no tiene una) o procedemos con el pedido.\n"
                 "- NO inventes productos, nombres, variantes, ni precios — usa solo los datos dados.\n"
                 "- 2-5 líneas."
@@ -742,7 +799,7 @@ class OrderAgent(BaseAgent):
                 f"Cliente dijo: {message_body}\n"
                 f"Cambio realizado:\n{change_desc}\n"
                 f"Pedido actual:\n{cart_lines}\n"
-                f"Subtotal: {money(total_after)}"
+                f"Subtotal (ya con promo si aplica): {money(total_after)}"
             )
             return system, inp
 
@@ -823,39 +880,54 @@ class OrderAgent(BaseAgent):
             op = exec_result.get("order_placed") or {}
             oid = op.get("order_id_display") or ""
             items = op.get("items") or []
-            items_lines = "\n".join(
-                f"- {it.get('quantity')}x {it.get('name')}"
-                + (f" ({it.get('notes')})" if it.get("notes") else "")
-                for it in items
-            )
             promo_discount = int(op.get("promo_discount") or 0)
             applied_promos = op.get("applied_promos") or []
-            promo_clause = (
-                f"- Si hay descuento de promo (>0), inclúyelo en el resumen como una "
-                f"línea 'Promo: -<monto>' después del subtotal y nombra brevemente "
-                f"qué promo(s) se aplicaron.\n"
-                if promo_discount > 0 else ""
+
+            # Render the items list bundle-aware: items bound to a promo
+            # collapse into a single "PROMO X" line so the customer sees
+            # the promo as a unit, not as base-priced individual items.
+            preview = promotion_service.preview_cart(str(business_id), items)
+            items_lines = "\n".join(
+                (
+                    "- 🏷 PROMO " + (g.get("promotion_name") or "")
+                    + " (" + ", ".join(
+                        f"{c.get('quantity')}x {c.get('name')}"
+                        for c in (g.get("components") or [])
+                    ) + ") — " + money(g.get("promo_price") or 0)
+                ) if g.get("kind") == "promo_bundle" else (
+                    f"- {g.get('quantity')}x {g.get('name')}"
+                    + (f" ({g.get('notes')})" if g.get("notes") else "")
+                )
+                for g in preview["display_groups"]
             )
+
+            savings_clause = ""
+            if promo_discount > 0:
+                names = ", ".join(applied_promos) or "promo aplicada"
+                savings_clause = (
+                    f"- Incluye una línea de ahorro DESPUÉS del subtotal con este formato exacto: "
+                    f"'Ahorro con promo: -{money(promo_discount)} ({names})'. Esto enmarca el "
+                    f"descuento como un beneficio para el cliente, no como una corrección.\n"
+                )
             system = base_system + (
                 "\n\nSITUACIÓN: El pedido fue confirmado exitosamente. "
                 "REGLAS:\n"
                 "- Celebra brevemente (ej. '¡Listo!').\n"
-                "- Muestra el número de pedido, items, subtotal, domicilio y total.\n"
-                + promo_clause +
+                "- Muestra el número de pedido, los items, subtotal, domicilio y total.\n"
+                "- Si una línea de items empieza con '🏷 PROMO', preséntala como UNA promo "
+                "con su nombre y precio promocional. NO la descompongas en sus componentes "
+                "como ítems separados con precios base.\n"
+                + savings_clause +
+                "- El subtotal y total que te doy YA reflejan los descuentos. NO recalcules.\n"
                 "- Dile que pronto se comunicarán para coordinar la entrega.\n"
                 f"- Indica que el pedido se demora {NOMINAL_RANGE_TEXT} en su entrega.\n"
                 "- 3-6 líneas."
-            )
-            promo_line = (
-                f"\nPromo aplicada: -{money(promo_discount)} ({', '.join(applied_promos)})"
-                if promo_discount > 0 else ""
             )
             inp = (
                 f"Pedido confirmado.\n"
                 f"Número: #{oid}\n"
                 f"Items:\n{items_lines}\n"
-                f"Subtotal: {money(op.get('subtotal'))}"
-                f"{promo_line}\n"
+                f"Subtotal (ya con promo si aplica): {money(op.get('subtotal'))}\n"
                 f"Domicilio: {money(op.get('delivery_fee'))}\n"
                 f"Total: {money(op.get('total'))}"
             )
@@ -927,13 +999,28 @@ class OrderAgent(BaseAgent):
         order_context = session.get("order_context") or {}
         order_state = order_context.get("state") or "GREETING"
         items = order_context.get("items") or []
-        total = order_context.get("total") or 0
         if items:
+            # Use the matcher-aware preview so the planner sees the same
+            # numbers the customer sees. Items bound to a promo are
+            # tagged "(promo)" so the planner doesn't think the customer
+            # got a base-priced product.
+            preview = promotion_service.preview_cart(str(business_id), items)
             lines = []
-            for it in items:
-                notes_part = f" ({it['notes']})" if it.get("notes") else ""
-                lines.append(f"{it.get('quantity', 0)}x {it.get('name', '')}{notes_part}")
-            cart_summary_str = "; ".join(lines) + f". Subtotal: ${int(total):,}".replace(",", ".")
+            for g in preview["display_groups"]:
+                if g.get("kind") == "promo_bundle":
+                    comps = ", ".join(
+                        f"{c.get('quantity')}x {c.get('name')}"
+                        for c in (g.get("components") or [])
+                    )
+                    lines.append(
+                        f"PROMO {g.get('promotion_name')} ({comps}) — "
+                        f"${int(g.get('promo_price') or 0):,}".replace(",", ".")
+                    )
+                else:
+                    notes_part = f" ({g['notes']})" if g.get("notes") else ""
+                    lines.append(f"{g.get('quantity', 0)}x {g.get('name', '')}{notes_part}")
+            subtotal_str = f"${int(preview['subtotal']):,}".replace(",", ".")
+            cart_summary_str = "; ".join(lines) + f". Subtotal: {subtotal_str}"
         else:
             cart_summary_str = "Pedido vacío."
 
