@@ -17,7 +17,6 @@ type BusinessSettingsData = {
   payment_methods?: string[]
   /** Enlace de pago (Stripe, Mercado Pago, etc.) para el agente de ventas */
   payment_link?: string
-  promotions?: string[]
   ai_prompt?: string
   products_enabled?: boolean
   menu_url?: string
@@ -41,9 +40,6 @@ export type BusinessSettings = {
   // Payment Methods
   payment_methods: string[]
   payment_link: string
-
-  // Promotions
-  promotions: string[]
 
   // AI Prompt
   ai_prompt: string
@@ -95,7 +91,6 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
       language: settings?.language || "es-CO",
       payment_methods: settings?.payment_methods || [],
       payment_link: settings?.payment_link ?? "",
-      promotions: settings?.promotions || [],
       ai_prompt: settings?.ai_prompt || "",
       products_enabled: settings?.products_enabled ?? true,
       menu_url: settings?.menu_url ?? "",
@@ -161,7 +156,6 @@ export async function updateBusinessSettings(
       ...(settings.language !== undefined && { language: settings.language }),
       ...(settings.payment_methods !== undefined && { payment_methods: settings.payment_methods }),
       ...(settings.payment_link !== undefined && { payment_link: settings.payment_link }),
-      ...(settings.promotions !== undefined && { promotions: settings.promotions }),
       ...(settings.ai_prompt !== undefined && { ai_prompt: settings.ai_prompt }),
       ...(settings.products_enabled !== undefined && { products_enabled: settings.products_enabled }),
       ...(settings.menu_url !== undefined && { menu_url: settings.menu_url }),

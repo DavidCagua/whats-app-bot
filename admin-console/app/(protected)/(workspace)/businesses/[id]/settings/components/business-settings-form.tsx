@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { Plus, X, Save, MapPin, CreditCard, Gift, MessageSquare, Package } from "lucide-react"
+import { Plus, X, Save, MapPin, CreditCard, MessageSquare, Package } from "lucide-react"
 import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
 
@@ -32,7 +32,6 @@ const businessSettingsSchema = z.object({
       (s) => !s.trim() || /^https?:\/\/.+/i.test(s.trim()),
       "Ingresa una URL válida (https://...)"
     ),
-  promotions: z.array(z.string()),
   ai_prompt: z.string().min(1, "El prompt del asistente es requerido"),
   products_enabled: z.boolean(),
   menu_url: z.string().optional(),
@@ -90,16 +89,6 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
   const removePaymentMethod = (index: number) => {
     const currentMethods = form.getValues("payment_methods")
     form.setValue("payment_methods", currentMethods.filter((_, i) => i !== index))
-  }
-
-  const addPromotion = () => {
-    const currentPromotions = form.getValues("promotions")
-    form.setValue("promotions", [...currentPromotions, ""])
-  }
-
-  const removePromotion = (index: number) => {
-    const currentPromotions = form.getValues("promotions")
-    form.setValue("promotions", currentPromotions.filter((_, i) => i !== index))
   }
 
   return (
@@ -357,44 +346,6 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             <Button type="button" variant="outline" onClick={addPaymentMethod}>
               <Plus className="mr-2 h-4 w-4" />
               Agregar método de pago
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Promotions */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Gift className="h-5 w-5" />
-            Promociones
-          </CardTitle>
-          <CardDescription>
-            Define las ofertas especiales y promociones para tus clientes
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {form.watch("promotions").map((promotion, index) => (
-              <div key={index} className="flex gap-4 items-center">
-                <Textarea
-                  {...form.register(`promotions.${index}`)}
-                  placeholder="e.g., Cumpleañero feliz: 10% de descuento si cumples este mes"
-                  rows={2}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => removePromotion(index)}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
-            <Button type="button" variant="outline" onClick={addPromotion}>
-              <Plus className="mr-2 h-4 w-4" />
-              Agregar promoción
             </Button>
           </div>
         </CardContent>
