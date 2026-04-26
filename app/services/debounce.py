@@ -77,15 +77,21 @@ def clear_abort(abort_key: str) -> None:
 def requeue_aborted_text(abort_key: str, text: str) -> None:
     """
     On abort-after-planner, push the aborted user text back into the
-    debounce buffer so the next flusher coalesces it with newer arrivals.
+    debounce buffer AND make sure a flusher will eventually pick it up.
 
     We derive (to_number, phone) from the abort_key itself — format is
     "abort:{to_number}:{phone}" — so callers don't need to thread the
     routing info through the agent layer.
 
+    The previous flusher already released its lock at drain time
+    (_LUA_DRAIN deletes both buffer and lock), so just rpushing leaves
+    the requeued text orphaned until the next inbound webhook. To avoid
+    that, we use the same atomic _LUA_BUFFER (rpush + SET NX flusher
+    lock); if we win the lock, we spawn a flusher thread ourselves.
+
     Wraps the text in a minimal Meta-shaped payload matching what
     debounce_message() stores, so _flush()'s merge loop picks it up
-    transparently. Scales to N consecutive aborts — each call appends.
+    transparently.
     """
     if not (abort_key and (text or "").strip()):
         return
@@ -104,6 +110,7 @@ def requeue_aborted_text(abort_key: str, text: str) -> None:
     if r is None:
         return
     key_msgs = f"debounce:msgs:{to_number}:{phone}"
+    key_flusher = f"debounce:flusher:{to_number}:{phone}"
     payload = json.dumps({
         "normalized_body": {
             "entry": [{"changes": [{"value": {
@@ -112,12 +119,38 @@ def requeue_aborted_text(abort_key: str, text: str) -> None:
         }
     })
     try:
-        r.rpush(key_msgs, payload)
-        r.expire(key_msgs, _MSG_TTL)
-        logging.warning(
-            "[DEBOUNCE] %s: requeued aborted text (%d chars) to=%s",
-            phone, len(text), to_number,
+        buf = r.register_script(_LUA_BUFFER)
+        lua_result = buf(
+            keys=[key_msgs, key_flusher],
+            args=[payload, _MSG_TTL, _FLUSHER_TTL],
         )
+        won_flusher = bool(lua_result)
+        logging.warning(
+            "[DEBOUNCE] %s: requeued aborted text (%d chars) to=%s "
+            "won_flusher=%s",
+            phone, len(text), to_number, won_flusher,
+        )
+        if won_flusher:
+            # Capture the Flask app from the current context so the
+            # background _flush thread can push one for send_message /
+            # config access. Requeue runs inside flask_app.app_context()
+            # (set by the parent flusher), so current_app is available.
+            try:
+                from flask import current_app
+                flask_app = current_app._get_current_object()
+            except Exception as exc:
+                logging.error(
+                    "[DEBOUNCE] %s: cannot resolve flask_app for requeued flusher: %s",
+                    phone, exc,
+                )
+                return
+            t = threading.Thread(
+                target=_flush,
+                args=(phone, to_number, flask_app),
+                daemon=True,
+                name=f"debounce-{phone}-requeue",
+            )
+            t.start()
     except Exception as exc:
         logging.warning("[DEBOUNCE] %s: requeue failed: %s", phone, exc)
 
