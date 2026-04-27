@@ -251,3 +251,40 @@ class TestRouterPromptHasProductPriceRule:
             "Router must distinguish generic-price (CS) from "
             "named-product-price (order)"
         )
+
+
+class TestRouterPromptHasOrderingOpenerRule:
+    """
+    Regression: "para un domicilio" used to be misclassified as
+    customer_service (the lexical token "domicilio" matched the
+    delivery-policy CS rule). It's actually an opening signal —
+    the customer wants to order but hasn't named a product yet.
+    Main routes it to `order` and the order agent's planner replies
+    with an invitation; multi-agent broke this until the discriminator
+    was added.
+    """
+
+    def test_prompt_routes_ordering_opener_to_order(self):
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        assert "INTENCIÓN DE PEDIR sin nombrar producto" in prompt, (
+            "Router prompt must classify 'para un domicilio' / 'quiero pedir' "
+            "as `order`, not customer_service"
+        )
+        # Concrete examples the LLM can pattern-match against.
+        for example in (
+            "para un domicilio",
+            "un domicilio por favor",
+            "quiero pedir",
+            "para hacer un pedido",
+        ):
+            assert example in prompt, f"Router prompt missing example: {example!r}"
+
+    def test_prompt_disambiguates_opener_from_delivery_price_question(self):
+        """The discriminator: bare opener vs. interrogative."""
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        # The disambiguation rule must explicitly call out both shapes.
+        assert "para un domicilio" in prompt
+        assert "cuánto vale el domicilio" in prompt or "cuánto cobran de domicilio" in prompt, (
+            "Router prompt must show that the question form 'cuánto vale "
+            "el domicilio' goes to customer_service"
+        )

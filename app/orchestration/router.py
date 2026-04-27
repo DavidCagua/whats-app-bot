@@ -124,6 +124,13 @@ Dominios disponibles (por INTENCIÓN del cliente):
       "cuánto cuesta la honey burger", "el precio de la montesa", "qué valor tiene X".
       Aplica incluso cuando el producto y la pregunta vienen en el mismo mensaje sin
       verbo de orden explícito ("una picada que valor?" — preguntar el precio antes de pedir).
+    * INTENCIÓN DE PEDIR sin nombrar producto — frases que abren la conversación
+      de pedido pero no especifican qué quieren todavía: "para un domicilio",
+      "un domicilio por favor", "quiero pedir", "para hacer un pedido", "para ordenar",
+      "me pueden atender", "quiero un domicilio". La palabra "domicilio" aquí significa
+      "quiero hacer un pedido a domicilio", NO una pregunta sobre el costo del domicilio.
+      Discriminador: ¿hay una pregunta? ("cuánto", "qué precio", "vale", "cuesta") → CS.
+      Si NO hay pregunta y solo es una frase de apertura → order.
     * Agregar/modificar/quitar del carrito ("quiero X", "dame X", "una coca", "quita la cerveza")
     * Checkout y confirmación ("listo", "ya te pago", "confirma", "procedamos")
 
@@ -150,6 +157,11 @@ Reglas de desambiguación (claves):
     Razón: el cliente está browsing dentro del bot — eso es parte del funnel de ordenar.
 - "tienen domicilio?" → customer_service (pregunta por POLÍTICA de domicilio, no por un producto).
 - "tienen coca cola?" → order (browsing de productos).
+- "para un domicilio" / "un domicilio por favor" / "quiero pedir" → order (es una FRASE DE
+  APERTURA de pedido, no una pregunta sobre el domicilio). Sin verbo interrogativo
+  ("cuánto", "vale", "cuesta", "qué precio") es intención de ordenar — el order agent
+  saluda e invita a decir su pedido. CON verbo interrogativo ("cuánto vale el domicilio",
+  "cuánto cobran de domicilio") sí es customer_service.
 - "qué promos tienen?" / "tienes alguna promo?" / "qué combos manejan?" → customer_service
   (pregunta por DISPONIBILIDAD de promos como dato, NO está agregando una al carrito,
   Y no nombra ningún producto específico del catálogo).
