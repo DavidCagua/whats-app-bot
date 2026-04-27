@@ -7,6 +7,8 @@ import logging
 from typing import Dict, List, Optional
 from langchain.tools import tool
 
+import uuid
+
 from ..database.product_order_service import (
     product_order_service,
     AmbiguousProductError,
@@ -14,7 +16,9 @@ from ..database.product_order_service import (
 )
 from ..database.session_state_service import session_state_service
 from ..database.customer_service import customer_service
+from .order_eta import NOMINAL_RANGE_TEXT
 from . import catalog_cache
+from . import promotion_service
 
 
 def _turn_cache():
@@ -76,11 +80,14 @@ def _products_enabled(ctx: Optional[Dict]) -> bool:
 
 
 def _get_delivery_fee(ctx: Optional[Dict]) -> float:
-    """Get delivery fee from business settings. Defaults to 5000 COP."""
+    """Get delivery fee from business settings. Falls back to the same
+    default the customer service info lookup uses (so receipts and the
+    'cuánto cobran de domicilio' answer agree on the same number)."""
+    from .business_info_service import DELIVERY_FEE_DEFAULT
     if not ctx:
-        return 5000.0
+        return float(DELIVERY_FEE_DEFAULT)
     settings = (ctx.get("business") or {}).get("settings") or {}
-    return float(settings.get("delivery_fee", 5000))
+    return float(settings.get("delivery_fee", DELIVERY_FEE_DEFAULT))
 
 
 def _cart_from_session(wa_id: str, business_id: str) -> Dict:
@@ -357,8 +364,14 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         new_cart = {"items": items, "total": total}
         _save_cart(wa_id, business_id, new_cart)
 
+        # Show the matcher-aware subtotal so the customer sees what they
+        # will actually pay if a promo is bound on the cart.
+        preview = promotion_service.preview_cart(business_id, items)
         notes_str = f" ({notes})" if notes else ""
-        return f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. Subtotal: {_format_price(total)}"
+        return (
+            f"✅ Agregado {quantity}x {name}{notes_str} a tu pedido. "
+            f"Subtotal: {_format_price(preview['subtotal'])}"
+        )
     except AmbiguousProductError:
         raise
     except ProductNotFoundError:
@@ -385,30 +398,48 @@ def view_cart(injected_business_context: dict = None) -> str:
 
         cart = _cart_from_session(wa_id, business_id)
         items = cart.get("items") or []
-        subtotal = cart.get("total") or 0
 
         if not items:
             return "Tu pedido está vacío. ¿Qué te gustaría ordenar? Pregunta por el menú o una categoría (ej. qué tienes de bebidas)."
 
-        lines = []
-        for it in items:
-            price_str = _format_price(it.get("price", 0) * it.get("quantity", 0))
-            notes_str = f" ({it['notes']})" if it.get("notes") else ""
-            lines.append(f"• {it.get('quantity', 0)}x {it.get('name', '')}{notes_str} - {price_str}")
-
+        # Run the matcher so totals + display reflect any active promo bindings.
+        preview = promotion_service.preview_cart(business_id, items)
         delivery_fee = _get_delivery_fee(injected_business_context)
+        subtotal = preview["subtotal"]
+        promo_discount = preview["promo_discount_total"]
         grand_total = subtotal + delivery_fee
-        summary = (
-            "Tu pedido:\n\n"
-            + "\n".join(lines)
-            + f"\n\nSubtotal: {_format_price(subtotal)}"
-            + f"\n🛵 Domicilio: {_format_price(delivery_fee)}"
-            + f"\n**Total: {_format_price(grand_total)}**"
-        )
-        return summary
+
+        lines = _format_cart_display_lines(preview["display_groups"])
+        parts = ["Tu pedido:", "", *lines, "", f"Subtotal: {_format_price(subtotal)}"]
+        if promo_discount > 0:
+            parts.append(f"🏷 Ahorro con promo: -{_format_price(promo_discount)}")
+        parts.append(f"🛵 Domicilio: {_format_price(delivery_fee)}")
+        parts.append(f"**Total: {_format_price(grand_total)}**")
+        return "\n".join(parts)
     except Exception as e:
         logger.error(f"[ORDER_TOOL] view_cart error: {e}")
         return f"❌ Error al ver el pedido: {str(e)}"
+
+
+def _format_cart_display_lines(display_groups: List[Dict]) -> List[str]:
+    """Render preview_cart's display_groups as bullet lines for tool replies."""
+    lines: List[str] = []
+    for g in display_groups:
+        if g.get("kind") == "promo_bundle":
+            comps = ", ".join(
+                f"{c.get('quantity')}x {c.get('name')}"
+                for c in (g.get("components") or [])
+            )
+            price_str = _format_price(g.get("promo_price") or 0)
+            lines.append(f"• 🏷 Promo *{g.get('promotion_name')}* ({comps}) — {price_str}")
+        else:
+            qty = int(g.get("quantity") or 0)
+            name = g.get("name") or ""
+            notes = g.get("notes")
+            notes_str = f" ({notes})" if notes else ""
+            price_str = _format_price(float(g.get("line_total") or 0))
+            lines.append(f"• {qty}x {name}{notes_str} - {price_str}")
+    return lines
 
 
 @tool
@@ -464,8 +495,9 @@ def update_cart_item(product_id: str = "", quantity: int = 0, notes: str = "", i
 
         if effective_quantity == 0:
             return "✅ Producto quitado de tu pedido."
+        preview = promotion_service.preview_cart(business_id, items)
         notes_str = f" ({notes})" if notes else ""
-        return f"✅ Ítem actualizado{notes_str}. Subtotal: {_format_price(total)}"
+        return f"✅ Ítem actualizado{notes_str}. Subtotal: {_format_price(preview['subtotal'])}"
     except Exception as e:
         logger.error(f"[ORDER_TOOL] update_cart_item error: {e}")
         return f"❌ Error al actualizar tu pedido: {str(e)}"
@@ -794,11 +826,118 @@ def place_order(injected_business_context: dict = None) -> str:
             f"🛵 Domicilio: {_format_price(delivery_fee)}\n"
             f"Total: {_format_price(total)}\n"
             f"Nos ponemos en contacto pronto para coordinar la entrega.\n"
-            f"⏱ Tiempo estimado de entrega: 40 a 50 minutos."
+            f"⏱ Tiempo estimado de entrega: {NOMINAL_RANGE_TEXT}."
         )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] place_order error: {e}")
         return f"❌ Error al confirmar el pedido: {str(e)}"
+
+
+@tool
+def add_promo_to_cart(
+    promo_id: str = "",
+    promo_query: str = "",
+    injected_business_context: dict = None,
+) -> str:
+    """
+    Add a promotion (and its component products) to the cart as a single
+    bound bundle. Use when the customer asks for a promo by name or
+    accepts a previously-listed one.
+
+    Resolution: pass `promo_id` if known (e.g. from a customer-service
+    handoff after the user said "dame esa"). Otherwise pass `promo_query`
+    — the user's free text — and we'll match against active promo names.
+
+    Args:
+        promo_id: Promotion UUID (preferred when known)
+        promo_query: Customer's free-text reference to a promo
+    """
+    logger.info(f"[ORDER_TOOL] add_promo_to_cart promo_id='{promo_id}' promo_query='{promo_query}'")
+    try:
+        business_id, wa_id = _get_context(injected_business_context)
+        if not _products_enabled(injected_business_context):
+            return "❌ Los pedidos de productos no están habilitados en este momento."
+        if not business_id or not wa_id:
+            return "❌ No se pudo identificar la sesión. Intenta de nuevo."
+
+        # Resolve the promo. Schedule check happens here too — if it's not
+        # active right now, refuse early so we don't bind a non-applicable
+        # promo to the cart. Pass the business timezone so the schedule
+        # filter evaluates day/time in the right wall clock.
+        tz_name = promotion_service.timezone_from_business_context(injected_business_context)
+        active_promos = promotion_service.list_active_promos(
+            business_id, timezone_name=tz_name,
+        )
+        promo = None
+        if promo_id:
+            promo = next((p for p in active_promos if p["id"] == promo_id), None)
+            if not promo:
+                # Direct id miss: maybe inactive or out of schedule.
+                full = promotion_service.get_promotion(business_id, promo_id)
+                if full and not full.get("is_active"):
+                    return "❌ Esa promo ya no está activa."
+                if full:
+                    return "❌ Esa promo no aplica en este horario."
+                return "❌ No encontré esa promo."
+        elif promo_query:
+            matches = promotion_service.find_promo_by_query(
+                business_id, promo_query, timezone_name=tz_name,
+            )
+            if not matches:
+                return f"❌ No encontré una promo activa que coincida con '{promo_query}'."
+            if len(matches) > 1:
+                names = ", ".join(p["name"] for p in matches[:5])
+                return f"❌ Varias promos coinciden ({names}). Pídela por nombre exacto."
+            promo = matches[0]
+        else:
+            return "❌ Faltan datos de la promo."
+
+        components = promo.get("components") or []
+        if not components:
+            return "❌ Esa promo no tiene productos definidos. Avísale al negocio."
+
+        # Hydrate component product names + prices for the cart line items.
+        promo_group_id = str(uuid.uuid4())
+        cart = _cart_from_session(wa_id, business_id)
+        items: List[Dict] = list(cart.get("items") or [])
+
+        added_lines: List[str] = []
+        for c in components:
+            product = product_order_service.get_product(
+                product_id=c["product_id"], business_id=business_id,
+            )
+            if not product:
+                return f"❌ Uno de los productos de la promo ya no está disponible."
+            qty = int(c.get("quantity") or 1)
+            new_item: Dict = {
+                "product_id": product["id"],
+                "name": product["name"],
+                "price": float(product.get("price", 0)),
+                "quantity": qty,
+                "promotion_id": promo["id"],
+                "promo_group_id": promo_group_id,
+            }
+            items.append(new_item)
+            added_lines.append(f"{qty}x {product['name']}")
+
+        # Recompute display total from base prices — the real promo math
+        # runs at place_order via promotion_service.match_and_apply.
+        total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
+        new_cart = {"items": items, "total": total}
+        _save_cart(wa_id, business_id, new_cart)
+
+        # Use the matcher to compute what this addition will actually cost
+        # the customer (promo binding honored). Avoids the "you'll see $56k
+        # then $30k at checkout" bait pattern.
+        preview = promotion_service.preview_cart(business_id, items)
+        items_str = ", ".join(added_lines)
+        return (
+            f"✅ Agregué la promo *{promo['name']}* ({items_str}). "
+            f"Subtotal: {_format_price(preview['subtotal'])}"
+        )
+    except Exception as e:
+        logger.error(f"[ORDER_TOOL] add_promo_to_cart error: {e}", exc_info=True)
+        return f"❌ Error al agregar la promo: {str(e)}"
 
 
 # List of all order tools
@@ -808,6 +947,7 @@ order_tools = [
     search_products,
     get_product_details,
     add_to_cart,
+    add_promo_to_cart,
     view_cart,
     update_cart_item,
     remove_from_cart,

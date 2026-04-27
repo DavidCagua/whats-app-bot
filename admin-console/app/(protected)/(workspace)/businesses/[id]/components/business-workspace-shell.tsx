@@ -30,6 +30,7 @@ import {
   Scissors,
   Settings,
   ShoppingCart,
+  Tag,
   UserCog,
   Users,
 } from "lucide-react"
@@ -60,6 +61,11 @@ const nav = (id: string) =>
       href: `/businesses/${id}/products`,
       label: "Productos",
       icon: Package,
+    },
+    {
+      href: `/businesses/${id}/promotions`,
+      label: "Promociones",
+      icon: Tag,
     },
     {
       href: `/businesses/${id}/services`,

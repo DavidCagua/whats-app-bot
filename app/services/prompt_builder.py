@@ -168,11 +168,6 @@ class PromptBuilder:
         if payment:
             sections.append(payment)
 
-        # Promotions
-        promotions = business_config_service.get_promotions_text(business_context)
-        if promotions:
-            sections.append(promotions)
-
         return "\n\n".join(sections)
 
     def _build_hours_from_availability(self, business_id: str) -> str:

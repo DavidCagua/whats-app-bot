@@ -16,12 +16,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from .base_agent import BaseAgent, AgentOutput
 from ..services.order_tools import order_tools
+from ..services.order_eta import NOMINAL_RANGE_TEXT
+from ..services import promotion_service
 from ..orchestration.order_flow import (
     execute_order_intent,
     INTENT_ADD_TO_CART,
     INTENT_CHAT,
-    INTENT_GREET,
     INTENT_CONFIRM,
+    INTENT_VIEW_CART,
     RESULT_KIND_CHAT,
     RESULT_KIND_MENU_CATEGORIES,
     RESULT_KIND_PRODUCTS_LIST,
@@ -45,29 +47,43 @@ from ..database.booking_service import booking_service
 from ..services.tracing import tracer
 
 
+# Mirror of the customer_service handoff guard. If the planner picks VIEW_CART
+# but the cart is empty AND the user's message reads like a status inquiry
+# (rather than a "what can I order" browse), the correct owner is the
+# customer_service agent which can look up completed orders. Keep the
+# regex narrow — false positives demote the user to the generic empty-cart
+# reply, which is a worse UX than a status lookup miss.
+_STATUS_INQUIRY_RE = re.compile(
+    r"\b(d[oó]nde|estado|ya sali[oó]|c[oó]mo va|qu[eé] pasa con|mi pedido ya)\b",
+    re.IGNORECASE,
+)
+
+
 PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de pedidos. Dado el estado actual del pedido y el mensaje del usuario, devuelves EXACTAMENTE una intención y sus parámetros en JSON.
 
 Estado actual: {order_state}
 Productos YA en el pedido (NO los incluyas de nuevo en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad con frases como "quiero otro", "dame uno más", "agrega otro". Si el usuario pide UN producto NUEVO, emite SOLO ese producto — no repitas los que ya están aquí): {cart_summary}
 
-Intenciones válidas: GREET, GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, CHAT.
+Intenciones válidas: GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, ADD_PROMO_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, CHAT.
+
+Nota: los saludos puros (sólo "hola", "buenas", "buen día") ya son manejados por el router antes de que llegues a clasificar — NO recibirás saludos puros.
 
 Reglas de menú y búsqueda (importante):
 - GET_MENU_CATEGORIES: cuando el usuario pregunta qué hay, qué tienes en general, o qué categorías hay (ej. "qué tienes", "qué hay en el menú"). Sin params.
 - LIST_PRODUCTS con category: cuando pregunta qué tienes EN UNA CATEGORÍA (ej. "qué tienes de bebidas", "qué hamburguesas tienes", "qué bebidas hay"). Siempre pasa params: {{"category": "bebidas"}} o "hamburguesas", "BEBIDAS", etc. category vacío = menú completo. IMPORTANTE: pasa la categoría COMPLETA que el usuario mencionó, incluyendo calificadores de tipo como "de pollo", "de res", "de cerdo" (ej. "tienes hamburguesas de pollo?" → category="hamburguesas de pollo", NO solo "hamburguesas"). El backend normaliza la categoría automáticamente. Frases implícitas también cuentan — "qué hay para tomar", "qué tienen para tomar", "algo para beber", "qué tienen de beber" → LIST_PRODUCTS con category "bebidas". "qué hay para comer", "algo de comida" (sin más contexto) → LIST_PRODUCTS sin category (menú completo) o GET_MENU_CATEGORIES si prefiere ver categorías.
 - SEARCH_PRODUCTS con query: cuando el usuario NOMBRA un producto o ingrediente o DESCRIBE lo que quiere (ej. "quiero barracuda", "tienes coca cola", "algo con queso azul", "algo picante", "algo con picante", "tienes algo dulce"). Incluye cualquier "algo con X", "algo X", "tienes algo X" — son búsquedas por atributo, NO preguntas por el menú general. No uses SEARCH_PRODUCTS para preguntas de categoría; para "qué tienes de X" usa LIST_PRODUCTS con category. IMPORTANTE: "tienes [nombre en plural de una categoría/tipo de comida]?" (ej. "tienes hamburguesas?", "tienes perros?", "tienes perros calientes?", "tienes bebidas?", "tienes cervezas?") es una pregunta por categoría, NO una búsqueda de producto — usa LIST_PRODUCTS con category, NO SEARCH_PRODUCTS ni GET_MENU_CATEGORIES. La intención del usuario es ver qué opciones hay en esa categoría. EXCEPCIÓN CLAVE: si la frase incluye un ADJETIVO CALIFICATIVO que describe una CUALIDAD (ej. "tienes hamburguesas picantes?", "algo dulce de bebida", "perros con queso", "hamburguesas grandes"), eso es una búsqueda por ATRIBUTO, no una categoría pura — usa SEARCH_PRODUCTS con query, NO LIST_PRODUCTS. El adjetivo (picante, dulce, grande, especial, etc.) indica que el usuario quiere filtrar por una característica, y LIST_PRODUCTS no soporta filtros de atributo. OJO: "de pollo", "de res", "de cerdo" NO son adjetivos — son especificadores de TIPO que forman subcategorías (ej. "hamburguesas de pollo" es una categoría, NO un atributo). Estos van a LIST_PRODUCTS con la frase completa como category.
-- GET_PRODUCT con product_name: cuando pregunta qué trae o qué tiene UN producto específico en singular (ej. "qué trae la barracuda", "qué tiene la montesa").
+- GET_PRODUCT con product_name: cuando pregunta detalles de UN producto específico en singular — ya sea por contenido/ingredientes ("qué trae la barracuda", "qué tiene la montesa") o por PRECIO ("cuánto vale la X", "qué valor tiene la X", "una X qué valor", "qué precio tiene la X", "el precio de la X", "cuánto cuesta la X", "cuánto sale la X"). El response generator ya incluye precio + descripción, así que GET_PRODUCT cubre ambos casos sin distinguirlos. IMPORTANTE: si el mensaje nombra un producto Y pregunta el precio/valor (incluso sin verbo de orden, ej. "una picada que valor?"), es GET_PRODUCT, NO ADD_TO_CART — el cliente quiere saber el precio antes de decidir; no está pidiendo. Solo emite ADD_TO_CART cuando el mensaje pide claramente el producto sin preguntar el precio.
 - LIST_PRODUCTS (con la última categoría mostrada) cuando el usuario pide detalles de VARIOS/TODOS los productos ya listados — en plural o colectivo (ej. "qué tienen cada una", "qué trae cada una de esas hamburguesas", "dame los detalles de todas", "qué ingredientes tiene cada una"). NO uses GET_PRODUCT en estos casos: el usuario quiere ver todo el grupo, no uno solo.
 
 Otras reglas:
-- REGLA DE PRIORIDAD (más importante que las demás): si el mensaje NOMBRA uno o más productos del menú (aunque esté acompañado de un saludo, de la palabra "domicilio", "pedido", "por favor", o de una lista con saltos de línea), SIEMPRE clasifica como ADD_TO_CART con los items correspondientes. El saludo y palabras como "domicilio"/"pedido" son contexto, NO intención — se ignoran para la clasificación cuando hay productos nombrados. CHAT y GREET se usan SOLO cuando NO hay ningún producto en el mensaje.
+- REGLA DE PRIORIDAD (más importante que las demás): si el mensaje NOMBRA uno o más productos del menú (aunque esté acompañado de un saludo, de la palabra "domicilio", "pedido", "por favor", o de una lista con saltos de línea), SIEMPRE clasifica como ADD_TO_CART con los items correspondientes. El saludo y palabras como "domicilio"/"pedido" son contexto, NO intención — se ignoran para la clasificación cuando hay productos nombrados. CHAT se usa SOLO cuando NO hay ningún producto en el mensaje.
 - REFERENCIA PRONOMINAL A PRODUCTO RECIENTE: si el mensaje usa un pronombre demostrativo ("esa", "ese", "eso", "esas", "esos", "la misma", "el mismo", "deme esa", "quiero ese", "dame eso") para referirse a un producto que se acaba de mencionar o mostrar en la conversación, trátalo como si el usuario NOMBRÓ ese producto. Revisa el historial reciente para identificar cuál producto se mencionó. Si además incluye modificaciones ("sin X", "con extra Y", "pero sin salsa"), clasifica como ADD_TO_CART con product_name del producto referenciado y notes con la modificación. Ejemplo: bot acaba de mostrar "AL PASTOR" y usuario dice "deme esa pero sin salsa picante" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "AL PASTOR", "quantity": 1, "notes": "sin salsa picante"}}}}. Esta regla tiene PRIORIDAD sobre las reglas de MODIFICACIONES y AÑADIR nota de más abajo — esas aplican SOLO cuando el producto YA ESTÁ en el carrito.
-- GREET SOLO si el mensaje es únicamente un saludo ("hola", "buenas", "buenos días", "buenas noches") SIN ninguna mención de producto, cantidad o intención de pedir. Si el usuario mezcla saludo con un producto específico ("hola quiero una barracuda") → usa ADD_TO_CART o SEARCH_PRODUCTS directamente, NO GREET.
 - Si el usuario expresa intención de pedir u ordenar SIN nombrar ningún producto específico (ej. "para un domicilio", "quiero pedir", "quiero hacer un pedido", "buenas, un domicilio por favor", "me pueden atender"): usa CHAT. El usuario probablemente ya sabe qué quiere; solo invítalo a decir su pedido. NO uses ADD_TO_CART, SEARCH_PRODUCTS ni GET_MENU_CATEGORIES porque no hay producto ni pregunta por el menú. IMPORTANTE: esta regla aplica SOLO si no hay productos nombrados — si hay aunque sea un producto, gana la regla de prioridad de arriba.
 - Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). REGLA IMPORTANTE PARA BEBIDAS GENÉRICAS: si el usuario pide un producto genérico con un sabor o fruta (ej. "un jugo de mora en agua", "un jugo de mango en leche", "un hervido de maracuyá"), pasa la frase COMPLETA como product_name incluyendo el sabor — NO la simplifiques al nombre del catálogo. Ejemplo: "un jugo de mango en agua" → product_name="jugo de mango en agua" (NO "Jugos en agua"). Ejemplo: "un jugo de fresa en leche" → product_name="jugo de fresa en leche". El backend extrae el sabor automáticamente. Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}. Ejemplo saludo + pedido multi-producto: "hola buenas un domicilio por favor, 2 betas, 1 barracuda, 1 biela fries" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "BETA", "quantity": 2}}, {{"product_name": "BARRACUDA", "quantity": 1}}, {{"product_name": "BIELA FRIES", "quantity": 1}}]}}}}. Ejemplo con saltos de línea: "hola buenas tardes un domicilio por favor\\n2 betas\\n1 barracuda\\n1 biela fries" → mismo resultado (los saltos de línea son solo formato).
 - MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al pedido (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en el pedido y "notes" con la instrucción. Ejemplo: pedido tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente. IMPORTANTE: esta regla aplica SOLO si el producto ya aparece en "Productos YA en el pedido" de arriba. Si el carrito está vacío o el producto NO está en el carrito, NO uses UPDATE_CART_ITEM — usa ADD_TO_CART con notes (o la regla de REFERENCIA PRONOMINAL si el usuario usa "esa"/"ese").
 - AÑADIR una nota / sabor / detalle a un producto YA en el pedido (ej. "el jugo también es de mora", "el jugo en agua es de lulo", "al jugo en leche agrégale mango", "hazlo de mango"): usa UPDATE_CART_ITEM con "product_name" del producto ACTUAL en el carrito y "notes" igual al nuevo detalle (ej. "mora", "lulo", "mango"). NO lo confundas con un nuevo pedido — el cliente está describiendo el producto existente, no ordenando otro. Ejemplo: carrito tiene 'Jugos en agua' y cliente dice "el jugo en agua también es de mora" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Jugos en agua", "notes": "mora"}}}}. IMPORTANTE: esta regla aplica SOLO si el producto ya aparece en el carrito. Si no está en el carrito, NO uses UPDATE_CART_ITEM.
 - REEMPLAZO POR VARIANTE / SABOR / TIPO de un producto YA en el pedido (ej. "la soda que sea de frutos rojos", "mejor la hamburguesa doble", "cámbiala por la de pollo", "que sea la Corona", "la cerveza que sea Poker"): usa UPDATE_CART_ITEM con "product_name" = nombre del producto ACTUAL en el carrito, y "new_product_name" = nombre completo del producto NUEVO combinando el nombre actual con la variante. Ejemplo: carrito tiene "Soda" y usuario dice "la soda que sea de frutos rojos" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Soda", "new_product_name": "Soda Frutos rojos"}}}}. Ejemplo: carrito tiene "Michelada" y usuario dice "que sea con Corona" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Michelada", "new_product_name": "Corona michelada"}}}}. Distingue de `notes`: usa `notes` SOLO para exclusiones/añadidos de ingredientes (ej. "sin morcilla", "extra salsa"), NUNCA para elegir otra variante del producto. NUNCA uses ADD_TO_CART para un reemplazo: UPDATE_CART_ITEM con new_product_name maneja la sustitución atómica.
+- PROMOCIONES (ADD_PROMO_TO_CART): si el usuario pide explícitamente una promoción / combo / oferta del negocio (ej. "dame la promo de honey burger", "quiero la promo del lunes", "agregame esa promo", "me das la oferta de 2x1", "dame ese combo"), usa ADD_PROMO_TO_CART. Pasa params.promo_query con la frase descriptiva del usuario (ej. "honey burger", "promo del lunes"). Si la conversación previa identificó una promo específica con ID (ej. el agente de servicio al cliente listó promos y el usuario dijo "la primera"), pasa params.promo_id en lugar de promo_query. NO uses ADD_TO_CART para una promo — el matcher de promociones se ejecuta en backend y necesita conocer el binding explícito. NO inventes promos: si no estás seguro si existe, igual usa ADD_PROMO_TO_CART con el query del usuario y el backend responderá si no existe.
 - Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Usa SOLO el nombre BASE del producto, SIN las notas entre paréntesis. Ejemplo: el pedido tiene "Jugos en leche (mango)" → product_name="Jugos en leche" (NO "Jugos en leche (mango)"). Otro ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
 - Si pregunta por el ESTADO DE SU PEDIDO — no por el menú — usa VIEW_CART sin params. Frases típicas: "¿qué tengo en mi pedido?", "¿qué hay en mi pedido?", "cómo va mi pedido", "mi orden", "qué llevo", "qué he pedido", "muéstrame mi pedido", "ver mi pedido", "mi carrito", "cómo quedó mi pedido". NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar qué tiene el restaurante, VIEW_CART es para revisar lo que el cliente ya agregó al pedido.
 - CONFIRMACIÓN (regla única, muy importante): si el mensaje del usuario es una confirmación pura — "listo", "procedamos", "procedemos", "confirmar", "confirmo", "dale", "sí", "si", "ok", "okay", "perfecto", "ya", "vale", "de acuerdo" — SIN nombrar producto, dirección, teléfono ni medio de pago, usa SIEMPRE `{{"intent": "CONFIRM", "params": {{}}}}`. TAMBIÉN cuenta como CONFIRM cuando el ÚLTIMO mensaje del bot preguntó si desea agregar algo más o si procedemos (ej. "¿algo más?", "¿quieres agregar algo más?", "¿procedemos?", "¿procedemos con el pedido?") y el usuario responde con una NEGACIÓN que significa "no quiero nada más, procede" — "no", "que no", "nada", "nada más", "eso es todo", "no más", "así está bien", "ya no", "estamos bien", "no gracias", "así déjalo", "con eso". IMPORTANTE: estas negaciones SOLO son CONFIRM cuando el bot ofreció agregar más o preguntó si procede; si el bot hizo otra pregunta de sí/no (ej. "¿quieres la hamburguesa?", "¿te la cambio?"), una negación NO es CONFIRM sino CHAT. No decidas tú si significa "proceder al checkout" o "colocar el pedido": el backend lo resuelve según el estado actual. NUNCA uses PROCEED_TO_CHECKOUT ni PLACE_ORDER directamente para palabras de confirmación. Si además de confirmar el usuario provee datos de entrega (ej. "listo, mi dirección es calle 1"), usa SUBMIT_DELIVERY_INFO con los datos, no CONFIRM.
@@ -293,6 +309,32 @@ def apply_disamb_reply_flavor_fallback(
             injected, chosen,
         )
     return parsed
+
+
+# Tokens that indicate the customer is asking ABOUT promos (discovery /
+# listing) rather than naming one to add. Used as a defensive override
+# when the order planner falls through to CHAT — those messages belong
+# to the customer service agent's GET_PROMOS path. Action verbs like
+# "dame", "quiero" deliberately excluded: those are cart-add and stay
+# on the order side via ADD_PROMO_TO_CART.
+_PROMO_DISCOVERY_PATTERN = re.compile(
+    r"\b(promo|promos|promoci(?:o|ó)n(?:es)?|oferta|ofertas|combo|combos)\b",
+    re.IGNORECASE,
+)
+_PROMO_ACTION_VERBS = re.compile(
+    r"\b(dame|quiero|agrega(?:me)?|p[oó]ngame|m[ae]te|añade|sumame|me das)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_promo_discovery(message: str) -> bool:
+    """True when message mentions a promo concept WITHOUT a cart-add verb.
+    Lets a misrouted "qué promos tienen?" reach customer_service."""
+    if not message:
+        return False
+    if not _PROMO_DISCOVERY_PATTERN.search(message):
+        return False
+    return _PROMO_ACTION_VERBS.search(message) is None
 
 
 def _parse_planner_response(text: str) -> Dict[str, Any]:
@@ -550,7 +592,27 @@ class OrderAgent(BaseAgent):
             removed = cc.get("removed") or []
             updated = cc.get("updated") or []
             cart_after = cc.get("cart_after") or []
-            total_after = cc.get("total_after") or 0
+
+            # Re-run the matcher so the response shows the same totals
+            # the customer will pay. Items bound to a promo collapse into
+            # one labeled bundle line so the LLM doesn't talk about base
+            # prices for items the customer got via a promo.
+            business_id = (business_context or {}).get("business_id") or ""
+            preview = promotion_service.preview_cart(str(business_id), cart_after)
+            total_after = int(preview["subtotal"])
+            applied_promos = preview.get("applications") or []
+            promo_just_added = (
+                action == CART_ACTION_ADDED
+                and any(it.get("promotion_id") for it in (added or []))
+            )
+            new_promo_name = ""
+            if promo_just_added:
+                # Find the promo name for the bundle that was just added.
+                added_pgids = {it.get("promo_group_id") for it in added if it.get("promo_group_id")}
+                for app in applied_promos:
+                    if app.get("promo_group_id") in added_pgids:
+                        new_promo_name = app.get("promotion_name") or ""
+                        break
 
             def fmt_items(items):
                 return "\n".join(
@@ -559,7 +621,26 @@ class OrderAgent(BaseAgent):
                     for it in items
                 )
 
-            cart_lines = fmt_items(cart_after) or "(vacío)"
+            def fmt_groups(groups):
+                lines = []
+                for g in groups:
+                    if g.get("kind") == "promo_bundle":
+                        comps = ", ".join(
+                            f"{c.get('quantity')}x {c.get('name')}"
+                            for c in (g.get("components") or [])
+                        )
+                        lines.append(
+                            f"- 🏷 PROMO {g.get('promotion_name')} ({comps}) — {money(g.get('promo_price'))}"
+                        )
+                    else:
+                        notes = g.get("notes")
+                        notes_part = f" ({notes})" if notes else ""
+                        lines.append(
+                            f"- {g.get('quantity')}x {g.get('name')}{notes_part}"
+                        )
+                return "\n".join(lines)
+
+            cart_lines = fmt_groups(preview["display_groups"]) or "(vacío)"
 
             if action == CART_ACTION_NOOP:
                 system = base_system + (
@@ -685,14 +766,32 @@ class OrderAgent(BaseAgent):
                 )
                 return system, inp
 
+            promo_added_rule = ""
+            if new_promo_name:
+                promo_added_rule = (
+                    f"- ESTA RESPUESTA AGREGÓ UNA PROMO ('{new_promo_name}'). Confirma que "
+                    "agregaste LA PROMO por nombre (no enumeres los productos individuales "
+                    "con sus precios base — el cliente pidió un combo/promo, no productos sueltos).\n"
+                )
+            promo_total_rule = ""
+            if applied_promos:
+                promo_total_rule = (
+                    "- El subtotal que te doy YA incluye los descuentos de la promo. NO digas "
+                    "el precio sin descuento como si fuera el total. NO sumes precios base "
+                    "tú mismo.\n"
+                )
             system = base_system + (
                 f"\n\nSITUACIÓN: {situation}\n"
                 "REGLAS:\n"
                 "- Confirma brevemente el cambio que hizo el backend (está en 'Cambio realizado').\n"
+                + promo_added_rule +
                 "- Muestra el resumen del pedido actual usando los nombres EXACTOS de la lista "
-                "'Pedido actual' que te doy. Copia el nombre del producto tal cual aparece "
-                "(con mayúsculas, acentos y notas entre paréntesis). NO los reemplaces por las "
-                "palabras que usó el cliente en su mensaje.\n"
+                "'Pedido actual' que te doy. Si una línea empieza con '🏷 PROMO', preséntala como "
+                "una sola promo con su nombre y precio promocional — NO enumeres sus componentes "
+                "como ítems separados con precios base.\n"
+                "- Copia el nombre del producto tal cual aparece (con mayúsculas, acentos y notas "
+                "entre paréntesis). NO los reemplaces por las palabras que usó el cliente.\n"
+                + promo_total_rule +
                 "- Sugiere el siguiente paso: preguntar si quiere agregar algo más (ej. bebida si no tiene una) o procedemos con el pedido.\n"
                 "- NO inventes productos, nombres, variantes, ni precios — usa solo los datos dados.\n"
                 "- 2-5 líneas."
@@ -701,7 +800,7 @@ class OrderAgent(BaseAgent):
                 f"Cliente dijo: {message_body}\n"
                 f"Cambio realizado:\n{change_desc}\n"
                 f"Pedido actual:\n{cart_lines}\n"
-                f"Subtotal: {money(total_after)}"
+                f"Subtotal (ya con promo si aplica): {money(total_after)}"
             )
             return system, inp
 
@@ -782,25 +881,55 @@ class OrderAgent(BaseAgent):
             op = exec_result.get("order_placed") or {}
             oid = op.get("order_id_display") or ""
             items = op.get("items") or []
+            promo_discount = int(op.get("promo_discount") or 0)
+            applied_promos = op.get("applied_promos") or []
+
+            # Render the items list bundle-aware: items bound to a promo
+            # collapse into a single "PROMO X" line so the customer sees
+            # the promo as a unit, not as base-priced individual items.
+            business_id = (business_context or {}).get("business_id") or ""
+            preview = promotion_service.preview_cart(str(business_id), items)
             items_lines = "\n".join(
-                f"- {it.get('quantity')}x {it.get('name')}"
-                + (f" ({it.get('notes')})" if it.get("notes") else "")
-                for it in items
+                (
+                    "- 🏷 PROMO " + (g.get("promotion_name") or "")
+                    + " (" + ", ".join(
+                        f"{c.get('quantity')}x {c.get('name')}"
+                        for c in (g.get("components") or [])
+                    ) + ") — " + money(g.get("promo_price") or 0)
+                ) if g.get("kind") == "promo_bundle" else (
+                    f"- {g.get('quantity')}x {g.get('name')}"
+                    + (f" ({g.get('notes')})" if g.get("notes") else "")
+                )
+                for g in preview["display_groups"]
             )
+
+            savings_clause = ""
+            if promo_discount > 0:
+                names = ", ".join(applied_promos) or "promo aplicada"
+                savings_clause = (
+                    f"- Incluye una línea de ahorro DESPUÉS del subtotal con este formato exacto: "
+                    f"'Ahorro con promo: -{money(promo_discount)} ({names})'. Esto enmarca el "
+                    f"descuento como un beneficio para el cliente, no como una corrección.\n"
+                )
             system = base_system + (
                 "\n\nSITUACIÓN: El pedido fue confirmado exitosamente. "
                 "REGLAS:\n"
                 "- Celebra brevemente (ej. '¡Listo!').\n"
-                "- Muestra el número de pedido, items, subtotal, domicilio y total.\n"
+                "- Muestra el número de pedido, los items, subtotal, domicilio y total.\n"
+                "- Si una línea de items empieza con '🏷 PROMO', preséntala como UNA promo "
+                "con su nombre y precio promocional. NO la descompongas en sus componentes "
+                "como ítems separados con precios base.\n"
+                + savings_clause +
+                "- El subtotal y total que te doy YA reflejan los descuentos. NO recalcules.\n"
                 "- Dile que pronto se comunicarán para coordinar la entrega.\n"
-                "- Indica que el pedido se demora entre 40 a 50 minutos en su entrega.\n"
+                f"- Indica que el pedido se demora {NOMINAL_RANGE_TEXT} en su entrega.\n"
                 "- 3-6 líneas."
             )
             inp = (
                 f"Pedido confirmado.\n"
                 f"Número: #{oid}\n"
                 f"Items:\n{items_lines}\n"
-                f"Subtotal: {money(op.get('subtotal'))}\n"
+                f"Subtotal (ya con promo si aplica): {money(op.get('subtotal'))}\n"
                 f"Domicilio: {money(op.get('delivery_fee'))}\n"
                 f"Total: {money(op.get('total'))}"
             )
@@ -872,18 +1001,40 @@ class OrderAgent(BaseAgent):
         order_context = session.get("order_context") or {}
         order_state = order_context.get("state") or "GREETING"
         items = order_context.get("items") or []
-        total = order_context.get("total") or 0
         if items:
+            # Use the matcher-aware preview so the planner sees the same
+            # numbers the customer sees. Items bound to a promo are
+            # tagged "(promo)" so the planner doesn't think the customer
+            # got a base-priced product.
+            preview = promotion_service.preview_cart(str(business_id), items)
             lines = []
-            for it in items:
-                notes_part = f" ({it['notes']})" if it.get("notes") else ""
-                lines.append(f"{it.get('quantity', 0)}x {it.get('name', '')}{notes_part}")
-            cart_summary_str = "; ".join(lines) + f". Subtotal: ${int(total):,}".replace(",", ".")
+            for g in preview["display_groups"]:
+                if g.get("kind") == "promo_bundle":
+                    comps = ", ".join(
+                        f"{c.get('quantity')}x {c.get('name')}"
+                        for c in (g.get("components") or [])
+                    )
+                    lines.append(
+                        f"PROMO {g.get('promotion_name')} ({comps}) — "
+                        f"${int(g.get('promo_price') or 0):,}".replace(",", ".")
+                    )
+                else:
+                    notes_part = f" ({g['notes']})" if g.get("notes") else ""
+                    lines.append(f"{g.get('quantity', 0)}x {g.get('name', '')}{notes_part}")
+            subtotal_str = f"${int(preview['subtotal']):,}".replace(",", ".")
+            cart_summary_str = "; ".join(lines) + f". Subtotal: {subtotal_str}"
         else:
             cart_summary_str = "Pedido vacío."
 
         try:
             tracer.start_run(run_id=run_id, user_id=wa_id, message_id=message_id, business_id=str(business_id))
+
+            # Handoff fast-path: when we got here via a customer-service
+            # handoff that already resolved a promo (e.g. user said "dame
+            # esa" after CS listed promos), skip the planner LLM and
+            # synthesize ADD_PROMO_TO_CART with the resolved id.
+            handoff_context = kwargs.get("handoff_context") or {}
+            handoff_promo_id = (handoff_context.get("promo_id") or "").strip() if handoff_context else ""
 
             # 1) Planner: one intent + params
             planner_system = PLANNER_SYSTEM_TEMPLATE.format(
@@ -913,25 +1064,37 @@ class OrderAgent(BaseAgent):
                 role = msg.get("role", "")
                 content = (msg.get("content") or msg.get("message", ""))[:400]
                 history_text += f"{role}: {content}\n"
-            planner_messages = [
-                SystemMessage(content=planner_system),
-                HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON: intent y params."),
-            ]
-            planner_response = self.llm.invoke(
-                planner_messages,
-                config={
-                    "run_name": "order_planner",
-                    "metadata": {
-                        "wa_id": wa_id,
-                        "business_id": str(business_id),
-                        "order_state": order_state,
-                        "stale_turn": stale_turn,
-                        "run_id": run_id,
+            if handoff_promo_id:
+                # Skip the planner LLM call entirely — the handoff already
+                # told us exactly what to do.
+                parsed = {
+                    "intent": "ADD_PROMO_TO_CART",
+                    "params": {"promo_id": handoff_promo_id},
+                }
+                logging.warning(
+                    "[ORDER_AGENT] handoff fast-path: promo_id=%s — skipping planner",
+                    handoff_promo_id,
+                )
+            else:
+                planner_messages = [
+                    SystemMessage(content=planner_system),
+                    HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON: intent y params."),
+                ]
+                planner_response = self.llm.invoke(
+                    planner_messages,
+                    config={
+                        "run_name": "order_planner",
+                        "metadata": {
+                            "wa_id": wa_id,
+                            "business_id": str(business_id),
+                            "order_state": order_state,
+                            "stale_turn": stale_turn,
+                            "run_id": run_id,
+                        },
                     },
-                },
-            )
-            planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
-            parsed = _parse_planner_response(planner_text)
+                )
+                planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
+                parsed = _parse_planner_response(planner_text)
             # Deterministic safety net: if the planner stripped a
             # qualifier token (e.g. "mora") from a disamb reply that
             # mapped to an exact option name, re-attach it as notes.
@@ -941,6 +1104,33 @@ class OrderAgent(BaseAgent):
             intent = (parsed.get("intent") or INTENT_CHAT).upper().replace(" ", "_")
             params = parsed.get("params") or {}
             logging.warning("[ORDER_AGENT] Planner intent=%s params=%s", intent, params)
+
+            # Defensive promo-discovery handoff: when the router misclassifies
+            # a "qué promos hay" question as `order` and our planner picks
+            # CHAT (because there's no add-to-cart intent expressed), bounce
+            # it to customer_service which owns promo listings. Empty cart
+            # only — once a cart exists, an order-side CHAT is more likely
+            # to be a real conversational reply than a promo question.
+            if (
+                intent == INTENT_CHAT
+                and not items
+                and _looks_like_promo_discovery(message_body)
+            ):
+                logging.warning(
+                    "[ORDER_AGENT] promo-discovery defensive handoff -> customer_service (msg=%r)",
+                    message_body[:80],
+                )
+                tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+                return {
+                    "agent_type": self.agent_type,
+                    "message": "",
+                    "state_update": {},
+                    "handoff": {
+                        "to": "customer_service",
+                        "segment": message_body,
+                        "context": {"reason": "promo_discovery_misroute"},
+                    },
+                }
 
             # ── Abort check: a newer message arrived while the planner ran.
             # Skip executor + response so cart state stays clean. Requeue
@@ -1000,60 +1190,61 @@ class OrderAgent(BaseAgent):
                 int((time.time() - start_time) * 1000),
             )
 
-            # 3) Response: deterministic greeting for GREET, else LLM response generator
-            if intent == INTENT_GREET:
-                business_name = "BIELA FAST FOOD"
-                menu_url = "https://gixlink.com/Biela"
-                if business_context and business_context.get("business"):
-                    biz = business_context["business"]
-                    business_name = (biz.get("name") or business_name).strip()
-                    settings = biz.get("settings") or {}
-                    menu_url = (settings.get("menu_url") or menu_url).strip()
-
-                customer_name = (name or "").strip()
-                has_real_name = customer_name and customer_name.lower() not in ("usuario", "cliente", "user")
-
-                # Preserve the existing greeting cases: personalized when we have a real name, generic otherwise.
-                if has_real_name:
-                    opener = f"Hola {customer_name}.\n\n"
-                else:
-                    opener = ""
-
-                final_response_text = (
-                    f"{opener}"
-                    f"Gracias por comunicarte con {business_name}. ¿Cómo podemos ayudarte?\n\n"
-                    "🍔🍟🔥😁\n\n"
-                    "Recuerda que nuestro horario de atención al público es de 5:30 PM a 10:00 PM de lunes a viernes.\n\n"
-                    f"{menu_url}"
+            # Handoff guard: empty-cart status query.
+            # Mirror of customer_service_flow's active-cart guard. If the
+            # router sent "mi pedido" style questions to order but the cart
+            # is empty AND the phrasing reads like a status query, defer
+            # to customer_service which can check completed orders.
+            if (
+                intent == INTENT_VIEW_CART
+                and (exec_result.get("cart_view") or {}).get("is_empty")
+                and _STATUS_INQUIRY_RE.search(message_body or "")
+            ):
+                logging.warning(
+                    "[ORDER_AGENT] handoff to customer_service (empty_cart_status_query)"
                 )
-            else:
-                result_kind = exec_result.get("result_kind", "")
-                response_system, resp_input = self._build_response_prompt(
-                    result_kind=result_kind,
-                    exec_result=exec_result,
-                    message_body=message_body,
-                    business_context=business_context,
-                    cart_summary_after=cart_summary_after,
-                )
-                response_messages = [
-                    SystemMessage(content=response_system),
-                    HumanMessage(content=resp_input + "\n\nResponde al cliente en español colombiano, breve y natural:"),
-                ]
-                response_llm = self.llm.invoke(
-                    response_messages,
-                    config={
-                        "run_name": "order_response",
-                        "metadata": {
-                            "wa_id": wa_id,
-                            "business_id": str(business_id),
-                            "intent": intent,
-                            "result_kind": result_kind,
-                            "run_id": run_id,
-                        },
+                tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+                return {
+                    "agent_type": self.agent_type,
+                    "message": "",
+                    "state_update": {},
+                    "handoff": {
+                        "to": "customer_service",
+                        "segment": message_body,
+                        "context": {"reason": "empty_cart_status_query"},
                     },
-                )
-                final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)
-                final_response_text = (final_response_text or "").strip() or "Listo. ¿En qué más puedo ayudarte?"
+                }
+
+            # 3) Response generator.
+            # Pure greetings are handled upstream by the router fast-path
+            # (see app/services/business_greeting.py) and never reach this agent.
+            result_kind = exec_result.get("result_kind", "")
+            response_system, resp_input = self._build_response_prompt(
+                result_kind=result_kind,
+                exec_result=exec_result,
+                message_body=message_body,
+                business_context=business_context,
+                cart_summary_after=cart_summary_after,
+            )
+            response_messages = [
+                SystemMessage(content=response_system),
+                HumanMessage(content=resp_input + "\n\nResponde al cliente en español colombiano, breve y natural:"),
+            ]
+            response_llm = self.llm.invoke(
+                response_messages,
+                config={
+                    "run_name": "order_response",
+                    "metadata": {
+                        "wa_id": wa_id,
+                        "business_id": str(business_id),
+                        "intent": intent,
+                        "result_kind": result_kind,
+                        "run_id": run_id,
+                    },
+                },
+            )
+            final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)
+            final_response_text = (final_response_text or "").strip() or "Listo. ¿En qué más puedo ayudarte?"
 
             conversation_service.store_conversation_message(wa_id, final_response_text, "assistant", business_id=business_id)
 

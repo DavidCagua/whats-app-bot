@@ -29,6 +29,8 @@ from ..database.product_order_service import (
 )
 from ..services import order_tools
 from ..services import catalog_cache
+from ..services import catalog_service
+from ..services import promotion_service
 from . import turn_cache
 
 
@@ -45,12 +47,14 @@ def _save_session_and_invalidate(wa_id: str, business_id: str, state_update: Dic
 logger = logging.getLogger(__name__)
 
 # Intent names (planner output)
-INTENT_GREET = "GREET"
+# Note: GREET was removed when the router's greeting fast-path took over
+# pure-greeting handling (see app/services/business_greeting.py).
 INTENT_GET_MENU_CATEGORIES = "GET_MENU_CATEGORIES"
 INTENT_LIST_PRODUCTS = "LIST_PRODUCTS"
 INTENT_SEARCH_PRODUCTS = "SEARCH_PRODUCTS"
 INTENT_GET_PRODUCT = "GET_PRODUCT"
 INTENT_ADD_TO_CART = "ADD_TO_CART"
+INTENT_ADD_PROMO_TO_CART = "ADD_PROMO_TO_CART"
 INTENT_VIEW_CART = "VIEW_CART"
 INTENT_UPDATE_CART_ITEM = "UPDATE_CART_ITEM"
 INTENT_REMOVE_FROM_CART = "REMOVE_FROM_CART"
@@ -68,7 +72,6 @@ INTENT_CONFIRM = "CONFIRM"
 # Result kinds — routing signal for the response generator.
 # Every execute_order_intent return carries exactly one of these so the
 # response generator can pick the right branch without string-sniffing tool output.
-RESULT_KIND_GREET = "greet"
 RESULT_KIND_CHAT = "chat"
 RESULT_KIND_MENU_CATEGORIES = "menu_categories"
 RESULT_KIND_PRODUCTS_LIST = "products_list"
@@ -98,12 +101,12 @@ ORDER_STATES = (
 
 ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
     ORDER_STATE_GREETING: (
-        INTENT_GREET,
         INTENT_GET_MENU_CATEGORIES,
         INTENT_LIST_PRODUCTS,
         INTENT_SEARCH_PRODUCTS,
         INTENT_GET_PRODUCT,
         INTENT_ADD_TO_CART,
+        INTENT_ADD_PROMO_TO_CART,
         INTENT_CONFIRM,
         INTENT_CHAT,
     ),
@@ -113,6 +116,7 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_SEARCH_PRODUCTS,
         INTENT_GET_PRODUCT,
         INTENT_ADD_TO_CART,
+        INTENT_ADD_PROMO_TO_CART,
         INTENT_VIEW_CART,
         INTENT_UPDATE_CART_ITEM,
         INTENT_REMOVE_FROM_CART,
@@ -150,6 +154,7 @@ CONFIRM_RESOLUTION: Dict[str, str] = {
 
 CART_MUTATING_INTENTS = (
     INTENT_ADD_TO_CART,
+    INTENT_ADD_PROMO_TO_CART,
     INTENT_REMOVE_FROM_CART,
     INTENT_UPDATE_CART_ITEM,
 )
@@ -364,13 +369,18 @@ def _clean_product_dict(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _clean_cart_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Strip UUIDs from cart items for the response generator."""
+    """Trim cart items for the response generator. Keeps product_id +
+    promotion_id + promo_group_id so the response side can re-run the
+    matcher and group bundle items in display."""
     return [
         {
+            "product_id": it.get("product_id"),
             "name": it.get("name") or "",
             "quantity": int(it.get("quantity") or 0),
             "price": float(it.get("price") or 0),
             "notes": (it.get("notes") or "").strip() or None,
+            "promotion_id": it.get("promotion_id"),
+            "promo_group_id": it.get("promo_group_id"),
         }
         for it in (items or [])
     ]
@@ -394,10 +404,13 @@ def _format_phone_from_wa_id(wa_id: str) -> str:
 
 
 def _get_delivery_fee(business_context: Optional[Dict]) -> float:
+    """Falls back to the shared DELIVERY_FEE_DEFAULT so order receipts
+    and CS info answers agree on the same number."""
+    from ..services.business_info_service import DELIVERY_FEE_DEFAULT
     if not business_context:
-        return 5000.0
+        return float(DELIVERY_FEE_DEFAULT)
     settings = (business_context.get("business") or {}).get("settings") or {}
-    return float(settings.get("delivery_fee", 5000))
+    return float(settings.get("delivery_fee", DELIVERY_FEE_DEFAULT))
 
 
 def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:
@@ -828,9 +841,6 @@ def execute_order_intent(
 
     try:
         # --- state-transition / no-tool intents ---
-        if intent == INTENT_GREET:
-            return _base_result(current_state, wa_id, business_id, RESULT_KIND_GREET)
-
         if intent == INTENT_CHAT:
             return _base_result(current_state, wa_id, business_id, RESULT_KIND_CHAT)
 
@@ -870,16 +880,19 @@ def execute_order_intent(
                 delivery_status=delivery_status,
             )
 
-        # --- read intents (call service directly, no @tool wrapper) ---
+        # --- read intents (delegated to catalog_service) ---
+        # catalog_service is the shared read-only capability for menu/search.
+        # Response generator still receives _clean_product_dict-shaped payloads
+        # so the prompt/eval contract is unchanged.
         if intent == INTENT_GET_MENU_CATEGORIES:
-            categories = catalog_cache.list_categories(business_id) or []
+            categories = catalog_service.list_categories(business_id)
             if categories:
                 return _base_result(
                     current_state, wa_id, business_id,
                     RESULT_KIND_MENU_CATEGORIES,
                     categories=list(categories),
                 )
-            all_products = catalog_cache.list_products(business_id) or []
+            all_products = catalog_service.list_products(business_id)
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCTS_LIST,
@@ -890,9 +903,9 @@ def execute_order_intent(
 
         if intent == INTENT_LIST_PRODUCTS:
             category = (params.get("category") or "").strip()
-            products = catalog_cache.list_products_with_fallback(
-                business_id=business_id, category=category,
-            ) or []
+            products = catalog_service.list_products(
+                business_id=business_id, category=category or None,
+            )
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCTS_LIST,
@@ -908,9 +921,9 @@ def execute_order_intent(
                     current_state, wa_id, business_id,
                     "Indica qué producto estás buscando.",
                 )
-            products = product_order_service.search_products(
+            products = catalog_service.search_products(
                 business_id=business_id, query=query,
-            ) or []
+            )
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCTS_LIST,
@@ -927,10 +940,10 @@ def execute_order_intent(
                     current_state, wa_id, business_id,
                     "Indica el nombre del producto que quieres conocer.",
                 )
-            product = product_order_service.get_product(
+            product = catalog_service.get_product(
+                business_id=business_id,
                 product_id=product_id or None,
                 product_name=product_name or None,
-                business_id=business_id,
             )
             if not product:
                 return _user_error_result(
@@ -1213,6 +1226,45 @@ def execute_order_intent(
                 cart_change=cart_change,
             )
 
+        if intent == INTENT_ADD_PROMO_TO_CART:
+            tool_fn = _find_tool("add_promo_to_cart")
+            if not tool_fn:
+                return _internal_error_result(current_state, wa_id, business_id, "Tool add_promo_to_cart no encontrada")
+            cart_before = _get_cart_for_logging(wa_id, business_id)
+            args = {
+                "injected_business_context": ctx,
+                "promo_id": (params.get("promo_id") or "").strip(),
+                "promo_query": (params.get("promo_query") or "").strip(),
+            }
+            tool_msg = tool_fn.invoke(args)
+            cart_after = _get_cart_for_logging(wa_id, business_id)
+            _log_cart_debug(wa_id, business_id, "add_promo_to_cart", params, cart_before, cart_after)
+
+            if tool_msg.startswith("❌"):
+                # Tool refused (no match, ambiguous, schedule miss, etc.).
+                # Surface as user_error so the response generator phrases it
+                # for the customer instead of dumping the raw tool string.
+                return _user_error_result(
+                    current_state, wa_id, business_id, tool_msg.lstrip("❌").strip(),
+                )
+
+            cart_change = _build_cart_change(cart_before, cart_after)
+
+            # First-add transition out of GREETING, mirroring INTENT_ADD_TO_CART.
+            state_after = current_state
+            if current_state == ORDER_STATE_GREETING and cart_change["action"] != CART_ACTION_NOOP:
+                _save_session_and_invalidate(
+                    wa_id, business_id,
+                    {"order_context": {**order_tools._cart_from_session(wa_id, business_id), "state": ORDER_STATE_ORDERING}},
+                )
+                state_after = ORDER_STATE_ORDERING
+
+            return _base_result(
+                state_after, wa_id, business_id,
+                RESULT_KIND_CART_CHANGE,
+                cart_change=cart_change,
+            )
+
         if intent == INTENT_UPDATE_CART_ITEM:
             tool_fn = _find_tool("update_cart_item")
             if not tool_fn:
@@ -1468,15 +1520,46 @@ def execute_order_intent(
             except Exception:
                 pass
 
+            # Re-run the matcher on the placed cart to surface promo
+            # info to the response generator. create_order ran the same
+            # math against the DB; we duplicate the (cheap) read here so
+            # the receipt can show "Promo: -$X" without a DB roundtrip.
+            # Use cart_before's raw items (with product_id + bindings),
+            # not items_snapshot which strips them for display.
+            promo_subtotal = subtotal_snapshot
+            promo_discount = 0
+            applied_promos: List[str] = []
+            try:
+                pricing = promotion_service.match_and_apply(
+                    business_id=business_id,
+                    cart_items=[
+                        {
+                            "product_id": it.get("product_id"),
+                            "quantity": int(it.get("quantity") or 0),
+                            "unit_price": float(it.get("price") or 0),
+                            "promotion_id": it.get("promotion_id"),
+                            "promo_group_id": it.get("promo_group_id"),
+                        }
+                        for it in (cart_before.get("items") or [])
+                    ],
+                )
+                promo_subtotal = int(pricing.get("subtotal_after_promos") or subtotal_snapshot)
+                promo_discount = int(pricing.get("promo_discount_total") or 0)
+                applied_promos = [a["promotion_name"] for a in (pricing.get("applications") or [])]
+            except Exception as exc:
+                logger.warning("[ORDER_FLOW] promo display recompute failed: %s", exc)
+
             return _base_result(
                 ORDER_STATE_GREETING, wa_id, business_id,
                 RESULT_KIND_ORDER_PLACED,
                 order_placed={
                     "order_id_display": order_id_display or None,
                     "items": items_snapshot,
-                    "subtotal": subtotal_snapshot,
+                    "subtotal": promo_subtotal,
+                    "promo_discount": promo_discount,
+                    "applied_promos": applied_promos,
                     "delivery_fee": delivery_fee,
-                    "total": subtotal_snapshot + delivery_fee,
+                    "total": promo_subtotal + delivery_fee,
                 },
             )
 

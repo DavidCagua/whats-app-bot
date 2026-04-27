@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Type
 
 from .base_agent import BaseAgent
 from .booking_agent import BookingAgent
+from .customer_service_agent import CustomerServiceAgent
 from .order_agent import OrderAgent
 from .sales_agent import SalesAgent
 
@@ -18,6 +19,7 @@ from .sales_agent import SalesAgent
 # expensive (LLM client creation, tool loading, etc.) so we defer it.
 _AGENT_CLASSES: Dict[str, Type[BaseAgent]] = {
     "booking": BookingAgent,
+    "customer_service": CustomerServiceAgent,
     "order": OrderAgent,
     "sales": SalesAgent,
 }

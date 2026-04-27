@@ -3,8 +3,15 @@ Unit tests for OrderAgent response-prompt building.
 Tests the branch logic in _build_response_prompt without any LLM or DB calls.
 """
 
+from unittest.mock import patch
+
 from app.agents.order_agent import OrderAgent, PLANNER_SYSTEM_TEMPLATE
-from app.orchestration.order_flow import RESULT_KIND_PRODUCTS_LIST
+from app.orchestration.order_flow import (
+    CART_ACTION_ADDED,
+    RESULT_KIND_CART_CHANGE,
+    RESULT_KIND_ORDER_PLACED,
+    RESULT_KIND_PRODUCTS_LIST,
+)
 
 
 class TestProductsListResponsePrompt:
@@ -84,6 +91,212 @@ class TestProductsListResponsePrompt:
         assert "COCA COLA" in inp
         assert "AGUA" in inp
         assert "INCLÚYELA SIEMPRE" in system
+
+
+class TestCartChangeResponsePromptDoesNotCrash:
+    """Regression: response prompt builders must not reference variables that
+    only exist in `execute()`. Crashes here surface as `❌ Error...` on the
+    customer's WhatsApp instead of the intended response.
+
+    All preview_cart calls are stubbed because we don't want to hit the DB
+    from a unit test — the test is purely about the prompt's local-variable
+    bindings and template rendering.
+    """
+
+    def _stub_preview(self, items_count=2):
+        return {
+            "display_groups": [
+                {
+                    "kind": "promo_bundle",
+                    "promotion_name": "2 Honey Burger con papas",
+                    "promo_price": 30000.0,
+                    "discount_applied": 26000.0,
+                    "components": [
+                        {"name": "HONEY BURGER", "quantity": 2},
+                        {"name": "Papas", "quantity": 1},
+                    ],
+                },
+                {
+                    "kind": "item",
+                    "name": "Coca-Cola",
+                    "quantity": 2,
+                    "unit_price": 5500.0,
+                    "line_total": 11000.0,
+                    "notes": None,
+                },
+            ],
+            "subtotal_before_promos": 67000.0,
+            "promo_discount_total": 26000.0,
+            "subtotal": 41000.0,
+            "applications": [
+                {
+                    "promotion_id": "p1",
+                    "promotion_name": "2 Honey Burger con papas",
+                    "pricing_mode": "fixed_price",
+                    "discount_applied": 26000.0,
+                    "promo_group_id": "g1",
+                }
+            ],
+        }
+
+    def test_cart_change_renders_without_crashing_when_promo_just_added(self):
+        """The exact crash case: ADD_PROMO_TO_CART → cart_change → response
+        prompt builder. Used to NameError on `business_id` because the
+        variable only existed in execute()'s scope."""
+        agent = OrderAgent()
+        exec_result = {
+            "cart_change": {
+                "action": CART_ACTION_ADDED,
+                "added": [
+                    {
+                        "product_id": "honey",
+                        "name": "HONEY BURGER",
+                        "quantity": 2,
+                        "price": 28000,
+                        "promotion_id": "p1",
+                        "promo_group_id": "g1",
+                    },
+                ],
+                "removed": [],
+                "updated": [],
+                "cart_after": [
+                    {
+                        "product_id": "honey",
+                        "name": "HONEY BURGER",
+                        "quantity": 2,
+                        "price": 28000,
+                        "promotion_id": "p1",
+                        "promo_group_id": "g1",
+                    },
+                    {
+                        "product_id": "papas",
+                        "name": "Papas",
+                        "quantity": 1,
+                        "price": 8000,
+                        "promotion_id": "p1",
+                        "promo_group_id": "g1",
+                    },
+                ],
+                "total_after": 64000,
+            },
+        }
+        business_context = {"business_id": "biz-uuid", "business": {"name": "Biela"}}
+
+        with patch(
+            "app.agents.order_agent.promotion_service.preview_cart",
+            return_value=self._stub_preview(),
+        ):
+            system, inp = agent._build_response_prompt(
+                result_kind=RESULT_KIND_CART_CHANGE,
+                exec_result=exec_result,
+                message_body="dame una promo de honey",
+                business_context=business_context,
+                cart_summary_after="(unused on this branch)",
+            )
+
+        # Bundle line should appear with the promo name + price, not the
+        # base-priced components as separate items.
+        assert "PROMO" in inp
+        assert "2 Honey Burger con papas" in inp
+        assert "$30.000" in inp
+        # Subtotal label must clarify it already reflects the promo.
+        assert "ya con promo" in inp
+        # System prompt must instruct the LLM not to redecompose the bundle
+        # or recompute totals.
+        assert "PROMO" in system
+        assert "promo" in system.lower()
+
+    def test_cart_change_renders_when_business_context_is_none(self):
+        """Same render path with a None business_context — must still not raise."""
+        agent = OrderAgent()
+        exec_result = {
+            "cart_change": {
+                "action": CART_ACTION_ADDED,
+                "added": [{"product_id": "x", "name": "AGUA", "quantity": 1, "price": 3000}],
+                "removed": [],
+                "updated": [],
+                "cart_after": [
+                    {"product_id": "x", "name": "AGUA", "quantity": 1, "price": 3000}
+                ],
+                "total_after": 3000,
+            },
+        }
+        with patch(
+            "app.agents.order_agent.promotion_service.preview_cart",
+            return_value={
+                "display_groups": [
+                    {
+                        "kind": "item",
+                        "name": "AGUA",
+                        "quantity": 1,
+                        "unit_price": 3000.0,
+                        "line_total": 3000.0,
+                        "notes": None,
+                    }
+                ],
+                "subtotal_before_promos": 3000.0,
+                "promo_discount_total": 0.0,
+                "subtotal": 3000.0,
+                "applications": [],
+            },
+        ):
+            system, inp = agent._build_response_prompt(
+                result_kind=RESULT_KIND_CART_CHANGE,
+                exec_result=exec_result,
+                message_body="agrega una agua",
+                business_context=None,
+                cart_summary_after="(unused)",
+            )
+        assert "AGUA" in inp
+
+    def test_order_placed_renders_without_crashing(self):
+        """Same regression on the order_placed branch. The previous template
+        also referenced `business_id` from outside its scope."""
+        agent = OrderAgent()
+        exec_result = {
+            "order_placed": {
+                "order_id_display": "ABC12345",
+                "items": [
+                    {
+                        "product_id": "honey",
+                        "name": "HONEY BURGER",
+                        "quantity": 2,
+                        "price": 28000,
+                        "promotion_id": "p1",
+                        "promo_group_id": "g1",
+                    },
+                    {
+                        "product_id": "papas",
+                        "name": "Papas",
+                        "quantity": 1,
+                        "price": 8000,
+                        "promotion_id": "p1",
+                        "promo_group_id": "g1",
+                    },
+                ],
+                "subtotal": 30000,
+                "promo_discount": 26000,
+                "applied_promos": ["2 Honey Burger con papas"],
+                "delivery_fee": 5000,
+                "total": 35000,
+            },
+        }
+        business_context = {"business_id": "biz-uuid", "business": {"name": "Biela"}}
+
+        with patch(
+            "app.agents.order_agent.promotion_service.preview_cart",
+            return_value=self._stub_preview(),
+        ):
+            system, inp = agent._build_response_prompt(
+                result_kind=RESULT_KIND_ORDER_PLACED,
+                exec_result=exec_result,
+                message_body="confirmar",
+                business_context=business_context,
+                cart_summary_after="(unused)",
+            )
+        # Receipt must reframe the discount as savings, not a math correction.
+        assert "Ahorro con promo" in system
+        assert "ABC12345" in inp
 
 
 class TestPhoneFormatFromWaId:
@@ -216,3 +429,33 @@ class TestPlannerPromptRules:
         assert "search_products" in lower
         assert "hamburguesas picantes" in lower, \
             "Planner prompt must use 'hamburguesas picantes' as an example"
+
+    def test_planner_prompt_routes_product_price_question_to_get_product(self):
+        """
+        Regression: "una picada que valor?" was being classified as CHAT
+        because no planner rule covered price-of-product questions. Once
+        routing was fixed, the order agent's planner still missed it. The
+        rule must extend GET_PRODUCT to cover price/value/cost phrasings,
+        with explicit guidance that ADD_TO_CART is NOT the right intent
+        when the customer is asking for the price (they're deciding,
+        not ordering yet).
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        lower = prompt.lower()
+        # The rule itself.
+        assert "precio" in lower, \
+            "Planner prompt must mention price/precio under GET_PRODUCT"
+        # Concrete examples the LLM can pattern-match against.
+        for example in (
+            "cuánto vale la x",
+            "qué valor tiene la x",
+            "una x qué valor",
+            "qué precio tiene la x",
+        ):
+            assert example in lower, f"Planner prompt missing example: {example!r}"
+        # Critical guardrail: don't accidentally ADD_TO_CART when asking
+        # for a price.
+        assert "una picada que valor" in lower, \
+            "Planner prompt must use 'una picada que valor?' as an example"
+        assert "no add_to_cart" in lower, \
+            "Planner prompt must explicitly forbid ADD_TO_CART for price questions"

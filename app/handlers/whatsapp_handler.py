@@ -79,7 +79,12 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
                 if conv_id is not None:
                     try:
                         from app.workers.media_job import enqueue_media_job
-                        enqueue_media_job(conv_id)
+                        # Pass abort_key so the media job can set the
+                        # processing flag while it runs vision — concurrent
+                        # text messages (e.g. "la tiene?" arriving during
+                        # the vision call) hit the existing abort+requeue
+                        # path and coalesce cleanly with the image turn.
+                        enqueue_media_job(conv_id, abort_key=abort_key)
                     except Exception as enq_e:
                         logging.error(f"[CONVERSATION] Failed to enqueue media job: {enq_e}")
             else:
@@ -94,8 +99,24 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
             logging.error(f"[CONVERSATION] Failed to store inbound user message: {e}")
 
         has_audio = any((a.get("type") or "") == "audio" for a in attachments)
+        has_image = any((a.get("type") or "") == "image" for a in attachments)
+        # Image messages — captioned or not — defer entirely to the media
+        # job. Vision runs first; the result decides whether to send a
+        # templated promo reply or to run the agent on the caption with
+        # the image context already known. Running the agent here on the
+        # caption alone would lose the image content and produce
+        # incoherent replies (e.g. "la tiene?" → CHAT fallback because
+        # the agent has no antecedent).
+        # Audio-only behavior unchanged: voice-only skips the agent so the
+        # transcription worker can run + reply.
+        if has_image:
+            logging.warning(
+                "[MESSAGE] Image message (caption=%s): deferring entire turn to media job",
+                bool(message_body),
+            )
+            return
         if not message_body and has_audio:
-            logging.warning("[MESSAGE] Voice-only message: skipping agent (human will reply)")
+            logging.warning("[MESSAGE] Voice-only message: skipping agent (media job handles)")
             return
 
         if business_context:
@@ -204,6 +225,26 @@ def _run_agent_and_send(
     if response == "__ABORTED__":
         logging.warning("[ABORT] %s: aborted after planner, skipping send", wa_id)
         return False
+
+    # Pre-send abort gate: covers paths that don't go through the agent
+    # (greeting fast-path) and paths where the dispatcher's abort fallback
+    # produces a generic "Lo siento, no pude procesar..." string. By the
+    # time we reach this check, a newer message may have arrived during
+    # the agent run / Twilio call. If so, drop this response — the newer
+    # message's flusher will handle the coalesced thread cleanly.
+    if abort_key:
+        try:
+            from app.services.debounce import check_abort, clear_abort
+            if check_abort(abort_key):
+                clear_abort(abort_key)
+                logging.warning(
+                    "[ABORT] %s: pre-send abort detected, dropping response (len=%d)",
+                    wa_id, len(response or ""),
+                )
+                return False
+        except Exception as exc:
+            # Never let the abort check break the send path.
+            logging.warning("[ABORT] %s: pre-send check failed: %s", wa_id, exc)
 
     processed_response = process_text_for_whatsapp(response)
     data = get_text_message_input(wa_id, processed_response)

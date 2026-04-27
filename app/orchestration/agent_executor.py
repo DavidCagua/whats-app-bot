@@ -26,20 +26,30 @@ def execute_agent(
     message_id: Optional[str] = None,
     stale_turn: bool = False,
     abort_key: Optional[str] = None,
+    handoff_context: Optional[Dict] = None,
 ) -> Dict:
     """
     Execute the specified agent and return AgentOutput.
 
     Args:
-        agent_type: e.g. "booking", "order"
-        message_body: User message
+        agent_type: e.g. "booking", "order", "customer_service"
+        message_body: User message (or handoff segment text when invoked
+            by the dispatcher as part of a handoff chain).
         wa_id: WhatsApp ID
         name: Customer name
         business_context: Business context from routing
         message_id: Optional for tracing
+        handoff_context: When this invocation is a mid-turn handoff from
+            another agent, the source agent's context payload (e.g.
+            {"booking_id": "..."}). The target agent reads via **kwargs.
 
     Returns:
-        AgentOutput: { "agent_type", "message", "state_update" }
+        AgentOutput: {
+            "agent_type": str,
+            "message": str,
+            "state_update": dict,
+            "handoff": Optional[{"to": str, "segment": str, "context": dict}]
+        }
     """
     from ..agents import get_agent  # lazy: breaks circular import chain
     agent = get_agent(agent_type)
@@ -66,8 +76,15 @@ def execute_agent(
         stale_turn=stale_turn,
         abort_key=abort_key,
     )
+    # Only pass handoff_context when non-empty so existing agents that
+    # don't declare **kwargs aren't affected (all current agents accept
+    # **kwargs, but keep this minimal as a defensive default).
+    if handoff_context:
+        kwargs["handoff_context"] = handoff_context
 
-    if agent_type in ("order", "booking") and business_id:
+    # customer_service reads session (read-only — order_context.items for the
+    # "mi pedido" ambiguity guard) but only writes its own slot.
+    if agent_type in ("order", "booking", "customer_service") and business_id:
         load_result = turn_cache.current().get_session(
             wa_id, str(business_id),
             loader=lambda: session_state_service.load(wa_id, str(business_id)),

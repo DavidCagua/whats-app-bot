@@ -40,7 +40,6 @@ class BusinessConfigService:
             'country': settings.get('country', 'Colombia'),
             'timezone': settings.get('timezone', 'America/Bogota'),
             'payment_methods': settings.get('payment_methods', []),
-            'promotions': settings.get('promotions', []),
             'staff': settings.get('staff', []),  # Generic: staff members (barbers, stylists, chefs, etc.)
             'language': settings.get('language', 'es-CO'),
             'ai_personality': settings.get('ai_personality', 'friendly_professional')
@@ -105,19 +104,6 @@ class BusinessConfigService:
         text = "💳 **MEDIOS DE PAGO**\n\n"
         for method in methods:
             text += f"• {method}\n"
-        return text
-
-    def get_promotions_text(self, business_context: Optional[Dict] = None) -> str:
-        """Get formatted text of current promotions."""
-        info = self.get_business_info(business_context)
-        promotions = info.get('promotions', [])
-
-        if not promotions:
-            return ""
-
-        text = "🎉 **PROMOCIONES ACTUALES**\n\n"
-        for promo in promotions:
-            text += f"• {promo}\n"
         return text
 
     def get_staff_list(self, business_context: Optional[Dict] = None) -> List[Dict]:
@@ -217,7 +203,6 @@ class BusinessConfigService:
             'country': 'Colombia',
             'timezone': 'America/Bogota',
             'payment_methods': ['Efectivo', 'Tarjeta'],
-            'promotions': [],
             'staff': [],
             'language': 'es-CO',
             'ai_personality': 'friendly_professional'

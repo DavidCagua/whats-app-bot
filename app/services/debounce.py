@@ -35,6 +35,14 @@ _MSG_TTL = 120      # safety expiry on buffered messages (seconds)
 _PROCESSING_TTL = 60  # safety expiry on processing flag (seconds)
 _ABORT_TTL = 30       # safety expiry on abort signal (seconds)
 
+# After the debounce window, also wait for any in-flight turn to finish
+# before draining. This prevents the race where a new message's flusher
+# wakes faster than the in-flight turn can detect+requeue: the requeued
+# text would arrive after the new flusher already drained, splitting
+# what should be a coalesced thread into two unrelated turns.
+_INFLIGHT_WAIT_MAX_SECONDS = 10.0
+_INFLIGHT_POLL_INTERVAL = 0.1
+
 
 def _processing_key(to_number: str, phone: str) -> str:
     return f"processing:{to_number}:{phone}"
@@ -77,15 +85,21 @@ def clear_abort(abort_key: str) -> None:
 def requeue_aborted_text(abort_key: str, text: str) -> None:
     """
     On abort-after-planner, push the aborted user text back into the
-    debounce buffer so the next flusher coalesces it with newer arrivals.
+    debounce buffer AND make sure a flusher will eventually pick it up.
 
     We derive (to_number, phone) from the abort_key itself — format is
     "abort:{to_number}:{phone}" — so callers don't need to thread the
     routing info through the agent layer.
 
+    The previous flusher already released its lock at drain time
+    (_LUA_DRAIN deletes both buffer and lock), so just rpushing leaves
+    the requeued text orphaned until the next inbound webhook. To avoid
+    that, we use the same atomic _LUA_BUFFER (rpush + SET NX flusher
+    lock); if we win the lock, we spawn a flusher thread ourselves.
+
     Wraps the text in a minimal Meta-shaped payload matching what
     debounce_message() stores, so _flush()'s merge loop picks it up
-    transparently. Scales to N consecutive aborts — each call appends.
+    transparently.
     """
     if not (abort_key and (text or "").strip()):
         return
@@ -104,20 +118,63 @@ def requeue_aborted_text(abort_key: str, text: str) -> None:
     if r is None:
         return
     key_msgs = f"debounce:msgs:{to_number}:{phone}"
+    key_flusher = f"debounce:flusher:{to_number}:{phone}"
+    # Carry identity (wa_id from the abort_key) into the requeued payload.
+    # Earlier versions wrote a stripped envelope with no contacts[]; that
+    # worked only when a *future* full webhook arrived to merge — the new
+    # flusher we now spawn for solo requeues would drain an identity-less
+    # entry and the send would fail with Twilio 21211 ("To" number is "+").
+    # Synthesizing a message id avoids logging `turn_id=-` and prevents
+    # any dedup collision when the same text is requeued twice.
+    synthetic_id = f"requeue-{uuid.uuid4().hex[:8]}-{int(time.time())}"
     payload = json.dumps({
         "normalized_body": {
             "entry": [{"changes": [{"value": {
-                "messages": [{"text": {"body": text.strip()}}]
+                "contacts": [{"wa_id": phone}],
+                "messages": [{
+                    "id": synthetic_id,
+                    "type": "text",
+                    "text": {"body": text.strip()},
+                }],
             }}]}]
         }
     })
     try:
-        r.rpush(key_msgs, payload)
-        r.expire(key_msgs, _MSG_TTL)
-        logging.warning(
-            "[DEBOUNCE] %s: requeued aborted text (%d chars) to=%s",
-            phone, len(text), to_number,
+        # LPUSH so the requeued (chronologically older) text lands at the
+        # head of the buffer ahead of any message that arrived during the
+        # aborted turn — preserves the customer's actual order of speech.
+        buf = r.register_script(_LUA_BUFFER_PREPEND)
+        lua_result = buf(
+            keys=[key_msgs, key_flusher],
+            args=[payload, _MSG_TTL, _FLUSHER_TTL],
         )
+        won_flusher = bool(lua_result)
+        logging.warning(
+            "[DEBOUNCE] %s: requeued aborted text (%d chars) to=%s "
+            "won_flusher=%s",
+            phone, len(text), to_number, won_flusher,
+        )
+        if won_flusher:
+            # Capture the Flask app from the current context so the
+            # background _flush thread can push one for send_message /
+            # config access. Requeue runs inside flask_app.app_context()
+            # (set by the parent flusher), so current_app is available.
+            try:
+                from flask import current_app
+                flask_app = current_app._get_current_object()
+            except Exception as exc:
+                logging.error(
+                    "[DEBOUNCE] %s: cannot resolve flask_app for requeued flusher: %s",
+                    phone, exc,
+                )
+                return
+            t = threading.Thread(
+                target=_flush,
+                args=(phone, to_number, flask_app),
+                daemon=True,
+                name=f"debounce-{phone}-requeue",
+            )
+            t.start()
     except Exception as exc:
         logging.warning("[DEBOUNCE] %s: requeue failed: %s", phone, exc)
 
@@ -162,6 +219,19 @@ local won = redis.call('SET', KEYS[2], '1', 'NX', 'EX', ARGV[3])
 if won then return 1 else return 0 end
 """
 
+# LPUSH variant for requeue_aborted_text. The aborted text arrived
+# chronologically BEFORE the message that triggered the abort, so it
+# belongs at the head of the buffer — not the tail. Otherwise the merge
+# loop in _flush() inverts the customer's words ("una barracuda" then
+# "mejor dos" → "mejor dos\nuna barracuda" → planner can't infer that
+# "mejor dos" was a quantity modifier on the prior message).
+_LUA_BUFFER_PREPEND = """
+redis.call('LPUSH', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+local won = redis.call('SET', KEYS[2], '1', 'NX', 'EX', ARGV[3])
+if won then return 1 else return 0 end
+"""
+
 # Atomically drain all buffered messages and release the flusher lock.
 _LUA_DRAIN = """
 local msgs = redis.call('LRANGE', KEYS[1], 0, -1)
@@ -201,6 +271,36 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
     # a business_id lookup on the hot path.
     key_msgs = f"debounce:msgs:{to_number}:{phone}"
     key_flusher = f"debounce:flusher:{to_number}:{phone}"
+    proc_key = _processing_key(to_number, phone)
+
+    # Wait for any in-flight turn to finish before draining. The in-flight
+    # turn may be about to requeue its text (because we already set the
+    # ABORT signal at message-arrival time). If we drain now, the requeue
+    # arrives too late and our drain processes only the newer message —
+    # producing two disconnected replies for what was meant to be one
+    # coalesced thread (e.g. "La barracuda" then "Que valor?").
+    wait_started = time.time()
+    waited = False
+    while True:
+        try:
+            if not r.exists(proc_key):
+                break
+        except Exception:
+            # Redis blip — give up the wait, drain best-effort.
+            break
+        if (time.time() - wait_started) >= _INFLIGHT_WAIT_MAX_SECONDS:
+            logging.warning(
+                "[DEBOUNCE] %s fid=%s: in-flight wait exceeded %.1fs, draining anyway",
+                phone, fid, _INFLIGHT_WAIT_MAX_SECONDS,
+            )
+            break
+        waited = True
+        time.sleep(_INFLIGHT_POLL_INTERVAL)
+    if waited:
+        logging.warning(
+            "[DEBOUNCE] %s fid=%s: waited %.3fs for in-flight turn to finish",
+            phone, fid, time.time() - wait_started,
+        )
 
     try:
         # ── Drain atomically via Lua (LRANGE + DEL in one round trip) ─
