@@ -91,9 +91,15 @@ Reglas:
   ("dónde está mi pedido", "ya salió?", "cuánto falta", "qué pasa con mi pedido"). Sin params.
 - GET_ORDER_HISTORY: el usuario pide ver pedidos anteriores
   ("qué he pedido antes", "muéstrame mis pedidos", "último pedido"). Sin params.
-- CANCEL_ORDER: el usuario quiere CANCELAR/anular su pedido más reciente
-  ("cancela mi pedido", "anula el pedido", "ya no quiero el pedido", "no lo manden",
-   "cancélalo", "déjalo así, no quiero pedir"). Sin params.
+- CANCEL_ORDER: el usuario quiere CANCELAR/anular un pedido YA CONFIRMADO en el sistema
+  ("cancela mi pedido", "anula el pedido", "ya no quiero el pedido que hice",
+   "cancélalo"). Sin params.
+  REGLA DURA: SOLO emite CANCEL_ORDER cuando el CONTEXTO indica que existe un pedido
+  CONFIRMADO pendiente cancelable ("Pedido confirmado pendiente: sí"). Si el contexto
+  dice "Pedido confirmado pendiente: no" o si hay un carrito activo (carrito en
+  ORDERING / COLLECTING_DELIVERY / READY_TO_PLACE sin colocar todavía), NO uses
+  CANCEL_ORDER — el order agent maneja abandonar carritos en curso. En ese caso
+  responde con CUSTOMER_SERVICE_CHAT.
 - GET_PROMOS: el usuario pregunta SI HAY promos / ofertas / combos disponibles, sin
   identificar una en particular ("qué promos tienen", "tienen ofertas hoy",
   "hay alguna promo", "qué combos manejan", "promos del lunes"). Sin params.
@@ -533,6 +539,7 @@ class CustomerServiceAgent(BaseAgent):
         message_id: Optional[str] = None,
         session: Optional[Dict] = None,
         stale_turn: bool = False,
+        turn_ctx: Optional[object] = None,
         **kwargs,
     ) -> AgentOutput:
         """Planner → executor → response generator (template or LLM)."""
@@ -549,10 +556,19 @@ class CustomerServiceAgent(BaseAgent):
             content = (msg.get("content") or msg.get("message", ""))[:180]
             history_text += f"{role}: {content}\n"
 
+        ctx_block = ""
+        if turn_ctx is not None:
+            try:
+                from ..orchestration.turn_context import render_for_prompt as _render_ctx
+                ctx_block = f"CONTEXTO:\n{_render_ctx(turn_ctx, include_last_assistant=False)}\n\n"
+            except Exception:
+                ctx_block = ""
+
         planner_messages = [
             SystemMessage(content=PLANNER_SYSTEM_TEMPLATE),
             HumanMessage(
                 content=(
+                    f"{ctx_block}"
                     f"Historial reciente:\n{history_text}\n"
                     f"Usuario: {message_body}\n\n"
                     "Responde solo con JSON: intent y params."
@@ -580,6 +596,27 @@ class CustomerServiceAgent(BaseAgent):
         parsed = _parse_planner_response(planner_text)
         intent = (parsed.get("intent") or INTENT_CUSTOMER_SERVICE_CHAT).upper().replace(" ", "_")
         params = parsed.get("params") or {}
+
+        # Deterministic guard: refuse CANCEL_ORDER unless the customer
+        # actually has a placed cancellable order. The router should keep
+        # this from happening (active-cart "cancel" goes to order), but
+        # we belt-and-suspenders here so a misroute can't silently cancel
+        # an in-progress cart from CS. See app/orchestration/turn_context.py
+        # for how has_recent_cancellable_order is computed.
+        if (
+            intent == INTENT_CANCEL_ORDER
+            and turn_ctx is not None
+            and not getattr(turn_ctx, "has_recent_cancellable_order", False)
+        ):
+            logging.warning(
+                "[CS_AGENT] CANCEL_ORDER refused: no cancellable placed order "
+                "(state=%s active_cart=%s) — downgrading to CHAT",
+                getattr(turn_ctx, "order_state", "?"),
+                getattr(turn_ctx, "has_active_cart", False),
+            )
+            intent = INTENT_CUSTOMER_SERVICE_CHAT
+            params = {}
+
         logging.warning("[CS_AGENT] Planner intent=%s params=%s", intent, params)
 
         # 2) Executor

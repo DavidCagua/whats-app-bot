@@ -30,6 +30,7 @@ from ..orchestration.order_flow import (
     RESULT_KIND_PRODUCT_DETAILS,
     RESULT_KIND_CART_CHANGE,
     RESULT_KIND_CART_VIEW,
+    RESULT_KIND_CART_ABANDONED,
     RESULT_KIND_DELIVERY_STATUS,
     RESULT_KIND_ORDER_PLACED,
     RESULT_KIND_NEEDS_CLARIFICATION,
@@ -64,7 +65,7 @@ PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de p
 Estado actual: {order_state}
 Productos YA en el pedido (NO los incluyas de nuevo en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad con frases como "quiero otro", "dame uno más", "agrega otro". Si el usuario pide UN producto NUEVO, emite SOLO ese producto — no repitas los que ya están aquí): {cart_summary}
 
-Intenciones válidas: GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, ADD_PROMO_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, CHAT.
+Intenciones válidas: GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, ADD_PROMO_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, ABANDON_CART, CHAT.
 
 Nota: los saludos puros (sólo "hola", "buenas", "buen día") ya son manejados por el router antes de que llegues a clasificar — NO recibirás saludos puros.
 
@@ -85,6 +86,7 @@ Otras reglas:
 - REEMPLAZO POR VARIANTE / SABOR / TIPO de un producto YA en el pedido (ej. "la soda que sea de frutos rojos", "mejor la hamburguesa doble", "cámbiala por la de pollo", "que sea la Corona", "la cerveza que sea Poker"): usa UPDATE_CART_ITEM con "product_name" = nombre del producto ACTUAL en el carrito, y "new_product_name" = nombre completo del producto NUEVO combinando el nombre actual con la variante. Ejemplo: carrito tiene "Soda" y usuario dice "la soda que sea de frutos rojos" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Soda", "new_product_name": "Soda Frutos rojos"}}}}. Ejemplo: carrito tiene "Michelada" y usuario dice "que sea con Corona" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Michelada", "new_product_name": "Corona michelada"}}}}. Distingue de `notes`: usa `notes` SOLO para exclusiones/añadidos de ingredientes (ej. "sin morcilla", "extra salsa"), NUNCA para elegir otra variante del producto. NUNCA uses ADD_TO_CART para un reemplazo: UPDATE_CART_ITEM con new_product_name maneja la sustitución atómica.
 - PROMOCIONES (ADD_PROMO_TO_CART): si el usuario pide explícitamente una promoción / combo / oferta del negocio (ej. "dame la promo de honey burger", "quiero la promo del lunes", "agregame esa promo", "me das la oferta de 2x1", "dame ese combo"), usa ADD_PROMO_TO_CART. Pasa params.promo_query con la frase descriptiva del usuario (ej. "honey burger", "promo del lunes"). Si la conversación previa identificó una promo específica con ID (ej. el agente de servicio al cliente listó promos y el usuario dijo "la primera"), pasa params.promo_id en lugar de promo_query. NO uses ADD_TO_CART para una promo — el matcher de promociones se ejecuta en backend y necesita conocer el binding explícito. NO inventes promos: si no estás seguro si existe, igual usa ADD_PROMO_TO_CART con el query del usuario y el backend responderá si no existe.
 - Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Usa SOLO el nombre BASE del producto, SIN las notas entre paréntesis. Ejemplo: el pedido tiene "Jugos en leche (mango)" → product_name="Jugos en leche" (NO "Jugos en leche (mango)"). Otro ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
+- ABANDONAR EL PEDIDO COMPLETO: cuando el usuario quiere CANCELAR / DESCARTAR el pedido en curso (ANTES de confirmarlo), sin nombrar un producto específico. Frases típicas: "cancela el pedido", "anula", "ya no quiero pedir", "déjalo así, mejor no", "olvídalo", "mejor nada", "borrar todo", "cancelar todo". Usa `{{"intent": "ABANDON_CART", "params": {{}}}}`. Distinción clave: si el mensaje NOMBRA un producto del pedido ("quita la coca", "elimina la malteada"), eso es REMOVE_FROM_CART (un solo item). ABANDON_CART aplica SOLO cuando NO se nombra producto y la intención es vaciar todo. NUNCA uses ABANDON_CART como respuesta a "¿algo más?" / "¿procedemos?" — esos negativos son CONFIRM (ver regla de CONFIRMACIÓN).
 - Si pregunta por el ESTADO DE SU PEDIDO — no por el menú — usa VIEW_CART sin params. Frases típicas: "¿qué tengo en mi pedido?", "¿qué hay en mi pedido?", "cómo va mi pedido", "mi orden", "qué llevo", "qué he pedido", "muéstrame mi pedido", "ver mi pedido", "mi carrito", "cómo quedó mi pedido". NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar qué tiene el restaurante, VIEW_CART es para revisar lo que el cliente ya agregó al pedido.
 - CONFIRMACIÓN (regla única, muy importante): si el mensaje del usuario es una confirmación pura — "listo", "procedamos", "procedemos", "confirmar", "confirmo", "dale", "sí", "si", "ok", "okay", "perfecto", "ya", "vale", "de acuerdo" — SIN nombrar producto, dirección, teléfono ni medio de pago, usa SIEMPRE `{{"intent": "CONFIRM", "params": {{}}}}`. TAMBIÉN cuenta como CONFIRM cuando el ÚLTIMO mensaje del bot preguntó si desea agregar algo más o si procedemos (ej. "¿algo más?", "¿quieres agregar algo más?", "¿procedemos?", "¿procedemos con el pedido?") y el usuario responde con una NEGACIÓN que significa "no quiero nada más, procede" — "no", "que no", "nada", "nada más", "eso es todo", "no más", "así está bien", "ya no", "estamos bien", "no gracias", "así déjalo", "con eso". IMPORTANTE: estas negaciones SOLO son CONFIRM cuando el bot ofreció agregar más o preguntó si procede; si el bot hizo otra pregunta de sí/no (ej. "¿quieres la hamburguesa?", "¿te la cambio?"), una negación NO es CONFIRM sino CHAT. No decidas tú si significa "proceder al checkout" o "colocar el pedido": el backend lo resuelve según el estado actual. NUNCA uses PROCEED_TO_CHECKOUT ni PLACE_ORDER directamente para palabras de confirmación. Si además de confirmar el usuario provee datos de entrega (ej. "listo, mi dirección es calle 1"), usa SUBMIT_DELIVERY_INFO con los datos, no CONFIRM.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY) y el usuario PROVEE datos: usa SUBMIT_DELIVERY_INFO con uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}. Si solo necesitas saber qué falta (sin que el usuario haya dado nada nuevo), usa GET_CUSTOMER_INFO.
@@ -932,6 +934,26 @@ class OrderAgent(BaseAgent):
                 f"Subtotal (ya con promo si aplica): {money(op.get('subtotal'))}\n"
                 f"Domicilio: {money(op.get('delivery_fee'))}\n"
                 f"Total: {money(op.get('total'))}"
+            )
+            return system, inp
+
+        if result_kind == RESULT_KIND_CART_ABANDONED:
+            had_items = bool(exec_result.get("had_items"))
+            system = base_system + (
+                "\n\nSITUACIÓN: El cliente pidió cancelar/abandonar el pedido en curso "
+                "ANTES de confirmarlo. El backend ya vació el carrito y reseteó el estado.\n"
+                "REGLAS:\n"
+                "- Confirma que se canceló el pedido en curso de forma corta y amable.\n"
+                "- NO menciones números de pedido — no había pedido confirmado todavía.\n"
+                "- Cierra invitando a volver cuando quiera ('cuando quieras pedir, "
+                "aquí estamos').\n"
+                "- 1-2 líneas, sin disculpas exageradas.\n"
+                "- Si el carrito ya estaba vacío, simplemente confirma que no había "
+                "nada por cancelar y ofrece ayuda."
+            )
+            inp = (
+                f"Cliente dijo: {message_body}\n"
+                f"Carrito tenía productos: {'sí' if had_items else 'no'}"
             )
             return system, inp
 

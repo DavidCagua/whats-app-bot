@@ -68,6 +68,12 @@ INTENT_CHAT = "CHAT"
 # action that makes sense for the current state. This keeps the planner out
 # of state-machine decisions it can't see.
 INTENT_CONFIRM = "CONFIRM"
+# Customer wants to abandon the in-progress cart entirely ("cancela el pedido",
+# "déjalo así", "ya no quiero pedir"). Distinct from REMOVE_FROM_CART, which
+# drops a single product. ABANDON_CART clears the cart and resets state to
+# GREETING. Cancellation of a PLACED order belongs to the customer service
+# agent — see customer_service_flow.INTENT_CANCEL_ORDER.
+INTENT_ABANDON_CART = "ABANDON_CART"
 
 # Result kinds — routing signal for the response generator.
 # Every execute_order_intent return carries exactly one of these so the
@@ -83,6 +89,7 @@ RESULT_KIND_ORDER_PLACED = "order_placed"
 RESULT_KIND_NEEDS_CLARIFICATION = "needs_clarification"
 RESULT_KIND_USER_ERROR = "user_error"
 RESULT_KIND_INTERNAL_ERROR = "internal_error"
+RESULT_KIND_CART_ABANDONED = "cart_abandoned"
 
 # Cart-change actions
 CART_ACTION_ADDED = "added"
@@ -122,6 +129,7 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_REMOVE_FROM_CART,
         INTENT_PROCEED_TO_CHECKOUT,
         INTENT_CONFIRM,
+        INTENT_ABANDON_CART,
         INTENT_CHAT,
     ),
     ORDER_STATE_COLLECTING_DELIVERY: (
@@ -129,6 +137,7 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_SUBMIT_DELIVERY_INFO,
         INTENT_PROCEED_TO_CHECKOUT,
         INTENT_CONFIRM,
+        INTENT_ABANDON_CART,
         INTENT_CHAT,
     ),
     ORDER_STATE_READY_TO_PLACE: (
@@ -137,6 +146,7 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_GET_CUSTOMER_INFO,
         INTENT_SUBMIT_DELIVERY_INFO,
         INTENT_CONFIRM,
+        INTENT_ABANDON_CART,
         INTENT_CHAT,
     ),
 }
@@ -1437,6 +1447,29 @@ def execute_order_intent(
                 current_state, wa_id, business_id,
                 RESULT_KIND_CART_CHANGE,
                 cart_change=cart_change,
+            )
+
+        if intent == INTENT_ABANDON_CART:
+            cart_before = _get_cart_for_logging(wa_id, business_id)
+            had_items = bool((cart_before.get("items") or []))
+            _save_session_and_invalidate(
+                wa_id, business_id,
+                {"order_context": {
+                    "items": [],
+                    "total": 0,
+                    "delivery_info": {},
+                    "state": ORDER_STATE_GREETING,
+                    "pending_disambiguation": None,
+                }},
+            )
+            logger.warning(
+                "[ORDER_FLOW] cart abandoned: state=%s -> %s had_items=%s",
+                current_state, ORDER_STATE_GREETING, had_items,
+            )
+            return _base_result(
+                ORDER_STATE_GREETING, wa_id, business_id,
+                RESULT_KIND_CART_ABANDONED,
+                had_items=had_items,
             )
 
         # --- delivery / place order ---

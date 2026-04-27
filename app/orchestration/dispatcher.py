@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..database.session_state_service import session_state_service
 from .agent_executor import execute_agent
+from .turn_context import TurnContext
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ def dispatch(
     message_id: Optional[str] = None,
     stale_turn: bool = False,
     abort_key: Optional[str] = None,
+    turn_ctx: Optional[TurnContext] = None,
 ) -> DispatchResult:
     """
     Run the ordered list of (agent_type, segment) pairs. Handle handoffs
@@ -112,6 +114,7 @@ def dispatch(
             message_id=message_id,
             stale_turn=stale_turn,
             abort_key=abort_key,
+            turn_ctx=turn_ctx,
         )
         result.agent_outputs.append(output)
         result.handoff_chain.append(agent_type)
@@ -162,6 +165,7 @@ def dispatch(
                 stale_turn=stale_turn,
                 abort_key=abort_key,
                 handoff_context=handoff_context,
+                turn_ctx=turn_ctx,
             )
             result.agent_outputs.append(output)
             result.handoff_chain.append(target)
@@ -190,6 +194,7 @@ def _run_agent(
     stale_turn: bool,
     abort_key: Optional[str],
     handoff_context: Optional[Dict[str, Any]] = None,
+    turn_ctx: Optional[TurnContext] = None,
 ) -> Dict[str, Any]:
     """Invoke a single agent with consistent error handling."""
     try:
@@ -203,6 +208,7 @@ def _run_agent(
             stale_turn=stale_turn,
             abort_key=abort_key,
             handoff_context=handoff_context,
+            turn_ctx=turn_ctx,
         )
         if not isinstance(output, dict):
             logger.error("[DISPATCHER] agent=%s returned non-dict: %r", agent_type, type(output))

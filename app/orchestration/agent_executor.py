@@ -27,6 +27,7 @@ def execute_agent(
     stale_turn: bool = False,
     abort_key: Optional[str] = None,
     handoff_context: Optional[Dict] = None,
+    turn_ctx: Optional[object] = None,
 ) -> Dict:
     """
     Execute the specified agent and return AgentOutput.
@@ -81,6 +82,12 @@ def execute_agent(
     # **kwargs, but keep this minimal as a defensive default).
     if handoff_context:
         kwargs["handoff_context"] = handoff_context
+
+    # Per-turn snapshot built once in conversation_manager. Agents that
+    # care (e.g. customer_service for the cancel guard) read it via
+    # **kwargs; others ignore it.
+    if turn_ctx is not None:
+        kwargs["turn_ctx"] = turn_ctx
 
     # customer_service reads session (read-only — order_context.items for the
     # "mi pedido" ambiguity guard) but only writes its own slot.

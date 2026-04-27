@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from ..services import business_greeting
+from .turn_context import TurnContext, render_for_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,25 @@ def _greeting_fast_path(
 _ROUTER_SYSTEM_PROMPT = """Eres el router de un bot de WhatsApp para un restaurante. Lees el mensaje del cliente y lo divides en SEGMENTOS. Cada segmento tiene un dominio (la INTENCIÓN del cliente) y el texto del mensaje que corresponde a ese dominio.
 
 La mayoría de los mensajes son UN solo segmento (una sola intención). Solo divide en múltiples segmentos cuando el cliente expresa claramente DOS O MÁS intenciones independientes en el mismo mensaje.
+
+CONTEXTO DEL TURNO (clave para desambiguar):
+Recibes en el mensaje del usuario un bloque "CONTEXTO" con: estado del pedido en curso
+(GREETING / ORDERING / COLLECTING_DELIVERY / READY_TO_PLACE), si hay carrito activo, si
+existe un pedido CONFIRMADO previo cancelable, y la última respuesta del bot. Úsalos
+para resolver mensajes cortos o ambiguos. En particular:
+
+- Negativos cortos / "no más" / "nada más" / "que no" / "eso es todo" / "no, gracias"
+  cuando el estado es ORDERING / COLLECTING_DELIVERY / READY_TO_PLACE y la última
+  respuesta del bot terminó en una pregunta de cierre ("¿algo más?", "¿procedemos?",
+  "¿confirmamos?") → SIEMPRE "order". El cliente está cerrando el carrito, no
+  cancelando un pedido. El order agent decide si proceder o no.
+- "cancela" / "anula" / "ya no quiero" / "déjalo así" cuando hay carrito activo
+  (estado ORDERING / COLLECTING_DELIVERY / READY_TO_PLACE) → "order". El cliente
+  abandona el carrito, lo maneja el order agent.
+- "cancela mi pedido" / "anula el pedido" / "ya no lo quiero" cuando NO hay carrito
+  activo y SÍ hay un pedido confirmado pendiente → "customer_service" (post-venta).
+- Sin carrito activo y sin pedido confirmado pendiente, "cancela" no tiene objeto
+  claro → "customer_service" (responderá que no hay pedido por cancelar).
 
 Dominios disponibles (por INTENCIÓN del cliente):
 
@@ -271,6 +291,7 @@ def _parse_segments(raw: str) -> Optional[List[Tuple[str, str]]]:
 def _classify_with_llm(
     message_body: str,
     business_context: Optional[dict],
+    ctx: Optional[TurnContext] = None,
 ) -> Optional[List[Tuple[str, str]]]:
     """
     Call the classifier and return a list of (domain, text) segments,
@@ -282,18 +303,28 @@ def _classify_with_llm(
 
     business_id = str((business_context or {}).get("business_id") or "")
 
+    if ctx is None:
+        ctx = TurnContext()
+    user_payload = (
+        f"CONTEXTO:\n{render_for_prompt(ctx)}\n\n"
+        f"Mensaje: {message_body}"
+    )
+
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
         response = llm.invoke(
             [
                 SystemMessage(content=_ROUTER_SYSTEM_PROMPT),
-                HumanMessage(content=f"Mensaje: {message_body}"),
+                HumanMessage(content=user_payload),
             ],
             config={
                 "run_name": "router_classifier",
                 "metadata": {
                     "business_id": business_id,
                     "message_length": len(message_body),
+                    "order_state": ctx.order_state,
+                    "has_active_cart": ctx.has_active_cart,
+                    "has_recent_cancellable_order": ctx.has_recent_cancellable_order,
                 },
             },
         )
@@ -311,6 +342,7 @@ def route(
     message_body: str,
     business_context: Optional[dict],
     customer_name: Optional[str],
+    ctx: Optional[TurnContext] = None,
 ) -> RouterResult:
     """
     Classify the message and decide how to respond.
@@ -319,6 +351,10 @@ def route(
       1. Greeting fast-path — pure greeting returns a direct template reply.
       2. LLM classifier — returns list of (domain, text) segments.
       3. On classifier failure — caller falls back to primary agent.
+
+    `ctx` is the per-turn snapshot (order state, cart, last assistant
+    message, recent cancellable order). When omitted, the classifier
+    runs without context — used by tests and the legacy callers.
     """
     # 1. Greeting fast-path
     greeting = _greeting_fast_path(message_body, business_context, customer_name)
@@ -329,13 +365,17 @@ def route(
     # 2. LLM classification
     if not (message_body or "").strip():
         return RouterResult()
-    segments = _classify_with_llm(message_body, business_context)
+    segments = _classify_with_llm(message_body, business_context, ctx=ctx)
     if not segments:
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")
         return RouterResult()
 
     logger.info(
-        "[ROUTER] classified n_segments=%d domains=%s",
-        len(segments), [d for d, _ in segments],
+        "[ROUTER] classified n_segments=%d domains=%s state=%s cart=%s placed=%s",
+        len(segments),
+        [d for d, _ in segments],
+        (ctx or TurnContext()).order_state,
+        (ctx or TurnContext()).has_active_cart,
+        (ctx or TurnContext()).has_recent_cancellable_order,
     )
     return RouterResult(segments=segments)

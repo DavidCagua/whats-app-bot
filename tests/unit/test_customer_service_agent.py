@@ -189,3 +189,115 @@ class TestAgentHandoffPropagation:
         m_store.assert_not_called()
         # Only the planner LLM was called (no response LLM).
         assert llm.invoke.call_count == 1
+
+
+class TestCancelOrderGuard:
+    """
+    Deterministic guard: even if the planner emits CANCEL_ORDER, refuse to
+    cancel unless turn_ctx says there's a placed cancellable order. Belt-
+    and-suspenders for the production bug on 2026-04-27 where a cart was
+    silently cancelled because "No más" reached the CS agent.
+    """
+
+    def _ctx(self, **kwargs):
+        from app.orchestration.turn_context import TurnContext
+        return TurnContext(**kwargs)
+
+    def test_cancel_order_with_active_cart_no_placed_order_is_refused(self):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        # Planner mistakenly emits CANCEL_ORDER; response LLM still runs
+        # because the guard downgrades to CUSTOMER_SERVICE_CHAT.
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CANCEL_ORDER", "params": {}}'),
+            _llm_response("Tu pedido en curso lo manejamos por aquí mismo."),
+        ]
+        ctx = self._ctx(
+            order_state="ORDERING",
+            has_active_cart=True,
+            cart_summary="1x DENVER",
+            has_recent_cancellable_order=False,
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body="no más",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                turn_ctx=ctx,
+            )
+        # Guard fired: NO order_modification_service.cancel_order should
+        # have been called. We assert via the resulting last_intent and
+        # last_result_kind: chat fallback, not cancellation.
+        assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
+        assert output["state_update"]["customer_service_context"]["last_result_kind"] != csf.RESULT_KIND_ORDER_CANCELLED
+
+    def test_cancel_order_with_placed_cancellable_order_proceeds(self):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CANCEL_ORDER", "params": {}}'),
+            _llm_response("Listo, tu pedido fue cancelado."),
+        ]
+        fake_order = {
+            "id": "abc-123",
+            "status": "pending",
+            "total_amount": 24500,
+            "items": [],
+        }
+        ctx = self._ctx(
+            order_state="GREETING",
+            has_active_cart=False,
+            has_recent_cancellable_order=True,
+            recent_order_id="abc-123",
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch(
+                 "app.orchestration.customer_service_flow.order_lookup_service.get_latest_order",
+                 return_value=fake_order,
+             ), \
+             patch(
+                 "app.orchestration.customer_service_flow.order_modification_service.cancel_order",
+                 return_value={**fake_order, "status": "cancelled"},
+             ):
+            output = agent.execute(
+                message_body="cancela mi pedido",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                turn_ctx=ctx,
+            )
+        # Guard did NOT fire — the cancel handler ran and produced
+        # RESULT_KIND_ORDER_CANCELLED.
+        assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CANCEL_ORDER
+        assert output["state_update"]["customer_service_context"]["last_result_kind"] == csf.RESULT_KIND_ORDER_CANCELLED
+
+    def test_cancel_order_without_turn_ctx_does_not_block(self):
+        """
+        Backward-compat: callers that don't pass turn_ctx (e.g. older
+        tests, direct unit invocations) still hit the executor. The
+        guard only kicks in when turn_ctx is explicitly provided.
+        """
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CANCEL_ORDER", "params": {}}'),
+            _llm_response("No encontré pedido por cancelar."),
+        ]
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch(
+                 "app.orchestration.customer_service_flow.order_lookup_service.get_latest_order",
+                 return_value=None,
+             ):
+            output = agent.execute(
+                message_body="cancela",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+        assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CANCEL_ORDER

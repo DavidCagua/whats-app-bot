@@ -24,6 +24,7 @@ from .router import (
     DOMAIN_CUSTOMER_SERVICE,
     DOMAIN_CHAT,
 )
+from .turn_context import build_turn_context
 
 
 # Maps a router-classified domain to the agent_type that should handle it.
@@ -168,11 +169,17 @@ class ConversationManager:
         """
         business_id = business_context.get("business_id") if business_context else None
 
+        # Build the per-turn snapshot ONCE — shared by router and (via
+        # dispatcher) downstream planners. Avoids each layer re-reading
+        # session / history / latest order on its own.
+        turn_ctx = build_turn_context(wa_id=wa_id, business_id=business_id)
+
         # 1. Router fast-path: pure greetings reply directly.
         router_result = router_route(
             message_body=message_body,
             business_context=business_context,
             customer_name=name,
+            ctx=turn_ctx,
         )
         if router_result.direct_reply is not None:
             logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")
@@ -209,6 +216,7 @@ class ConversationManager:
             message_id=message_id,
             stale_turn=stale_turn,
             abort_key=abort_key,
+            turn_ctx=turn_ctx,
         )
 
         if dispatch_result.handoff_chain and len(dispatch_result.handoff_chain) > 1:
