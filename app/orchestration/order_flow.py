@@ -404,10 +404,13 @@ def _format_phone_from_wa_id(wa_id: str) -> str:
 
 
 def _get_delivery_fee(business_context: Optional[Dict]) -> float:
+    """Falls back to the shared DELIVERY_FEE_DEFAULT so order receipts
+    and CS info answers agree on the same number."""
+    from ..services.business_info_service import DELIVERY_FEE_DEFAULT
     if not business_context:
-        return 5000.0
+        return float(DELIVERY_FEE_DEFAULT)
     settings = (business_context.get("business") or {}).get("settings") or {}
-    return float(settings.get("delivery_fee", 5000))
+    return float(settings.get("delivery_fee", DELIVERY_FEE_DEFAULT))
 
 
 def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:

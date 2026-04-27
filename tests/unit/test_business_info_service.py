@@ -44,6 +44,37 @@ class TestGetBusinessInfo:
         result = bis.get_business_info(_ctx({"delivery_fee": 0}), "delivery_fee")
         assert result == "$0"
 
+    def test_delivery_fee_falls_back_to_default_when_unset(self):
+        """
+        Regression: CS used to return None ("no configurado") when
+        settings.delivery_fee was absent, while the order side silently
+        applied the hardcoded $5.000 default. The two surfaces disagreed
+        about the same number. Now the lookup uses DELIVERY_FEE_DEFAULT
+        as a fallback so receipts and CS info answers stay in sync.
+        """
+        result = bis.get_business_info(_ctx({}), "delivery_fee")
+        assert result == "$5.000"
+
+    def test_delivery_fee_falls_back_when_explicitly_none(self):
+        """None / "" are treated as absent — same fallback applies."""
+        assert bis.get_business_info(_ctx({"delivery_fee": None}), "delivery_fee") == "$5.000"
+        assert bis.get_business_info(_ctx({"delivery_fee": ""}), "delivery_fee") == "$5.000"
+
+    def test_delivery_fee_default_matches_order_side(self):
+        """The constant CS uses must equal the constant the order side
+        falls back to, otherwise receipts would charge X but CS would
+        say Y. Pin the value so a future refactor that splits them
+        breaks the test loudly."""
+        from app.services.order_tools import _get_delivery_fee as order_fee
+        from app.orchestration.order_flow import _get_delivery_fee as flow_fee
+        # No business_context → both fall back to the same default.
+        assert order_fee(None) == float(bis.DELIVERY_FEE_DEFAULT)
+        assert flow_fee(None) == float(bis.DELIVERY_FEE_DEFAULT)
+        # Empty settings → same default again.
+        empty_ctx = {"business": {"settings": {}}}
+        assert order_fee(empty_ctx) == float(bis.DELIVERY_FEE_DEFAULT)
+        assert flow_fee(empty_ctx) == float(bis.DELIVERY_FEE_DEFAULT)
+
     def test_menu_url(self):
         result = bis.get_business_info(_ctx({"menu_url": "https://x.test"}), "menu_url")
         assert result == "https://x.test"

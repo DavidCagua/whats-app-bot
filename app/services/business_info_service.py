@@ -36,6 +36,14 @@ ALL_FIELDS = (
 )
 
 
+# Single source of truth for the delivery-fee fallback when a business
+# hasn't configured `settings.delivery_fee`. Used by both the order side
+# (order_tools, order_flow) and the customer service info lookup so the
+# two surfaces agree on the same number — a customer asking the price
+# never gets "no configurado" while orders silently apply $5.000.
+DELIVERY_FEE_DEFAULT = 5000
+
+
 def _format_cop(value: Any) -> str:
     """Colombian peso formatting used in the rest of the codebase."""
     try:
@@ -86,6 +94,9 @@ _FIELD_MAP: Dict[str, Dict[str, Any]] = {
     FIELD_DELIVERY_FEE: {
         "keys": ("delivery_fee",),
         "format": _format_cop,
+        # Fall back to the same default the order side uses, so CS doesn't
+        # say "no configurado" while orders silently apply this number.
+        "default": DELIVERY_FEE_DEFAULT,
     },
     FIELD_MENU_URL: {
         "keys": ("menu_url",),
@@ -130,7 +141,13 @@ def get_business_info(
             break
 
     if value in (None, "", [], {}):
-        return None
+        # Some fields opt into a default when the operator hasn't
+        # configured a value — e.g. delivery_fee shares a default with
+        # the order side so the two surfaces never disagree.
+        if "default" in spec:
+            value = spec["default"]
+        else:
+            return None
 
     formatter: Callable[[Any], str] = spec["format"]
     formatted = formatter(value)

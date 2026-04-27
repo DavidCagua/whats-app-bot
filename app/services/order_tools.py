@@ -80,11 +80,14 @@ def _products_enabled(ctx: Optional[Dict]) -> bool:
 
 
 def _get_delivery_fee(ctx: Optional[Dict]) -> float:
-    """Get delivery fee from business settings. Defaults to 5000 COP."""
+    """Get delivery fee from business settings. Falls back to the same
+    default the customer service info lookup uses (so receipts and the
+    'cuánto cobran de domicilio' answer agree on the same number)."""
+    from .business_info_service import DELIVERY_FEE_DEFAULT
     if not ctx:
-        return 5000.0
+        return float(DELIVERY_FEE_DEFAULT)
     settings = (ctx.get("business") or {}).get("settings") or {}
-    return float(settings.get("delivery_fee", 5000))
+    return float(settings.get("delivery_fee", DELIVERY_FEE_DEFAULT))
 
 
 def _cart_from_session(wa_id: str, business_id: str) -> Dict:
