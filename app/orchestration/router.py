@@ -118,6 +118,12 @@ Dominios disponibles (por INTENCIÓN del cliente):
     * Browsing/exploración del menú dentro del bot ("qué tienen", "qué bebidas hay", "tienen coca cola", "muéstrame el menú", "qué hamburguesas tienen", "qué trae la barracuda")
     * Búsqueda por atributo ("algo con queso", "algo picante")
     * Detalles de un producto específico ("qué trae la montesa")
+    * PRECIO/VALOR de un producto NOMBRADO — preguntar cuánto cuesta un producto del menú
+      es navegar el menú, NO una pregunta de servicio al cliente. Frases típicas:
+      "cuánto vale la barracuda", "qué precio tiene la picada", "una picada qué valor",
+      "cuánto cuesta la honey burger", "el precio de la montesa", "qué valor tiene X".
+      Aplica incluso cuando el producto y la pregunta vienen en el mismo mensaje sin
+      verbo de orden explícito ("una picada que valor?" — preguntar el precio antes de pedir).
     * Agregar/modificar/quitar del carrito ("quiero X", "dame X", "una coca", "quita la cerveza")
     * Checkout y confirmación ("listo", "ya te pago", "confirma", "procedamos")
 
@@ -145,9 +151,15 @@ Reglas de desambiguación (claves):
 - "tienen domicilio?" → customer_service (pregunta por POLÍTICA de domicilio, no por un producto).
 - "tienen coca cola?" → order (browsing de productos).
 - "qué promos tienen?" / "tienes alguna promo?" / "qué combos manejan?" → customer_service
-  (pregunta por DISPONIBILIDAD de promos como dato, NO está agregando una al carrito).
+  (pregunta por DISPONIBILIDAD de promos como dato, NO está agregando una al carrito,
+  Y no nombra ningún producto específico del catálogo).
 - "dame la promo del honey" / "agrega esa promo" / "quiero el combo lunes" → order
   (acción sobre el carrito; el order agent resuelve la promo y la agrega).
+- "cuánto vale la barracuda?" / "una picada qué valor?" / "qué precio tiene la honey?" → order
+  (pregunta sobre el precio/valor de un PRODUCTO NOMBRADO — eso es navegación del menú,
+  NO información del negocio). Discriminador clave: ¿el cliente nombró un producto del
+  catálogo? Si sí → order. Si pregunta sobre precios/info en general sin nombrar producto
+  ("cuánto cuesta el domicilio", "qué precios manejan") → customer_service.
 - "a qué hora me llega?" durante un pedido activo → customer_service (info de política/tiempo, no acción).
 - "ya te pago" / "listo" durante un pedido → order (señal de checkout).
 

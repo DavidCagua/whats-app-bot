@@ -208,3 +208,46 @@ class TestRouterMetadata:
         metadata = kwargs["config"]["metadata"]
         assert metadata["business_id"] == "biela"
         assert kwargs["config"]["run_name"] == "router_classifier"
+
+
+class TestRouterPromptHasProductPriceRule:
+    """
+    Regression: a previous addition (promo discovery → customer_service)
+    pulled product-price questions like "una picada qué valor?" into CS
+    by lexical similarity. CS planner has no intent for product prices,
+    so it returned a generic chat fallback. Main branch routes these
+    correctly to `order` (so the order agent's GET_PRODUCT can answer
+    with the price + a "¿quieres ordenar?" nudge).
+
+    The fix is a router-prompt rule. We assert the rule is present so
+    a future prompt edit can't silently delete it.
+    """
+
+    def test_prompt_routes_named_product_price_to_order(self):
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        # The product-price-of-a-named-item rule.
+        assert "PRECIO/VALOR de un producto NOMBRADO" in prompt, (
+            "Router prompt must classify 'qué precio tiene la X' as `order`, "
+            "not customer_service"
+        )
+        # Concrete examples the LLM can pattern-match against.
+        for example in (
+            "una picada qué valor",
+            "cuánto vale la barracuda",
+            "qué precio tiene",
+        ):
+            assert example in prompt, f"Router prompt missing example: {example!r}"
+
+    def test_prompt_disambiguates_promo_listing_from_product_price(self):
+        """The CS promo-discovery rule must NOT swallow product prices."""
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        # Discriminator: NO specific catalog product is named for CS.
+        assert "no nombra ningún producto específico del catálogo" in prompt, (
+            "Promo-discovery CS rule must scope itself to messages that "
+            "don't name a specific product"
+        )
+        # Generic price questions (no product) stay on CS.
+        assert "cuánto cuesta el domicilio" in prompt, (
+            "Router must distinguish generic-price (CS) from "
+            "named-product-price (order)"
+        )

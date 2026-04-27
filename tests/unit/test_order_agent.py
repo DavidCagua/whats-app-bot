@@ -429,3 +429,33 @@ class TestPlannerPromptRules:
         assert "search_products" in lower
         assert "hamburguesas picantes" in lower, \
             "Planner prompt must use 'hamburguesas picantes' as an example"
+
+    def test_planner_prompt_routes_product_price_question_to_get_product(self):
+        """
+        Regression: "una picada que valor?" was being classified as CHAT
+        because no planner rule covered price-of-product questions. Once
+        routing was fixed, the order agent's planner still missed it. The
+        rule must extend GET_PRODUCT to cover price/value/cost phrasings,
+        with explicit guidance that ADD_TO_CART is NOT the right intent
+        when the customer is asking for the price (they're deciding,
+        not ordering yet).
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        lower = prompt.lower()
+        # The rule itself.
+        assert "precio" in lower, \
+            "Planner prompt must mention price/precio under GET_PRODUCT"
+        # Concrete examples the LLM can pattern-match against.
+        for example in (
+            "cuánto vale la x",
+            "qué valor tiene la x",
+            "una x qué valor",
+            "qué precio tiene la x",
+        ):
+            assert example in lower, f"Planner prompt missing example: {example!r}"
+        # Critical guardrail: don't accidentally ADD_TO_CART when asking
+        # for a price.
+        assert "una picada que valor" in lower, \
+            "Planner prompt must use 'una picada que valor?' as an example"
+        assert "no add_to_cart" in lower, \
+            "Planner prompt must explicitly forbid ADD_TO_CART for price questions"
