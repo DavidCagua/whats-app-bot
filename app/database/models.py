@@ -9,6 +9,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    Date,
     DateTime,
     Time,
     Boolean,
@@ -700,8 +701,11 @@ class Promotion(Base):
     days_of_week = Column(ARRAY(SmallInteger), nullable=True)  # ISO 1=Mon..7=Sun
     start_time = Column(Time, nullable=True)
     end_time = Column(Time, nullable=True)
-    starts_on = Column(DateTime(timezone=True), nullable=True)
-    ends_on = Column(DateTime(timezone=True), nullable=True)
+    # Calendar boundaries — DATE, not DATETIME. Time-of-day is handled
+    # separately by start_time / end_time. Aligns with the migration
+    # b2d4e6f8a0c1 which created these as `sa.Date()`.
+    starts_on = Column(Date, nullable=True)
+    ends_on = Column(Date, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
