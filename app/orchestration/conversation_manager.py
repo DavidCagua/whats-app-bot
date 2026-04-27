@@ -217,6 +217,15 @@ class ConversationManager:
                 dispatch_result.handoff_chain,
             )
 
+        # Dispatcher's abort path consumes the abort flag + requeues the
+        # text but returns an empty message. Surface the aborted state via
+        # the __ABORTED__ sentinel so the handler drops the send instead
+        # of falling back to "Lo siento, no pude procesar tu mensaje."
+        # — which would land in the customer's chat as a spurious reply
+        # right when their newer message is about to be processed.
+        if getattr(dispatch_result, "aborted", False):
+            return "__ABORTED__"
+
         return dispatch_result.message or "Lo siento, no pude procesar tu mensaje."
 
 

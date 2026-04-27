@@ -174,3 +174,76 @@ class TestBuildDispatchSegments:
             full_message="qué bebidas tienen y dame una coca",
         )
         assert result == [("order", "qué bebidas tienen\ny dame una coca")]
+
+
+class TestAbortedDispatchReturnsSentinel:
+    """
+    Regression: when the dispatcher's abort-before-agent path fires, it
+    consumes the abort flag, requeues the segment text, and returns an
+    empty-message DispatchResult with aborted=True. Previously
+    ConversationManager.process substituted "Lo siento, no pude procesar..."
+    for the empty message, which the handler then sent — the customer
+    saw a spurious "Sorry" reply right when their newer message was about
+    to be processed. The sentinel "__ABORTED__" tells the handler to drop
+    the send instead.
+    """
+
+    def _process(self, dispatch_result, *, fast_path_reply=None):
+        # The package __init__ re-exports `conversation_manager` as the
+        # instance, shadowing the submodule. importlib.import_module gives
+        # us the actual submodule unambiguously.
+        import importlib
+        cm_mod = importlib.import_module("app.orchestration.conversation_manager")
+
+        cm = cm_mod.ConversationManager()
+        router_result = MagicMock(
+            direct_reply=fast_path_reply,
+            segments=[(router.DOMAIN_ORDER, "para pedir")],
+        )
+        enabled = MagicMock()
+        enabled.get_enabled_agents = MagicMock(return_value=ENABLED_AGENTS)
+        with patch.object(cm_mod, "router_route", return_value=router_result), \
+             patch.object(cm_mod, "business_agent_service", enabled), \
+             patch.object(cm_mod, "dispatch", return_value=dispatch_result):
+            return cm.process(
+                message_body="para pedir",
+                wa_id="+573177000722",
+                name="David",
+                business_context=BIELA_CTX,
+            )
+
+    def test_aborted_dispatch_returns_sentinel(self):
+        from app.orchestration.dispatcher import DispatchResult
+
+        # Dispatcher's abort path produces an empty message + aborted=True.
+        result = DispatchResult()
+        result.aborted = True
+        result.message = ""
+
+        out = self._process(result)
+        assert out == "__ABORTED__", (
+            "aborted dispatch must propagate the sentinel so the handler "
+            "drops the send instead of falling back to 'Lo siento...'"
+        )
+
+    def test_normal_dispatch_returns_message(self):
+        from app.orchestration.dispatcher import DispatchResult
+
+        result = DispatchResult()
+        result.aborted = False
+        result.message = "Pedido confirmado"
+
+        out = self._process(result)
+        assert out == "Pedido confirmado"
+
+    def test_empty_non_aborted_dispatch_falls_back_to_lo_siento(self):
+        """Sanity: the fallback is preserved for genuine empty results
+        (e.g. an agent crashed without raising)."""
+        from app.orchestration.dispatcher import DispatchResult
+
+        result = DispatchResult()
+        result.aborted = False
+        result.message = ""
+
+        out = self._process(result)
+        assert "Lo siento" in out

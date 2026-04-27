@@ -51,6 +51,17 @@ def _redis_with_lua(script_return: int = 1):
     return r, script_callable
 
 
+def _redis_with_lua_recording_source():
+    """
+    Like _redis_with_lua but records WHICH Lua script source was passed
+    to register_script. Used to assert RPUSH vs LPUSH choice.
+    """
+    r = MagicMock(name="redis")
+    script_callable = MagicMock(name="lua_script", return_value=1)
+    r.register_script.return_value = script_callable
+    return r, script_callable
+
+
 def _decode_payload(script_callable: MagicMock) -> dict:
     """Pull the JSON payload that was passed to the Lua script."""
     args = script_callable.call_args.kwargs.get("args") or script_callable.call_args.args[1:]
@@ -87,6 +98,59 @@ class TestRequeueHappyPath:
             ["value"]["messages"][0]["text"]["body"]
         )
         assert body == "quiero una picada"
+
+    def test_uses_lpush_variant_to_preserve_chronological_order(self):
+        """
+        Regression: the requeued text arrived chronologically BEFORE the
+        message that triggered the abort. If the requeue used RPUSH, the
+        merge loop would invert the customer's words ("una barracuda"
+        then "mejor dos" → "mejor dos\\nuna barracuda" → planner can't
+        infer "mejor dos" was a quantity modifier on the prior message).
+        Must use the LPUSH variant of the buffer Lua script.
+        """
+        r, script = _redis_with_lua()
+        with patch.object(debounce, "_get_redis", return_value=r), \
+             patch.object(debounce.threading, "Thread"):
+            requeue_aborted_text(
+                "abort:whatsapp:+14155238886:+573177000722",
+                "una barracuda",
+            )
+
+        r.register_script.assert_called_once()
+        script_source = r.register_script.call_args.args[0]
+        assert "LPUSH" in script_source, (
+            "requeue must use the LPUSH variant so chronological order is preserved"
+        )
+        assert "RPUSH" not in script_source, (
+            "RPUSH would put the requeued text at the tail, inverting message order"
+        )
+
+    def test_payload_carries_wa_id_so_solo_drain_can_send(self):
+        """
+        Regression: the requeued payload must include contacts[].wa_id
+        so the merge loop in _flush() picks a non-empty wa_id when the
+        requeued entry is alone in the buffer (no companion full webhook
+        to merge with). Otherwise Twilio rejects the reply with 21211
+        ("'To' number is whatsapp:+ — invalid").
+        """
+        r, script = _redis_with_lua()
+        with patch.object(debounce, "_get_redis", return_value=r), \
+             patch.object(debounce.threading, "Thread"):
+            requeue_aborted_text(
+                "abort:whatsapp:+14155238886:+573177000722",
+                "una picada",
+            )
+
+        value = (
+            _decode_payload(script)["normalized_body"]["entry"][0]
+            ["changes"][0]["value"]
+        )
+        assert value["contacts"][0]["wa_id"] == "+573177000722"
+        msg = value["messages"][0]
+        # Synthesized id avoids `turn_id=-` in logs and dedup collisions.
+        assert msg["id"].startswith("requeue-"), msg["id"]
+        assert msg["type"] == "text"
+        assert msg["text"]["body"] == "una picada"
 
     def test_passes_msg_and_flusher_ttls(self):
         r, script = _redis_with_lua()
@@ -404,6 +468,111 @@ class TestMergeBaseSelection:
         base = next((e for e in entries if has_full_identity(e)), entries[0])
         msg_id = base["normalized_body"]["entry"][0]["changes"][0]["value"]["messages"][0]["id"]
         assert msg_id == "SMa"
+
+
+class TestFlusherWaitsForInflight:
+    """
+    Regression: when a new message arrives while an in-flight turn is
+    still processing, the flusher's bare time.sleep(1.5) used to drain
+    the buffer whether or not the in-flight turn had finished requeuing
+    its text. Race window: in-flight turn takes >1.5s, new flusher wakes
+    first, drains only the new message → "La barracuda" then "Que valor?"
+    becomes two unrelated turns instead of one coalesced thread.
+
+    Fix: after the debounce window, _flush polls `proc_key` and only
+    drains once it clears (capped at _INFLIGHT_WAIT_MAX_SECONDS to
+    avoid stranding messages on a hung turn).
+    """
+
+    def _drive_flush_with_inflight(
+        self, *, exists_sequence: list[bool],
+    ):
+        """
+        Run _flush once with mocked Redis. exists_sequence is the values
+        r.exists(proc_key) returns on each call. The drain mocks itself
+        empty so the function exits immediately after the wait loop.
+
+        time.sleep is replaced with a function that records the requested
+        interval and advances a virtual clock; time.time returns the
+        virtual clock so the cap test doesn't have to wait wall-clock
+        seconds.
+        """
+        sleeps: list[float] = []
+        exists_calls: list[int] = []
+        clock = [0.0]
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            clock[0] += s
+
+        def fake_time():
+            return clock[0]
+
+        r = MagicMock(name="redis")
+        # Drain returns no messages → flusher exits cleanly after the wait.
+        drain_script = MagicMock(return_value=[])
+        r.register_script.return_value = drain_script
+
+        # exists() consumes from the sequence; subsequent calls reuse last.
+        sequence_iter = iter(exists_sequence)
+        last = [True]
+        def fake_exists(key):
+            try:
+                last[0] = next(sequence_iter)
+            except StopIteration:
+                pass
+            exists_calls.append(len(exists_calls) + 1)
+            return last[0]
+        r.exists.side_effect = fake_exists
+        r.delete = MagicMock(return_value=0)
+
+        flask_app = MagicMock(name="flask_app")
+
+        with patch.object(debounce, "_get_redis", return_value=r), \
+             patch.object(debounce.time, "sleep", fake_sleep), \
+             patch.object(debounce.time, "time", fake_time):
+            debounce._flush("+573177000722", "whatsapp:+14155238886", flask_app)
+
+        return r, sleeps, exists_calls
+
+    def test_waits_for_proc_key_before_draining(self):
+        """proc_key True then False → poll, then drain."""
+        r, sleeps, exists_calls = self._drive_flush_with_inflight(
+            exists_sequence=[True, True, True, False],
+        )
+        # First sleep is the debounce window itself.
+        assert sleeps[0] == debounce.DEBOUNCE_SECONDS
+        # Subsequent sleeps are poll intervals while waiting.
+        assert all(
+            s == debounce._INFLIGHT_POLL_INTERVAL for s in sleeps[1:]
+        ), sleeps[1:]
+        # We must have polled proc_key at least once and proceeded once
+        # it cleared (4 polls: 3 True + 1 False).
+        assert len(exists_calls) >= 4
+
+    def test_drains_immediately_when_no_inflight(self):
+        """proc_key starts cleared → no polling, no extra sleeps."""
+        r, sleeps, exists_calls = self._drive_flush_with_inflight(
+            exists_sequence=[False],
+        )
+        # Only the debounce-window sleep, no poll sleeps.
+        assert sleeps == [debounce.DEBOUNCE_SECONDS]
+        # One exists check is enough — it returned False.
+        assert len(exists_calls) == 1
+
+    def test_caps_wait_at_max_seconds_to_avoid_strand(self):
+        """If the in-flight turn never clears, drain anyway after the cap.
+        We force the cap to fire by always returning True from exists().
+        Sleeps consumed until the cap is hit."""
+        r, sleeps, exists_calls = self._drive_flush_with_inflight(
+            exists_sequence=[True] * 10000,  # never clears
+        )
+        # Total wall-clock simulated by the poll sleeps must exceed the cap.
+        # Each poll sleep is _INFLIGHT_POLL_INTERVAL. The number of polls
+        # equals (cap / poll_interval) before the cap check exits.
+        poll_sleeps = sleeps[1:]
+        # Simulated wait should at least approach the cap.
+        assert sum(poll_sleeps) >= debounce._INFLIGHT_WAIT_MAX_SECONDS - debounce._INFLIGHT_POLL_INTERVAL
 
 
 class TestRequeueScalesToN:

@@ -205,6 +205,26 @@ def _run_agent_and_send(
         logging.warning("[ABORT] %s: aborted after planner, skipping send", wa_id)
         return False
 
+    # Pre-send abort gate: covers paths that don't go through the agent
+    # (greeting fast-path) and paths where the dispatcher's abort fallback
+    # produces a generic "Lo siento, no pude procesar..." string. By the
+    # time we reach this check, a newer message may have arrived during
+    # the agent run / Twilio call. If so, drop this response — the newer
+    # message's flusher will handle the coalesced thread cleanly.
+    if abort_key:
+        try:
+            from app.services.debounce import check_abort, clear_abort
+            if check_abort(abort_key):
+                clear_abort(abort_key)
+                logging.warning(
+                    "[ABORT] %s: pre-send abort detected, dropping response (len=%d)",
+                    wa_id, len(response or ""),
+                )
+                return False
+        except Exception as exc:
+            # Never let the abort check break the send path.
+            logging.warning("[ABORT] %s: pre-send check failed: %s", wa_id, exc)
+
     processed_response = process_text_for_whatsapp(response)
     data = get_text_message_input(wa_id, processed_response)
     send_start = time.time()

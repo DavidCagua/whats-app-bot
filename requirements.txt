@@ -1,5 +1,6 @@
 flask
 redis
+fakeredis[lua]>=2.20  # In-process Redis for integration tests; [lua] enables EVAL for our LPUSH/RPUSH+SET-NX scripts.
 gunicorn
 python-dotenv
 openai
