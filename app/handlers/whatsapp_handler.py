@@ -79,7 +79,12 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
                 if conv_id is not None:
                     try:
                         from app.workers.media_job import enqueue_media_job
-                        enqueue_media_job(conv_id)
+                        # Pass abort_key so the media job can set the
+                        # processing flag while it runs vision — concurrent
+                        # text messages (e.g. "la tiene?" arriving during
+                        # the vision call) hit the existing abort+requeue
+                        # path and coalesce cleanly with the image turn.
+                        enqueue_media_job(conv_id, abort_key=abort_key)
                     except Exception as enq_e:
                         logging.error(f"[CONVERSATION] Failed to enqueue media job: {enq_e}")
             else:
@@ -94,8 +99,24 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
             logging.error(f"[CONVERSATION] Failed to store inbound user message: {e}")
 
         has_audio = any((a.get("type") or "") == "audio" for a in attachments)
+        has_image = any((a.get("type") or "") == "image" for a in attachments)
+        # Image messages — captioned or not — defer entirely to the media
+        # job. Vision runs first; the result decides whether to send a
+        # templated promo reply or to run the agent on the caption with
+        # the image context already known. Running the agent here on the
+        # caption alone would lose the image content and produce
+        # incoherent replies (e.g. "la tiene?" → CHAT fallback because
+        # the agent has no antecedent).
+        # Audio-only behavior unchanged: voice-only skips the agent so the
+        # transcription worker can run + reply.
+        if has_image:
+            logging.warning(
+                "[MESSAGE] Image message (caption=%s): deferring entire turn to media job",
+                bool(message_body),
+            )
+            return
         if not message_body and has_audio:
-            logging.warning("[MESSAGE] Voice-only message: skipping agent (human will reply)")
+            logging.warning("[MESSAGE] Voice-only message: skipping agent (media job handles)")
             return
 
         if business_context:
