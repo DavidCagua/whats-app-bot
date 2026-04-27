@@ -81,6 +81,10 @@ Reglas:
     "address"         → ubicación ("dónde quedan", "cuál es la dirección")
     "phone"           → teléfono de contacto
     "delivery_fee"    → costo del domicilio ("cuánto cobran domicilio", "cuánto vale el envío")
+    "delivery_time"   → tiempo de entrega ("cuánto se demora la entrega", "cuánto tardan en entregar",
+                        "en cuánto tiempo llega", "qué tan rápido entregan", "cuánto se demoran",
+                        "cuánto tarda un domicilio"). El backend usa per-order ETA si el cliente ya
+                        tiene un pedido en curso; sin pedido, devuelve la política general del negocio.
     "menu_url"        → link del menú
     "payment_methods" → medios de pago ("aceptan nequi", "qué pagos reciben", "efectivo?")
 - GET_ORDER_STATUS: el usuario pregunta por el estado de su pedido actual o reciente
@@ -120,6 +124,7 @@ _BUSINESS_INFO_TEMPLATES = {
     "address": "Estamos ubicados en {value}.",
     "phone": "Puedes contactarnos al {value}.",
     "delivery_fee": "El domicilio tiene un costo de {value}.",
+    "delivery_time": "Nuestros pedidos llegan en {value}.",
     "menu_url": "Acá tienes nuestro menú: {value}",
     "payment_methods": "Aceptamos {value}.",
 }

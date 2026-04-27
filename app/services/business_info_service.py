@@ -23,6 +23,7 @@ FIELD_HOURS = "hours"
 FIELD_ADDRESS = "address"
 FIELD_PHONE = "phone"
 FIELD_DELIVERY_FEE = "delivery_fee"
+FIELD_DELIVERY_TIME = "delivery_time"
 FIELD_MENU_URL = "menu_url"
 FIELD_PAYMENT_METHODS = "payment_methods"
 
@@ -31,6 +32,7 @@ ALL_FIELDS = (
     FIELD_ADDRESS,
     FIELD_PHONE,
     FIELD_DELIVERY_FEE,
+    FIELD_DELIVERY_TIME,
     FIELD_MENU_URL,
     FIELD_PAYMENT_METHODS,
 )
@@ -98,6 +100,16 @@ _FIELD_MAP: Dict[str, Dict[str, Any]] = {
         # say "no configurado" while orders silently apply this number.
         "default": DELIVERY_FEE_DEFAULT,
     },
+    FIELD_DELIVERY_TIME: {
+        # Operator-overridable as a free-text string ("30-60 minutos",
+        # "Same-day", etc.). Falls back to the same NOMINAL_RANGE_TEXT
+        # the order agent quotes at order placement so the answer to
+        # "cuánto se demora la entrega?" matches what receipts promise.
+        "keys": ("delivery_time_text",),
+        "format": _plain,
+        # Resolved lazily below to avoid a circular import at module load.
+        "default_factory": lambda: _delivery_time_default(),
+    },
     FIELD_MENU_URL: {
         "keys": ("menu_url",),
         "format": _plain,
@@ -143,15 +155,26 @@ def get_business_info(
     if value in (None, "", [], {}):
         # Some fields opt into a default when the operator hasn't
         # configured a value — e.g. delivery_fee shares a default with
-        # the order side so the two surfaces never disagree.
+        # the order side so the two surfaces never disagree. Use
+        # default_factory for defaults that need lazy resolution
+        # (avoids import cycles).
         if "default" in spec:
             value = spec["default"]
+        elif "default_factory" in spec:
+            value = spec["default_factory"]()
         else:
             return None
 
     formatter: Callable[[Any], str] = spec["format"]
     formatted = formatter(value)
     return formatted or None
+
+
+def _delivery_time_default() -> str:
+    """Lazy import — order_eta lives in the same package and could
+    otherwise create a circular dep at module-load time."""
+    from .order_eta import NOMINAL_RANGE_TEXT
+    return NOMINAL_RANGE_TEXT
 
 
 def supported_fields() -> List[str]:

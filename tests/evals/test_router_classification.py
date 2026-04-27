@@ -71,6 +71,10 @@ ROUTING_CASES = [
     ("a qué hora abren?", DOMAIN_CUSTOMER_SERVICE, "hours question"),
     ("cuál es la dirección?", DOMAIN_CUSTOMER_SERVICE, "address question"),
 
+    # ─── Delivery TIME questions (info, not order) ────────────────────
+    ("cuánto se demora la entrega?", DOMAIN_CUSTOMER_SERVICE, "delivery-time policy"),
+    ("cuánto tardan en entregar?", DOMAIN_CUSTOMER_SERVICE, "delivery-time variant"),
+
     # ─── Browsing + adding (sanity for order) ─────────────────────────
     ("qué hamburguesas tienen?", DOMAIN_ORDER, "category browsing"),
     ("dame una barracuda", DOMAIN_ORDER, "explicit cart add"),

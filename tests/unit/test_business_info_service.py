@@ -60,6 +60,24 @@ class TestGetBusinessInfo:
         assert bis.get_business_info(_ctx({"delivery_fee": None}), "delivery_fee") == "$5.000"
         assert bis.get_business_info(_ctx({"delivery_fee": ""}), "delivery_fee") == "$5.000"
 
+    def test_delivery_time_reads_from_settings_when_set(self):
+        result = bis.get_business_info(
+            _ctx({"delivery_time_text": "30 a 45 minutos"}), "delivery_time",
+        )
+        assert result == "30 a 45 minutos"
+
+    def test_delivery_time_falls_back_to_nominal_range_when_unset(self):
+        """
+        Regression: customer asks "cuánto se demora la entrega?", CS used
+        to fall through to chat-fallback ("no entendí"). Now this maps to
+        the delivery_time field, which falls back to the same NOMINAL_RANGE_TEXT
+        the order agent quotes at order placement — so the answer matches
+        what receipts promise.
+        """
+        from app.services.order_eta import NOMINAL_RANGE_TEXT
+        result = bis.get_business_info(_ctx({}), "delivery_time")
+        assert result == NOMINAL_RANGE_TEXT
+
     def test_delivery_fee_default_matches_order_side(self):
         """The constant CS uses must equal the constant the order side
         falls back to, otherwise receipts would charge X but CS would
@@ -117,5 +135,6 @@ class TestGetBusinessInfo:
     def test_supported_fields_matches_constants(self):
         assert set(bis.supported_fields()) == {
             bis.FIELD_HOURS, bis.FIELD_ADDRESS, bis.FIELD_PHONE,
-            bis.FIELD_DELIVERY_FEE, bis.FIELD_MENU_URL, bis.FIELD_PAYMENT_METHODS,
+            bis.FIELD_DELIVERY_FEE, bis.FIELD_DELIVERY_TIME,
+            bis.FIELD_MENU_URL, bis.FIELD_PAYMENT_METHODS,
         }

@@ -148,7 +148,7 @@ def execute_customer_service_intent(
 
     try:
         if intent == INTENT_GET_BUSINESS_INFO:
-            return _handle_business_info(wa_id, business_id, business_context, params)
+            return _handle_business_info(wa_id, business_id, business_context, params, session)
 
         if intent == INTENT_GET_ORDER_STATUS:
             return _handle_order_status(wa_id, business_id, session)
@@ -189,6 +189,7 @@ def _handle_business_info(
     business_id: str,
     business_context: Optional[Dict[str, Any]],
     params: Dict[str, Any],
+    session: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     field = (params.get("field") or "").strip().lower()
     if not field:
@@ -198,6 +199,25 @@ def _handle_business_info(
             field=None,
             available_fields=business_info_service.supported_fields(),
         )
+
+    # Per-order ETA swap: "cuánto se demora la entrega?" is policy by
+    # default, but if the customer has a placed order with a meaningful
+    # remaining time, the per-order answer is more useful than a generic
+    # "40 a 50 minutos". Returns the order_status path so the existing
+    # ETA-aware response template handles it.
+    if field == "delivery_time":
+        latest = order_lookup_service.get_latest_order(wa_id, business_id)
+        if latest:
+            from ..services.order_eta import estimate_remaining_minutes
+            if estimate_remaining_minutes({
+                "status": latest.get("status"),
+                "confirmed_at": latest.get("confirmed_at"),
+            }) is not None:
+                return _base_result(
+                    wa_id, business_id,
+                    RESULT_KIND_ORDER_STATUS,
+                    order=_clean_order_for_response(latest),
+                )
 
     value = business_info_service.get_business_info(business_context, field)
     if value is None:
