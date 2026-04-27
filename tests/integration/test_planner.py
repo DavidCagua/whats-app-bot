@@ -296,6 +296,65 @@ class TestDisambiguationReplyWithFlavorQualifier:
         assert notes in ("", ""), f"unexpected notes: {notes!r}"
 
 
+class TestDisambiguationReplyDoesNotLeakBotQuestionWords:
+    """
+    Regression for the production bug on 2026-04-27 (Biela / 3177000722):
+    bot asked "¿prefieres Hervido Maracuyá o Hervido Mora?", user replied
+    "maracuya", and the planner attached notes='prefiero' — pulled from
+    the bot's own question word, not from the user's reply.
+
+    `notes` MUST only be populated from words in the CURRENT user message.
+    Words like 'prefieres' / 'prefiero' / 'quieres' / 'gustaría' that
+    only appear in the bot's question must never leak through.
+    """
+
+    HERVIDO_OPTIONS = [
+        {"name": "Hervido Maracuyá", "price": 9500},
+        {"name": "Hervido Mora", "price": 9500},
+    ]
+
+    @pytest.mark.parametrize(
+        "user_reply, expected_name_substr",
+        [
+            ("maracuya", "hervido maracuyá"),
+            ("Maracuya", "hervido maracuyá"),
+            ("el de maracuyá", "hervido maracuyá"),
+            ("mora", "hervido mora"),
+            ("el de mora", "hervido mora"),
+        ],
+    )
+    def test_bare_choice_does_not_leak_prefiero_into_notes(
+        self, user_reply, expected_name_substr,
+    ):
+        result = _classify_with_pending(
+            message=user_reply,
+            pending_options=self.HERVIDO_OPTIONS,
+            requested_name="hervido",
+        )
+        assert result["intent"] == "ADD_TO_CART"
+        params = result.get("params") or {}
+        name = (params.get("product_name") or "").lower()
+        notes = (params.get("notes") or "").strip().lower()
+
+        # Multi-item shape fallback (rare for disamb-reply, but be safe).
+        if not name and isinstance(params.get("items"), list) and params["items"]:
+            first = params["items"][0] or {}
+            name = (first.get("product_name") or "").lower()
+            notes = (first.get("notes") or "").strip().lower()
+
+        assert expected_name_substr in name, (
+            f"expected name to contain {expected_name_substr!r}, got {name!r}"
+        )
+        # The bug words: any of these means the bot's question leaked into notes.
+        bot_question_artifacts = {"prefiero", "prefieres", "quieres", "gustaria", "gustaría"}
+        leaked = bot_question_artifacts.intersection(set(notes.split()))
+        assert not leaked, (
+            f"bot-question word leaked into notes: {leaked} (full notes={notes!r})"
+        )
+        # And the broader rule: bare-name reply → no notes.
+        assert notes == "", f"expected empty notes for bare choice, got {notes!r}"
+
+
 # ---------------------------------------------------------------------------
 # Bug 6 — VIEW_CART routing on "qué tengo en mi pedido" variants
 # ---------------------------------------------------------------------------
