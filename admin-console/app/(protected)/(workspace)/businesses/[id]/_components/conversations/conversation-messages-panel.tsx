@@ -17,6 +17,49 @@ type ConversationMessagesPanelProps = {
   onBack?: () => void
 }
 
+type ThreadMessage = ConversationThread["messages"][number]
+
+const OPTIMISTIC_MATCH_WINDOW_MS = 60_000
+const VOICE_PLACEHOLDER = "[audio]"
+
+/**
+ * Merge a polled server message list with the local list while preserving
+ * optimistic entries (id < 0) that the server has not yet confirmed.
+ */
+function mergeMessages(
+  local: ThreadMessage[],
+  server: ThreadMessage[]
+): ThreadMessage[] {
+  const optimistic = local.filter((m) => m.id < 0)
+  if (optimistic.length === 0) return server
+
+  const stillPending = optimistic.filter((opt) => {
+    const optTs = new Date(opt.timestamp).getTime()
+    return !server.some((srv) => {
+      if (srv.role !== opt.role) return false
+      const srvTs = new Date(srv.timestamp).getTime()
+      if (Math.abs(srvTs - optTs) > OPTIMISTIC_MATCH_WINDOW_MS) return false
+      // Text: match on identical content.
+      if (opt.message !== VOICE_PLACEHOLDER && srv.message === opt.message) return true
+      // Voice note: match on attachment presence in the same time window.
+      if (
+        opt.message === VOICE_PLACEHOLDER &&
+        srv.role === "assistant" &&
+        Array.isArray(srv.attachments) &&
+        srv.attachments.length > 0
+      ) {
+        return true
+      }
+      return false
+    })
+  })
+
+  if (stillPending.length === 0) return server
+  return [...server, ...stillPending].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  )
+}
+
 export function ConversationMessagesPanel({
   thread,
   onBack,
@@ -37,11 +80,26 @@ export function ConversationMessagesPanel({
   const chunksRef = useRef<Blob[]>([])
   const draftRef = useRef(draft)
   draftRef.current = draft
+  const prevThreadIdRef = useRef<string | null>(null)
+  const isTogglingAgentRef = useRef(isTogglingAgent)
+  isTogglingAgentRef.current = isTogglingAgent
 
+  // Reset on thread switch; merge in place on same-thread polled updates so
+  // optimistic messages and in-flight UI state aren't clobbered every poll.
   useEffect(() => {
-    setLocalMessages(thread.messages)
-    setAgentEnabled(thread.agent_enabled)
-  }, [thread.whatsapp_id, thread.business_id, thread.total_messages, thread.agent_enabled])
+    const threadId = `${thread.whatsapp_id}:${thread.business_id}`
+    if (prevThreadIdRef.current !== threadId) {
+      setLocalMessages(thread.messages)
+      setAgentEnabled(thread.agent_enabled)
+      prevThreadIdRef.current = threadId
+      return
+    }
+    setLocalMessages((prev) => mergeMessages(prev, thread.messages))
+    // Only accept the server-side agent flag when the user isn't mid-toggle.
+    if (!isTogglingAgentRef.current) {
+      setAgentEnabled(thread.agent_enabled)
+    }
+  }, [thread.whatsapp_id, thread.business_id, thread.messages, thread.agent_enabled])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -53,6 +111,8 @@ export function ConversationMessagesPanel({
   )
 
   const onToggleAgent = async (next: boolean) => {
+    const previous = agentEnabled
+    setAgentEnabled(next)
     setIsTogglingAgent(true)
     try {
       const res = await fetch("/api/conversations/agent-enabled", {
@@ -65,9 +125,8 @@ export function ConversationMessagesPanel({
         }),
       })
       if (!res.ok) throw new Error("Failed to update")
-      setAgentEnabled(next)
     } catch {
-      // keep previous state
+      setAgentEnabled(previous)
     } finally {
       setIsTogglingAgent(false)
     }
