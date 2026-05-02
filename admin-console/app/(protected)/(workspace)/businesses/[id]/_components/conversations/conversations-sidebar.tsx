@@ -45,7 +45,7 @@ type ConversationsSidebarProps = {
     dateFrom?: string
     dateTo?: string
   }
-  onConversationSelect?: () => void
+  onSelectConversation: (conversationId: string) => void
 }
 
 export function ConversationsSidebar({
@@ -57,7 +57,7 @@ export function ConversationsSidebar({
   showBusinessColumn,
   inboxBasePath,
   initialFilters,
-  onConversationSelect,
+  onSelectConversation,
 }: ConversationsSidebarProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -145,12 +145,10 @@ export function ConversationsSidebar({
 
     const params = new URLSearchParams(searchParams.toString())
     params.set("conversation", conversationId)
+    // Update URL without re-running the RSC tree.
+    window.history.replaceState(null, "", `${inboxBasePath}?${params.toString()}`)
 
-    startTransition(() => {
-      router.push(`${inboxBasePath}?${params.toString()}`)
-    })
-
-    onConversationSelect?.()
+    onSelectConversation(conversationId)
   }
 
   return (

@@ -1,12 +1,14 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useSearchParams } from "next/navigation"
 import { ConversationGroup, ConversationThread } from "@/lib/conversations-queries"
 import { ConversationsSidebar } from "./conversations-sidebar"
 import { ConversationMessagesPanel } from "./conversation-messages-panel"
+import { ConversationMessagesSkeleton } from "./conversation-messages-skeleton"
 import { Card } from "@/components/ui/card"
 import { MessageSquare } from "lucide-react"
+import { cn } from "@/lib/utils"
 
 const THREAD_POLL_MS = 2500
 const LIST_POLL_MS = 7000
@@ -43,49 +45,59 @@ export function ConversationsLayout({
   initialFilters,
 }: ConversationsLayoutProps) {
   const searchParams = useSearchParams()
-  const conversationParam = searchParams.get("conversation")
 
   const [conversations, setConversations] = useState<ConversationGroup[]>(initialConversations)
   const [thread, setThread] = useState<ConversationThread | null>(initialThread)
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(() => {
+    if (initialThread) return `${initialThread.whatsapp_id}:${initialThread.business_id}`
+    return searchParams.get("conversation")
+  })
+  const [threadLoading, setThreadLoading] = useState(false)
   // On mobile: "list" | "chat"
-  const [mobileView, setMobileView] = useState<"list" | "chat">("list")
+  const [mobileView, setMobileView] = useState<"list" | "chat">(
+    initialThread ? "chat" : "list"
+  )
 
-  // Sync list from server when initial data changes (e.g. filter applied)
+  // AbortController + request token guard so a stale fetchThread can't clobber the active selection.
+  const threadAbortRef = useRef<AbortController | null>(null)
+  const activeRequestIdRef = useRef<string | null>(null)
+  const selectedIdRef = useRef(selectedConversationId)
+  selectedIdRef.current = selectedConversationId
+
+  // Sync list from server when initial data changes (e.g. filter applied via router.push)
   useEffect(() => {
     setConversations(initialConversations)
   }, [initialConversations])
 
-  // Sync thread + switch to chat view when a conversation is selected
-  useEffect(() => {
-    if (!conversationParam) {
-      setThread(null)
-      setMobileView("list")
-      return
-    }
-    if (initialThread && `${initialThread.whatsapp_id}:${initialThread.business_id}` === conversationParam) {
-      setThread(initialThread)
-      setMobileView("chat")
-    } else {
-      setThread(null)
-    }
-  }, [conversationParam, initialThread])
-
-  const fetchThread = useCallback(async () => {
-    if (!conversationParam) return
-    const [whatsappId, businessId] = conversationParam.split(":")
+  const fetchThread = useCallback(async (conversationId: string) => {
+    const [whatsappId, businessId] = conversationId.split(":")
     if (!whatsappId || !businessId) return
+
+    threadAbortRef.current?.abort()
+    const controller = new AbortController()
+    threadAbortRef.current = controller
+    activeRequestIdRef.current = conversationId
+
     try {
       const res = await fetch(
-        `/api/conversations/thread?whatsappId=${encodeURIComponent(whatsappId)}&businessId=${encodeURIComponent(businessId)}`
+        `/api/conversations/thread?whatsappId=${encodeURIComponent(whatsappId)}&businessId=${encodeURIComponent(businessId)}`,
+        { signal: controller.signal }
       )
-      if (res.ok) {
-        const data = await res.json()
-        setThread(data)
+      if (!res.ok) return
+      const data = (await res.json()) as ConversationThread | null
+      // Bail if the user moved on to a different conversation while this was in flight.
+      if (selectedIdRef.current !== conversationId) return
+      setThread(data)
+    } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return
+      // keep previous thread on transient errors
+    } finally {
+      if (activeRequestIdRef.current === conversationId) {
+        setThreadLoading(false)
+        activeRequestIdRef.current = null
       }
-    } catch {
-      // keep previous thread on error
     }
-  }, [conversationParam])
+  }, [])
 
   const fetchList = useCallback(async () => {
     const params = new URLSearchParams()
@@ -110,26 +122,43 @@ export function ConversationsLayout({
     }
   }, [searchParams, scopedBusinessId])
 
-  // Thread polling: every 2–3s when a conversation is selected
+  // Thread polling: refresh the currently-selected thread every 2.5s.
   useEffect(() => {
-    if (!conversationParam) return
-    const interval = setInterval(fetchThread, THREAD_POLL_MS)
+    if (!selectedConversationId) return
+    const interval = setInterval(() => {
+      // Don't poll while an explicit selection is still loading.
+      if (activeRequestIdRef.current) return
+      void fetchThread(selectedConversationId)
+    }, THREAD_POLL_MS)
     return () => clearInterval(interval)
-  }, [conversationParam, fetchThread])
+  }, [selectedConversationId, fetchThread])
 
-  // List polling: every 5–10s
+  // List polling: every 7s
   useEffect(() => {
     const interval = setInterval(fetchList, LIST_POLL_MS)
     return () => clearInterval(interval)
   }, [fetchList])
 
-  const selectedConversationId = thread
-    ? `${thread.whatsapp_id}:${thread.business_id}`
-    : null
+  // Cleanup any in-flight thread request on unmount.
+  useEffect(() => {
+    return () => threadAbortRef.current?.abort()
+  }, [])
 
-  const handleConversationSelect = () => {
-    setMobileView("chat")
-  }
+  const handleSelectConversation = useCallback(
+    (conversationId: string) => {
+      if (conversationId === selectedConversationId) {
+        setMobileView("chat")
+        return
+      }
+      setSelectedConversationId(conversationId)
+      setMobileView("chat")
+      // Show skeleton on the right pane immediately; clear the previous thread so we don't flash old content.
+      setThread(null)
+      setThreadLoading(true)
+      void fetchThread(conversationId)
+    },
+    [selectedConversationId, fetchThread]
+  )
 
   const handleBack = () => {
     setMobileView("list")
@@ -141,12 +170,11 @@ export function ConversationsLayout({
 
       {/* Sidebar — full width on mobile, fixed width on md+, hidden on mobile when in chat view */}
       <div
-        className={[
+        className={cn(
           "flex flex-col min-w-0",
-          // Mobile: full width, hidden when chatting
           "w-full md:w-[340px] lg:w-[380px] md:flex-shrink-0",
-          mobileView === "chat" ? "hidden md:flex" : "flex",
-        ].join(" ")}
+          mobileView === "chat" ? "hidden md:flex" : "flex"
+        )}
       >
         <ConversationsSidebar
           conversations={conversations}
@@ -158,18 +186,20 @@ export function ConversationsLayout({
           showBusinessColumn={showBusinessColumn}
           inboxBasePath={inboxBasePath}
           initialFilters={initialFilters}
-          onConversationSelect={handleConversationSelect}
+          onSelectConversation={handleSelectConversation}
         />
       </div>
 
       {/* Messages panel — hidden on mobile when in list view */}
       <div
-        className={[
+        className={cn(
           "flex-1 min-w-0",
-          mobileView === "list" ? "hidden md:flex md:flex-col" : "flex flex-col",
-        ].join(" ")}
+          mobileView === "list" ? "hidden md:flex md:flex-col" : "flex flex-col"
+        )}
       >
-        {thread ? (
+        {threadLoading && !thread ? (
+          <ConversationMessagesSkeleton onBack={handleBack} />
+        ) : thread ? (
           <ConversationMessagesPanel thread={thread} onBack={handleBack} />
         ) : (
           <Card className="h-full flex items-center justify-center">
