@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { UserNav } from "@/components/user-nav"
 import type { SwitcherBusiness } from "@/lib/workspace-businesses"
 import { BusinessSwitcher } from "./business-switcher"
 import logo from "@/app/logo.png"
@@ -166,31 +167,28 @@ export function BusinessWorkspaceShell({
           </SidebarContent>
 
           <SidebarFooter className="border-t p-3 space-y-2">
-            <Button variant="ghost" size="sm" className="w-full justify-start" asChild>
-              <Link href="/businesses" className="gap-2">
-                <ChevronLeft className="h-4 w-4" />
-                Todos los negocios
-              </Link>
-            </Button>
-            {isSuperAdmin && (
-              <Button variant="ghost" size="sm" className="w-full justify-start" asChild>
-                <Link href="/users" className="gap-2">
-                  <BookUser className="h-4 w-4" />
-                  Users
-                </Link>
-              </Button>
-            )}
-            <div className="flex items-center justify-between gap-2 rounded-md border p-2">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-medium">{userName}</p>
-                <p className="truncate text-xs text-muted-foreground">{userEmail}</p>
-                {isSuperAdmin && (
-                  <span className="text-xs font-medium text-primary">Súper Admin</span>
-                )}
-              </div>
-              {signOutSlot}
-            </div>
-          </SidebarFooter>
+  <Button variant="ghost" size="sm" className="w-full justify-start" asChild>
+    <Link href="/businesses" className="gap-2">
+      <ChevronLeft className="h-4 w-4" />
+      Todos los negocios
+    </Link>
+  </Button>
+
+  {isSuperAdmin && (
+    <Button variant="ghost" size="sm" className="w-full justify-start" asChild>
+      <Link href="/users" className="gap-2">
+        <BookUser className="h-4 w-4" />
+        Users
+      </Link>
+    </Button>
+  )}
+
+  <UserNav
+    userName={userName}
+    userEmail={userEmail}
+    signOutSlot={signOutSlot}
+  />
+</SidebarFooter>
         </Sidebar>
 
         <main className="flex min-w-0 flex-1 flex-col">

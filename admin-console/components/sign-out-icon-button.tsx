@@ -1,18 +1,6 @@
-import { signOut } from "@/lib/auth"
-import { Button } from "@/components/ui/button"
-import { LogOut } from "lucide-react"
+import { logoutAction } from "@/lib/actions/logout"
+import { LogoutButtonClient } from "@/components/logout-button-client"
 
 export function SignOutIconButton() {
-  return (
-    <form
-      action={async () => {
-        "use server"
-        await signOut({ redirectTo: "/login" })
-      }}
-    >
-      <Button type="submit" variant="ghost" size="icon" className="shrink-0" aria-label="Sign out">
-        <LogOut className="h-4 w-4" />
-      </Button>
-    </form>
-  )
+  return <LogoutButtonClient action={logoutAction} />
 }
