@@ -10,12 +10,20 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
 } from "@/components/ui/select"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { Bell, BellOff, BellRing } from "lucide-react"
 import { format } from "date-fns"
 import { toast } from "sonner"
 import { updateOrderStatus } from "@/lib/actions/orders"
@@ -27,6 +35,16 @@ import {
 } from "@/lib/order-status"
 import { useEventSource } from "@/lib/use-event-source"
 import type { OrderRow } from "@/lib/orders-queries"
+import {
+  getAlertsEnabled,
+  playChime,
+  setAlertsEnabled as persistAlertsEnabled,
+  unlockAndPlayTest,
+} from "@/lib/order-alert"
+import { cn } from "@/lib/utils"
+
+const PULSE_DURATION_MS = 5_000
+const TOAST_DURATION_MS = 8_000
 
 const formatAmount = (value: number) =>
   new Intl.NumberFormat("es-CO", {
@@ -56,38 +74,148 @@ const statusVariant = (
 const labelFor = (status: string): string =>
   isValidStatus(status) ? STATUS_LABELS[status] : status
 
+const formatAmountForToast = (value: number) =>
+  new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    minimumFractionDigits: 0,
+  }).format(value)
+
+const orderToastSummary = (o: OrderRow) => {
+  const items =
+    o.items.length > 0
+      ? o.items.map((i) => `${i.quantity}× ${i.productName}`).join(", ")
+      : "Sin ítems"
+  return `${items} · ${formatAmountForToast(o.total_amount)}`
+}
+
 export function OrdersTable({
   businessId,
+  businessName,
   initialOrders,
 }: {
   businessId: string
+  businessName: string
   initialOrders: OrderRow[]
 }) {
   const [orders, setOrders] = useState<OrderRow[]>(initialOrders)
   const [updating, setUpdating] = useState<string | null>(null)
 
+  // Per-device opt-in for the audio chime (localStorage). When false, the
+  // visual alerts (pulse, toast, title flash) still fire — only sound is gated.
+  const [alertsEnabled, setAlertsEnabled] = useState(false)
+  // Audio context unlock state for the current page session. Even when the
+  // localStorage pref is true, the browser autoplay policy may suspend audio
+  // until the user interacts with the page. Reactivar = re-run the unlock.
+  const [audioUnlocked, setAudioUnlocked] = useState(false)
+  // Pulse marker per recently arrived order id; auto-clears after 5s.
+  const [recentIds, setRecentIds] = useState<Set<string>>(new Set())
+  // Unread count drives the document title flash while the tab is hidden.
+  const [unreadCount, setUnreadCount] = useState(0)
+
   // Track in-flight admin status updates so an SSE snapshot landing
   // mid-PATCH doesn't snap the badge back to the server's stale value.
   const pendingStatusRef = useRef<Map<string, OrderStatus>>(new Map())
+  // Initialised on the first SSE snapshot so we don't fire alerts for the
+  // initial backlog of orders that were already in the DB on page load.
+  const seenIdsRef = useRef<Set<string> | null>(null)
+  // Hold latest alertsEnabled in a ref so the snapshot handler reads the
+  // current value without needing to re-bind on every toggle.
+  const alertsEnabledRef = useRef(false)
+  useEffect(() => {
+    alertsEnabledRef.current = alertsEnabled
+  }, [alertsEnabled])
+
+  // Read persisted opt-in once on mount.
+  useEffect(() => {
+    setAlertsEnabled(getAlertsEnabled())
+  }, [])
+
+  // Document title flash while the tab is hidden. Restores on focus.
+  useEffect(() => {
+    const baseTitle = `Pedidos · ${businessName}`
+    if (unreadCount === 0) {
+      document.title = baseTitle
+      return
+    }
+    const noun = unreadCount === 1 ? "pedido" : "pedidos"
+    document.title = `🔔 (${unreadCount}) Nuevo ${noun} — ${baseTitle}`
+    return () => {
+      document.title = baseTitle
+    }
+  }, [unreadCount, businessName])
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (!document.hidden) setUnreadCount(0)
+    }
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => document.removeEventListener("visibilitychange", onVisibility)
+  }, [])
+
+  const handleNewOrders = useCallback((newOnes: OrderRow[]) => {
+    setRecentIds((prev) => {
+      const next = new Set(prev)
+      newOnes.forEach((o) => next.add(o.id))
+      return next
+    })
+    newOnes.forEach((o) => {
+      window.setTimeout(() => {
+        setRecentIds((prev) => {
+          if (!prev.has(o.id)) return prev
+          const next = new Set(prev)
+          next.delete(o.id)
+          return next
+        })
+      }, PULSE_DURATION_MS)
+
+      toast.success(`🔔 Nuevo pedido — ${orderToastSummary(o)}`, {
+        duration: TOAST_DURATION_MS,
+      })
+    })
+
+    if (alertsEnabledRef.current) {
+      playChime()
+    }
+    if (document.hidden) {
+      setUnreadCount((c) => c + newOnes.length)
+    }
+  }, [])
 
   const streamUrl = useMemo(
     () => `/api/orders/stream?businessId=${encodeURIComponent(businessId)}`,
     [businessId]
   )
 
-  const onSnapshot = useCallback((next: OrderRow[]) => {
-    const pending = pendingStatusRef.current
-    if (pending.size === 0) {
-      setOrders(next)
-      return
-    }
-    setOrders(
-      next.map((row) => {
-        const optimisticStatus = pending.get(row.id)
-        return optimisticStatus ? { ...row, status: optimisticStatus } : row
-      })
-    )
-  }, [])
+  const onSnapshot = useCallback(
+    (next: OrderRow[]) => {
+      // First snapshot is the initial backlog — seed the seen-set without
+      // firing alerts. Every snapshot after that is the diff source.
+      if (seenIdsRef.current === null) {
+        seenIdsRef.current = new Set(next.map((o) => o.id))
+      } else {
+        const seen = seenIdsRef.current
+        const newOnes = next.filter((o) => !seen.has(o.id))
+        newOnes.forEach((o) => seen.add(o.id))
+        if (newOnes.length > 0) {
+          handleNewOrders(newOnes)
+        }
+      }
+
+      const pending = pendingStatusRef.current
+      if (pending.size === 0) {
+        setOrders(next)
+        return
+      }
+      setOrders(
+        next.map((row) => {
+          const optimisticStatus = pending.get(row.id)
+          return optimisticStatus ? { ...row, status: optimisticStatus } : row
+        })
+      )
+    },
+    [handleNewOrders]
+  )
 
   useEventSource<OrderRow[]>(streamUrl, "snapshot", onSnapshot)
 
@@ -96,6 +224,28 @@ export function OrdersTable({
   useEffect(() => {
     setOrders(initialOrders)
   }, [initialOrders])
+
+  const handleActivateAlerts = useCallback(async () => {
+    const ok = await unlockAndPlayTest()
+    setAudioUnlocked(ok)
+    if (ok) {
+      setAlertsEnabled(true)
+      persistAlertsEnabled(true)
+      toast.success("Alertas activadas")
+    } else {
+      toast.error("No se pudo activar el sonido en este navegador")
+    }
+  }, [])
+
+  const handleToggleMute = useCallback(async () => {
+    if (alertsEnabled) {
+      setAlertsEnabled(false)
+      persistAlertsEnabled(false)
+      return
+    }
+    // Re-enabling — re-unlock since the AudioContext may have suspended.
+    await handleActivateAlerts()
+  }, [alertsEnabled, handleActivateAlerts])
 
   async function handleStatusChange(orderId: string, status: OrderStatus) {
     setUpdating(orderId)
@@ -117,8 +267,66 @@ export function OrdersTable({
     }
   }
 
+  const showActivateBanner = !alertsEnabled
+  const audioWillPlay = alertsEnabled && audioUnlocked
+
   return (
-    <div className="rounded-md border">
+    <div className="space-y-3">
+      <div className="flex items-center justify-end gap-2">
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant={alertsEnabled ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => void handleToggleMute()}
+                aria-pressed={alertsEnabled}
+                className="gap-1.5"
+              >
+                {alertsEnabled ? (
+                  audioWillPlay ? (
+                    <BellRing className="h-4 w-4" />
+                  ) : (
+                    <Bell className="h-4 w-4" />
+                  )
+                ) : (
+                  <BellOff className="h-4 w-4" />
+                )}
+                <span className="hidden sm:inline">
+                  {alertsEnabled ? "Alertas activas" : "Alertas en silencio"}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {alertsEnabled
+                ? "Click para silenciar el sonido"
+                : "Click para activar el sonido al llegar pedidos"}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+
+      {showActivateBanner && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+          <div className="flex items-center gap-2">
+            <Bell className="h-4 w-4 text-primary flex-shrink-0" />
+            <span>
+              Activa las alertas para escuchar un sonido cuando llegue un
+              pedido nuevo.
+            </span>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => void handleActivateAlerts()}
+            className="flex-shrink-0"
+          >
+            Activar alertas
+          </Button>
+        </div>
+      )}
+
+      <div className="rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
@@ -145,7 +353,13 @@ export function OrdersTable({
               const nextStates = Array.from(allowedNext(order.status))
               const isTerminal = nextStates.length === 0
               return (
-                <TableRow key={order.id}>
+                <TableRow
+                  key={order.id}
+                  className={cn(
+                    order.status === "pending" && "order-row-pending",
+                    recentIds.has(order.id) && "order-row-pulse"
+                  )}
+                >
                   <TableCell className="font-mono text-xs">
                     {order.id.slice(0, 8)}
                   </TableCell>
@@ -222,6 +436,7 @@ export function OrdersTable({
           )}
         </TableBody>
       </Table>
+      </div>
     </div>
   )
 }

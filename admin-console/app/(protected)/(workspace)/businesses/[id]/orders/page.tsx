@@ -31,7 +31,11 @@ export default async function OrdersPage({ params }: OrdersPageProps) {
         </div>
       </div>
 
-      <OrdersTable businessId={id} initialOrders={initialOrders} />
+      <OrdersTable
+        businessId={id}
+        businessName={business.name}
+        initialOrders={initialOrders}
+      />
     </div>
   )
 }
