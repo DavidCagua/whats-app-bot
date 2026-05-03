@@ -38,7 +38,7 @@ export async function updateOrderStatus(
   }
 
   if (existing.status === status) {
-    return { success: true as const, order: existing }
+    return { success: true as const }
   }
 
   if (!canTransition(existing.status, status)) {
@@ -66,12 +66,12 @@ export async function updateOrderStatus(
   }
 
   try {
-    const order = await prisma.orders.update({
+    await prisma.orders.update({
       where: { id: orderId },
       data,
     })
     revalidatePath(ordersPath(existing.business_id))
-    return { success: true as const, order }
+    return { success: true as const }
   } catch (err) {
     console.error("updateOrderStatus error:", err)
     return { success: false as const, error: "Failed to update order status" }
