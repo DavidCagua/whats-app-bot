@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth"
 import { canAccessBusiness } from "@/lib/permissions"
 import { notFound, redirect } from "next/navigation"
 import { OrdersTable } from "./components/orders-table"
+import { getOrdersForBusiness } from "@/lib/orders-queries"
 
 interface OrdersPageProps {
   params: Promise<{ id: string }>
@@ -19,30 +20,7 @@ export default async function OrdersPage({ params }: OrdersPageProps) {
   const business = await prisma.businesses.findUnique({ where: { id } })
   if (!business) notFound()
 
-  const orders = await prisma.orders.findMany({
-    where: { business_id: id },
-    orderBy: { created_at: "desc" },
-    include: {
-      order_items: {
-        include: { products: true },
-      },
-    },
-  })
-
-  const mappedOrders = orders.map((order) => ({
-    id: order.id,
-    created_at: order.created_at ? order.created_at.toISOString() : null,
-    whatsapp_id: order.whatsapp_id ?? null,
-    customer_id: order.customer_id ?? null,
-    total_amount: Number(order.total_amount.toString()),
-    status: order.status ?? "pending",
-    items: order.order_items.map((oi) => ({
-      id: oi.id,
-      quantity: oi.quantity,
-      productName: oi.products.name,
-      notes: oi.notes ?? null,
-    })),
-  }))
+  const initialOrders = await getOrdersForBusiness(id)
 
   return (
     <div className="space-y-6">
@@ -53,7 +31,7 @@ export default async function OrdersPage({ params }: OrdersPageProps) {
         </div>
       </div>
 
-      <OrdersTable initialOrders={mappedOrders} />
+      <OrdersTable businessId={id} initialOrders={initialOrders} />
     </div>
   )
 }

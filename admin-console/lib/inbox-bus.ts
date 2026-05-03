@@ -23,9 +23,28 @@ export type InboxEvent =
       whatsapp_id: string
       agent_enabled: boolean
     }
+  | {
+      type: "order"
+      business_id: string
+      order_id: string
+      /** Present on direct order updates; absent on order_items propagation. */
+      status?: string
+      /** "INSERT" | "UPDATE" for orders, "ITEM_INSERT" | "ITEM_UPDATE" | "ITEM_DELETE" for order_items. */
+      op: string
+    }
+
+export type InboxEventType = InboxEvent["type"]
+
+type SubscriberFilter = {
+  businessId: string
+  /** Only matches events whose payload has this whatsapp_id. */
+  whatsappId?: string
+  /** Restrict to a subset of event types. Omit to receive all types. */
+  eventTypes?: readonly InboxEventType[]
+}
 
 type Subscriber = {
-  filter: { businessId: string; whatsappId?: string }
+  filter: SubscriberFilter
   handler: (event: InboxEvent) => void
 }
 
@@ -60,9 +79,17 @@ class InboxBus {
     this.subscribers += 1
     void this.ensureConnected()
 
+    const allowedTypes = filter.eventTypes
+      ? new Set<InboxEventType>(filter.eventTypes)
+      : null
+
     const wrapped = (event: InboxEvent) => {
       if (event.business_id !== filter.businessId) return
-      if (filter.whatsappId && event.whatsapp_id !== filter.whatsappId) return
+      if (allowedTypes && !allowedTypes.has(event.type)) return
+      // Only events that carry a whatsapp_id field can match this filter.
+      if (filter.whatsappId) {
+        if (!("whatsapp_id" in event) || event.whatsapp_id !== filter.whatsappId) return
+      }
       handler(event)
     }
     this.emitter.on(CHANNEL, wrapped)

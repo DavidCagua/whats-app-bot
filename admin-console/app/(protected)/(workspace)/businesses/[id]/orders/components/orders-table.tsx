@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Table,
   TableBody,
@@ -25,23 +25,8 @@ import {
   allowedNext,
   isValidStatus,
 } from "@/lib/order-status"
-
-type OrderItem = {
-  id: string
-  quantity: number
-  productName: string
-  notes: string | null
-}
-
-type OrderRow = {
-  id: string
-  created_at: string | null
-  whatsapp_id: string | null
-  customer_id: number | null
-  total_amount: number
-  status: string
-  items: OrderItem[]
-}
+import { useEventSource } from "@/lib/use-event-source"
+import type { OrderRow } from "@/lib/orders-queries"
 
 const formatAmount = (value: number) =>
   new Intl.NumberFormat("es-CO", {
@@ -71,22 +56,63 @@ const statusVariant = (
 const labelFor = (status: string): string =>
   isValidStatus(status) ? STATUS_LABELS[status] : status
 
-export function OrdersTable({ initialOrders }: { initialOrders: OrderRow[] }) {
+export function OrdersTable({
+  businessId,
+  initialOrders,
+}: {
+  businessId: string
+  initialOrders: OrderRow[]
+}) {
   const [orders, setOrders] = useState<OrderRow[]>(initialOrders)
   const [updating, setUpdating] = useState<string | null>(null)
 
+  // Track in-flight admin status updates so an SSE snapshot landing
+  // mid-PATCH doesn't snap the badge back to the server's stale value.
+  const pendingStatusRef = useRef<Map<string, OrderStatus>>(new Map())
+
+  const streamUrl = useMemo(
+    () => `/api/orders/stream?businessId=${encodeURIComponent(businessId)}`,
+    [businessId]
+  )
+
+  const onSnapshot = useCallback((next: OrderRow[]) => {
+    const pending = pendingStatusRef.current
+    if (pending.size === 0) {
+      setOrders(next)
+      return
+    }
+    setOrders(
+      next.map((row) => {
+        const optimisticStatus = pending.get(row.id)
+        return optimisticStatus ? { ...row, status: optimisticStatus } : row
+      })
+    )
+  }, [])
+
+  useEventSource<OrderRow[]>(streamUrl, "snapshot", onSnapshot)
+
+  // Reseed local state if the server-rendered initialOrders ever changes
+  // (e.g. soft-nav back to the page) without an explicit SSE event.
+  useEffect(() => {
+    setOrders(initialOrders)
+  }, [initialOrders])
+
   async function handleStatusChange(orderId: string, status: OrderStatus) {
     setUpdating(orderId)
+    pendingStatusRef.current.set(orderId, status)
+    setOrders((prev) =>
+      prev.map((o) => (o.id === orderId ? { ...o, status } : o))
+    )
     try {
       const result = await updateOrderStatus(orderId, status)
       if (!result.success) throw new Error(result.error)
-      setOrders((prev) =>
-        prev.map((o) => (o.id === orderId ? { ...o, status } : o))
-      )
       toast.success("Estado actualizado")
     } catch (err) {
+      // Roll back: drop the pending marker and let the next snapshot win.
+      pendingStatusRef.current.delete(orderId)
       toast.error(err instanceof Error ? err.message : "No se pudo actualizar")
     } finally {
+      pendingStatusRef.current.delete(orderId)
       setUpdating(null)
     }
   }

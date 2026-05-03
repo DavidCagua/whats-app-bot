@@ -138,7 +138,11 @@ export async function GET(request: NextRequest) {
       }
 
       const unsubscribe = inboxBus.subscribe(
-        { businessId, whatsappId: whatsappId ?? undefined },
+        {
+          businessId,
+          whatsappId: whatsappId ?? undefined,
+          eventTypes: ["message", "attachment", "agent"],
+        },
         handleEvent
       )
 
