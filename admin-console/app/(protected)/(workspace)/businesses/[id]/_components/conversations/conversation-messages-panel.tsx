@@ -233,13 +233,25 @@ export function ConversationMessagesPanel({
   //   1. Initial paint of a new thread → jump to bottom.
   //   2. Just prepended an older page → keep visible content stable.
   //   3. Otherwise → smooth scroll to bottom only when user was at bottom.
+  //
+  // Depends on the localMessages reference (not its length) so that switching
+  // between two threads with the same message count still runs the force-bottom
+  // branch — length-only deps were the bug that made selection feel "stuck at
+  // the oldest message" on every click.
   useEffect(() => {
+    const viewport = getViewport()
+    if (!viewport) return
+
     if (forceScrollToBottomRef.current) {
       forceScrollToBottomRef.current = false
       isAtBottomRef.current = true
+      // Two rAFs: first lets the new tree commit, second runs after Radix
+      // ScrollArea has measured its viewport. Setting scrollTop directly
+      // is reliable on the radix viewport; scrollIntoView often isn't.
       requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({
-          behavior: "instant" as ScrollBehavior,
+        viewport.scrollTop = viewport.scrollHeight
+        requestAnimationFrame(() => {
+          viewport.scrollTop = viewport.scrollHeight
         })
       })
       return
@@ -247,18 +259,17 @@ export function ConversationMessagesPanel({
     if (scrollAdjustmentRef.current) {
       const { prevHeight, prevTop } = scrollAdjustmentRef.current
       scrollAdjustmentRef.current = null
-      const viewport = getViewport()
-      if (viewport) {
-        requestAnimationFrame(() => {
-          const delta = viewport.scrollHeight - prevHeight
-          viewport.scrollTop = prevTop + delta
-        })
-      }
+      requestAnimationFrame(() => {
+        const delta = viewport.scrollHeight - prevHeight
+        viewport.scrollTop = prevTop + delta
+      })
       return
     }
     if (!isAtBottomRef.current) return
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [localMessages.length, getViewport])
+    requestAnimationFrame(() => {
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" })
+    })
+  }, [localMessages, getViewport])
 
   const onToggleAgent = async (next: boolean) => {
     const previous = agentEnabled
