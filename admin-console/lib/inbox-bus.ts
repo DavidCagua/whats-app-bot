@@ -140,6 +140,7 @@ class InboxBus {
 
     await client.connect()
     await client.query(`LISTEN ${CHANNEL}`)
+    console.log(`[inbox-bus] LISTEN ${CHANNEL} active`)
     this.client = client
   }
 

@@ -1,14 +1,15 @@
 "use client"
 
-import { useState, useTransition } from "react"
+import { useEffect, useState, useTransition } from "react"
+
+const LAST_SEEN_PREFIX = "inbox:lastSeen:"
 
 function loadLastSeen(): Record<string, number> {
-  if (typeof window === "undefined") return {}
   const result: Record<string, number> = {}
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
-    if (key?.startsWith("inbox:lastSeen:")) {
-      result[key.replace("inbox:lastSeen:", "")] = Number(localStorage.getItem(key))
+    if (key?.startsWith(LAST_SEEN_PREFIX)) {
+      result[key.slice(LAST_SEEN_PREFIX.length)] = Number(localStorage.getItem(key))
     }
   }
   return result
@@ -63,7 +64,20 @@ export function ConversationsSidebar({
   const searchParams = useSearchParams()
   const [isPending, startTransition] = useTransition()
   const [showFilters, setShowFilters] = useState(false)
-  const [lastSeen, setLastSeen] = useState<Record<string, number>>(loadLastSeen)
+  // SSR can't read localStorage; populate after mount and listen for cross-tab updates.
+  const [lastSeen, setLastSeen] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    setLastSeen(loadLastSeen())
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key) return
+      if (!e.key.startsWith(LAST_SEEN_PREFIX)) return
+      const id = e.key.slice(LAST_SEEN_PREFIX.length)
+      setLastSeen((prev) => ({ ...prev, [id]: Number(e.newValue) }))
+    }
+    window.addEventListener("storage", onStorage)
+    return () => window.removeEventListener("storage", onStorage)
+  }, [])
 
   const [search, setSearch] = useState(initialFilters.search || "")
   const [business, setBusiness] = useState(initialFilters.business || "all")

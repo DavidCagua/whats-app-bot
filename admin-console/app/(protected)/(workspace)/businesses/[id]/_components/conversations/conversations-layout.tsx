@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useSearchParams } from "next/navigation"
 import { ConversationGroup, ConversationThread } from "@/lib/conversations-queries"
 import { ConversationsSidebar } from "./conversations-sidebar"
@@ -10,8 +10,8 @@ import { Card } from "@/components/ui/card"
 import { MessageSquare } from "lucide-react"
 import { cn } from "@/lib/utils"
 
-const THREAD_POLL_MS = 2500
-const LIST_POLL_MS = 7000
+const RECONNECT_BASE_MS = 1_000
+const RECONNECT_CAP_MS = 30_000
 
 type ConversationsLayoutProps = {
   conversations: ConversationGroup[]
@@ -21,7 +21,7 @@ type ConversationsLayoutProps = {
   whatsappNumbers: Array<{ id: string; phone_number: string; business_id: string }>
   canFilterByBusiness: boolean
   showBusinessColumn: boolean
-  /** When set, list polling always scopes API calls to this business. */
+  /** When set, the SSE list stream is always scoped to this business. */
   scopedBusinessId?: string
   inboxBasePath: string
   initialFilters: {
@@ -30,6 +30,82 @@ type ConversationsLayoutProps = {
     dateFrom?: string
     dateTo?: string
   }
+}
+
+/**
+ * Subscribes to a server-sent events endpoint with exponential-backoff
+ * reconnect and visibility-aware pause/resume. Pass null to disable.
+ */
+function useEventSource<T>(
+  url: string | null,
+  eventName: string,
+  onMessage: (payload: T) => void
+) {
+  const handlerRef = useRef(onMessage)
+  useEffect(() => {
+    handlerRef.current = onMessage
+  })
+
+  useEffect(() => {
+    if (!url || typeof window === "undefined") return
+    let stopped = false
+    let attempt = 0
+    let es: EventSource | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+    }
+
+    const open = () => {
+      if (stopped) return
+      es = new EventSource(url)
+      es.addEventListener(eventName, (e) => {
+        attempt = 0
+        try {
+          handlerRef.current(JSON.parse((e as MessageEvent).data) as T)
+        } catch (err) {
+          console.error("[sse] invalid payload", err)
+        }
+      })
+      es.onerror = () => {
+        es?.close()
+        es = null
+        if (stopped) return
+        const delay = Math.min(
+          RECONNECT_BASE_MS * 2 ** attempt,
+          RECONNECT_CAP_MS
+        )
+        attempt += 1
+        clearReconnectTimer()
+        reconnectTimer = setTimeout(open, delay)
+      }
+    }
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        es?.close()
+        es = null
+        clearReconnectTimer()
+      } else if (!es && !reconnectTimer) {
+        attempt = 0
+        open()
+      }
+    }
+
+    open()
+    document.addEventListener("visibilitychange", onVisibilityChange)
+
+    return () => {
+      stopped = true
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+      clearReconnectTimer()
+      es?.close()
+    }
+  }, [url, eventName])
 }
 
 export function ConversationsLayout({
@@ -53,96 +129,55 @@ export function ConversationsLayout({
     return searchParams.get("conversation")
   })
   const [threadLoading, setThreadLoading] = useState(false)
-  // On mobile: "list" | "chat"
   const [mobileView, setMobileView] = useState<"list" | "chat">(
     initialThread ? "chat" : "list"
   )
 
-  // AbortController + request token guard so a stale fetchThread can't clobber the active selection.
-  const threadAbortRef = useRef<AbortController | null>(null)
-  const activeRequestIdRef = useRef<string | null>(null)
   const selectedIdRef = useRef(selectedConversationId)
-  selectedIdRef.current = selectedConversationId
+  useEffect(() => {
+    selectedIdRef.current = selectedConversationId
+  }, [selectedConversationId])
 
-  // Sync list from server when initial data changes (e.g. filter applied via router.push)
+  // Sync list when filter changes cause an RSC re-run.
   useEffect(() => {
     setConversations(initialConversations)
   }, [initialConversations])
 
-  const fetchThread = useCallback(async (conversationId: string) => {
-    const [whatsappId, businessId] = conversationId.split(":")
-    if (!whatsappId || !businessId) return
+  const listBusinessId = scopedBusinessId ?? searchParams.get("business") ?? null
+  const search = searchParams.get("search")
+  const dateFrom = searchParams.get("dateFrom")
+  const dateTo = searchParams.get("dateTo")
 
-    threadAbortRef.current?.abort()
-    const controller = new AbortController()
-    threadAbortRef.current = controller
-    activeRequestIdRef.current = conversationId
+  const listStreamUrl = useMemo(() => {
+    if (!listBusinessId) return null
+    const qs = new URLSearchParams({ businessId: listBusinessId })
+    if (search) qs.set("search", search)
+    if (dateFrom) qs.set("dateFrom", dateFrom)
+    if (dateTo) qs.set("dateTo", dateTo)
+    return `/api/conversations/stream?${qs.toString()}`
+  }, [listBusinessId, search, dateFrom, dateTo])
 
-    try {
-      const res = await fetch(
-        `/api/conversations/thread?whatsappId=${encodeURIComponent(whatsappId)}&businessId=${encodeURIComponent(businessId)}`,
-        { signal: controller.signal }
-      )
-      if (!res.ok) return
-      const data = (await res.json()) as ConversationThread | null
-      // Bail if the user moved on to a different conversation while this was in flight.
-      if (selectedIdRef.current !== conversationId) return
-      setThread(data)
-    } catch (err) {
-      if ((err as { name?: string })?.name === "AbortError") return
-      // keep previous thread on transient errors
-    } finally {
-      if (activeRequestIdRef.current === conversationId) {
-        setThreadLoading(false)
-        activeRequestIdRef.current = null
-      }
-    }
+  const threadStreamUrl = useMemo(() => {
+    if (!selectedConversationId) return null
+    const [whatsappId, businessId] = selectedConversationId.split(":")
+    if (!whatsappId || !businessId) return null
+    return `/api/conversations/stream?businessId=${encodeURIComponent(businessId)}&whatsappId=${encodeURIComponent(whatsappId)}`
+  }, [selectedConversationId])
+
+  const onListSnapshot = useCallback((data: ConversationGroup[]) => {
+    setConversations(data)
   }, [])
 
-  const fetchList = useCallback(async () => {
-    const params = new URLSearchParams()
-    const business = scopedBusinessId ?? searchParams.get("business")
-    const search = searchParams.get("search")
-    const dateFrom = searchParams.get("dateFrom")
-    const dateTo = searchParams.get("dateTo")
-    if (business) params.set("business", business)
-    if (search) params.set("search", search)
-    if (dateFrom) params.set("dateFrom", dateFrom)
-    if (dateTo) params.set("dateTo", dateTo)
-    params.set("limit", "50")
-    params.set("offset", "0")
-    try {
-      const res = await fetch(`/api/conversations?${params.toString()}`)
-      if (res.ok) {
-        const data = await res.json()
-        setConversations(data)
-      }
-    } catch {
-      // keep previous list on error
-    }
-  }, [searchParams, scopedBusinessId])
-
-  // Thread polling: refresh the currently-selected thread every 2.5s.
-  useEffect(() => {
-    if (!selectedConversationId) return
-    const interval = setInterval(() => {
-      // Don't poll while an explicit selection is still loading.
-      if (activeRequestIdRef.current) return
-      void fetchThread(selectedConversationId)
-    }, THREAD_POLL_MS)
-    return () => clearInterval(interval)
-  }, [selectedConversationId, fetchThread])
-
-  // List polling: every 7s
-  useEffect(() => {
-    const interval = setInterval(fetchList, LIST_POLL_MS)
-    return () => clearInterval(interval)
-  }, [fetchList])
-
-  // Cleanup any in-flight thread request on unmount.
-  useEffect(() => {
-    return () => threadAbortRef.current?.abort()
+  const onThreadSnapshot = useCallback((data: ConversationThread | null) => {
+    if (!data) return
+    const id = `${data.whatsapp_id}:${data.business_id}`
+    if (selectedIdRef.current !== id) return
+    setThread(data)
+    setThreadLoading(false)
   }, [])
+
+  useEventSource<ConversationGroup[]>(listStreamUrl, "snapshot", onListSnapshot)
+  useEventSource<ConversationThread | null>(threadStreamUrl, "snapshot", onThreadSnapshot)
 
   const handleSelectConversation = useCallback(
     (conversationId: string) => {
@@ -152,12 +187,10 @@ export function ConversationsLayout({
       }
       setSelectedConversationId(conversationId)
       setMobileView("chat")
-      // Show skeleton on the right pane immediately; clear the previous thread so we don't flash old content.
       setThread(null)
       setThreadLoading(true)
-      void fetchThread(conversationId)
     },
-    [selectedConversationId, fetchThread]
+    [selectedConversationId]
   )
 
   const handleBack = () => {

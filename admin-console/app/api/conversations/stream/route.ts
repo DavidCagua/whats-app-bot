@@ -25,8 +25,14 @@ export async function GET(request: NextRequest) {
     return new Response("Unauthorized", { status: 401 })
   }
 
-  const businessId = request.nextUrl.searchParams.get("businessId")
-  const whatsappId = request.nextUrl.searchParams.get("whatsappId")
+  const params = request.nextUrl.searchParams
+  const businessId = params.get("businessId")
+  const whatsappId = params.get("whatsappId")
+  const searchQuery = params.get("search") || undefined
+  const dateFromParam = params.get("dateFrom")
+  const dateToParam = params.get("dateTo")
+  const dateFrom = dateFromParam ? new Date(dateFromParam) : undefined
+  const dateTo = dateToParam ? new Date(dateToParam) : undefined
 
   if (!businessId) {
     return new Response("businessId is required", { status: 400 })
@@ -94,6 +100,9 @@ export async function GET(request: NextRequest) {
             const conversations = await getConversations({
               businessIds: access.businessIds,
               businessFilter: businessId,
+              searchQuery,
+              dateFrom,
+              dateTo,
               limit: 50,
               offset: 0,
             })
