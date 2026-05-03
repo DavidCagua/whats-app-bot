@@ -17,6 +17,7 @@ import logging
 from typing import List, Optional, Tuple
 
 from ..database.business_agent_service import business_agent_service
+from ..database.conversation_service import conversation_service
 from .dispatcher import dispatch
 from .router import (
     route as router_route,
@@ -183,6 +184,20 @@ class ConversationManager:
         )
         if router_result.direct_reply is not None:
             logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")
+            # Agent paths persist their own assistant turns inline; the fast-path
+            # bypasses dispatch entirely, so persist here. Without this, greetings
+            # show no bot turn in the inbox UI and never fire the inbox_event NOTIFY.
+            try:
+                whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
+                conversation_service.store_conversation_message(
+                    wa_id=wa_id,
+                    message=router_result.direct_reply,
+                    role="assistant",
+                    business_id=business_id,
+                    whatsapp_number_id=whatsapp_number_id,
+                )
+            except Exception as e:
+                logging.error(f"[CONVERSATION_MANAGER] Failed to persist fast-path assistant turn: {e}")
             return router_result.direct_reply
 
         # 2. Pick primary + build dispatch segments from router output.
