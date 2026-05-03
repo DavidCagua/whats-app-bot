@@ -11,6 +11,12 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 type ConversationMessagesPanelProps = {
   thread: ConversationThread
@@ -21,17 +27,34 @@ type ThreadMessage = ConversationThread["messages"][number]
 
 const OPTIMISTIC_MATCH_WINDOW_MS = 60_000
 const VOICE_PLACEHOLDER = "[audio]"
+const OLDER_PAGE_LIMIT = 50
+const SCROLL_TOP_TRIGGER_PX = 150
+const SCROLL_BOTTOM_PINNED_PX = 80
+const COMPOSER_LOCK_TOOLTIP =
+  "El bot está atendiendo. Apaga el switch para responder tú."
 
 /**
- * Merge a polled server message list with the local list while preserving
- * optimistic entries (id < 0) that the server has not yet confirmed.
+ * Merge a server snapshot with the local list. Preserves:
+ *   - older paginated messages already loaded (id < min server id, id > 0)
+ *   - optimistic outbound messages not yet confirmed by the server (id < 0)
+ *
+ * The server snapshot only ever covers the latest window, so any local
+ * message older than the server window is a paginated prefix that must
+ * survive the merge.
  */
 function mergeMessages(
   local: ThreadMessage[],
   server: ThreadMessage[]
 ): ThreadMessage[] {
+  if (server.length === 0) return local
+
+  const minServerId = server.reduce(
+    (min, m) => (m.id < min ? m.id : min),
+    server[0].id
+  )
+
+  const olderPrefix = local.filter((m) => m.id > 0 && m.id < minServerId)
   const optimistic = local.filter((m) => m.id < 0)
-  if (optimistic.length === 0) return server
 
   const stillPending = optimistic.filter((opt) => {
     const optTs = new Date(opt.timestamp).getTime()
@@ -39,9 +62,7 @@ function mergeMessages(
       if (srv.role !== opt.role) return false
       const srvTs = new Date(srv.timestamp).getTime()
       if (Math.abs(srvTs - optTs) > OPTIMISTIC_MATCH_WINDOW_MS) return false
-      // Text: match on identical content.
       if (opt.message !== VOICE_PLACEHOLDER && srv.message === opt.message) return true
-      // Voice note: match on attachment presence in the same time window.
       if (
         opt.message === VOICE_PLACEHOLDER &&
         srv.role === "assistant" &&
@@ -54,8 +75,8 @@ function mergeMessages(
     })
   })
 
-  if (stillPending.length === 0) return server
-  return [...server, ...stillPending].sort(
+  if (olderPrefix.length === 0 && stillPending.length === 0) return server
+  return [...olderPrefix, ...server, ...stillPending].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   )
 }
@@ -73,6 +94,8 @@ export function ConversationMessagesPanel({
   const [sendError, setSendError] = useState<string | null>(null)
   const [agentEnabled, setAgentEnabled] = useState(thread.agent_enabled)
   const [isTogglingAgent, setIsTogglingAgent] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [olderError, setOlderError] = useState<string | null>(null)
 
   const [localMessages, setLocalMessages] = useState(thread.messages)
   const [isRecording, setIsRecording] = useState(false)
@@ -81,55 +104,161 @@ export function ConversationMessagesPanel({
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const draftRef = useRef(draft)
-  draftRef.current = draft
+  useEffect(() => {
+    draftRef.current = draft
+  }, [draft])
+
   const prevThreadIdRef = useRef<string | null>(null)
   const isTogglingAgentRef = useRef(isTogglingAgent)
-  isTogglingAgentRef.current = isTogglingAgent
+  useEffect(() => {
+    isTogglingAgentRef.current = isTogglingAgent
+  }, [isTogglingAgent])
 
-  // Reset on thread switch; merge in place on same-thread polled updates so
-  // optimistic messages and in-flight UI state aren't clobbered every poll.
+  // Scroll behaviour bookkeeping.
+  const forceScrollToBottomRef = useRef(false)
+  const scrollAdjustmentRef = useRef<{ prevHeight: number; prevTop: number } | null>(null)
+  const loadingOlderRef = useRef(false)
+  useEffect(() => {
+    loadingOlderRef.current = loadingOlder
+  }, [loadingOlder])
+
+  const totalMessages = thread.total_messages
+  const hasMoreOlder = useMemo(
+    () => localMessages.filter((m) => m.id > 0).length < totalMessages,
+    [localMessages, totalMessages]
+  )
+  const hasMoreOlderRef = useRef(hasMoreOlder)
+  useEffect(() => {
+    hasMoreOlderRef.current = hasMoreOlder
+  }, [hasMoreOlder])
+
+  const composerLocked = agentEnabled
+  const composerDisabled = composerLocked || isSending || isRecording
+  const sendDisabled = composerLocked || !draft.trim() || isSending || isRecording
+
+  const getViewport = useCallback((): HTMLDivElement | null => {
+    const root = scrollAreaRef.current
+    if (!root) return null
+    return root.querySelector<HTMLDivElement>("[data-radix-scroll-area-viewport]")
+  }, [])
+
+  const fetchOlder = useCallback(async () => {
+    if (loadingOlderRef.current || !hasMoreOlderRef.current) return
+    const oldestId = localMessages.reduce<number | null>((min, m) => {
+      if (m.id <= 0) return min
+      if (min == null || m.id < min) return m.id
+      return min
+    }, null)
+    if (oldestId == null) return
+
+    const viewport = getViewport()
+    if (viewport) {
+      scrollAdjustmentRef.current = {
+        prevHeight: viewport.scrollHeight,
+        prevTop: viewport.scrollTop,
+      }
+    }
+
+    setLoadingOlder(true)
+    setOlderError(null)
+    try {
+      const url = `/api/conversations/thread?whatsappId=${encodeURIComponent(
+        thread.whatsapp_id
+      )}&businessId=${encodeURIComponent(
+        thread.business_id
+      )}&before=${oldestId}&limit=${OLDER_PAGE_LIMIT}`
+      const res = await fetch(url)
+      if (!res.ok) throw new Error("Failed to load older messages")
+      const data = (await res.json()) as ConversationThread | null
+      const olderPage = data?.messages ?? []
+      if (olderPage.length === 0) {
+        scrollAdjustmentRef.current = null
+        return
+      }
+      setLocalMessages((prev) => {
+        const knownIds = new Set(prev.map((m) => m.id))
+        const fresh = olderPage.filter((m) => !knownIds.has(m.id))
+        if (fresh.length === 0) return prev
+        return [...fresh, ...prev]
+      })
+    } catch (e) {
+      scrollAdjustmentRef.current = null
+      setOlderError(e instanceof Error ? e.message : "Failed to load older messages")
+    } finally {
+      setLoadingOlder(false)
+    }
+  }, [thread.whatsapp_id, thread.business_id, localMessages, getViewport])
+
+  // Reset on thread switch; merge in place on same-thread snapshot updates.
   useEffect(() => {
     const threadId = `${thread.whatsapp_id}:${thread.business_id}`
     if (prevThreadIdRef.current !== threadId) {
       setLocalMessages(thread.messages)
       setAgentEnabled(thread.agent_enabled)
       prevThreadIdRef.current = threadId
+      forceScrollToBottomRef.current = true
+      isAtBottomRef.current = true
       return
     }
     setLocalMessages((prev) => mergeMessages(prev, thread.messages))
-    // Only accept the server-side agent flag when the user isn't mid-toggle.
     if (!isTogglingAgentRef.current) {
       setAgentEnabled(thread.agent_enabled)
     }
   }, [thread.whatsapp_id, thread.business_id, thread.messages, thread.agent_enabled])
 
-  // Track whether the user is pinned to the bottom; only auto-scroll then so a
-  // user reading history doesn't get yanked when a poll/SSE update arrives.
+  // Track at-bottom state and trigger lazy load when scrolling near top.
   useEffect(() => {
-    const root = scrollAreaRef.current
-    if (!root) return
-    const viewport = root.querySelector<HTMLDivElement>("[data-radix-scroll-area-viewport]")
+    const viewport = getViewport()
     if (!viewport) return
 
     const update = () => {
       const distanceFromBottom =
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      isAtBottomRef.current = distanceFromBottom < 80
+      isAtBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_PINNED_PX
+
+      if (
+        viewport.scrollTop < SCROLL_TOP_TRIGGER_PX &&
+        hasMoreOlderRef.current &&
+        !loadingOlderRef.current
+      ) {
+        void fetchOlder()
+      }
     }
     update()
     viewport.addEventListener("scroll", update, { passive: true })
     return () => viewport.removeEventListener("scroll", update)
-  }, [])
+  }, [getViewport, fetchOlder])
 
+  // Apply scroll-position adjustments after layout has settled. Priority:
+  //   1. Initial paint of a new thread → jump to bottom.
+  //   2. Just prepended an older page → keep visible content stable.
+  //   3. Otherwise → smooth scroll to bottom only when user was at bottom.
   useEffect(() => {
+    if (forceScrollToBottomRef.current) {
+      forceScrollToBottomRef.current = false
+      isAtBottomRef.current = true
+      requestAnimationFrame(() => {
+        messagesEndRef.current?.scrollIntoView({
+          behavior: "instant" as ScrollBehavior,
+        })
+      })
+      return
+    }
+    if (scrollAdjustmentRef.current) {
+      const { prevHeight, prevTop } = scrollAdjustmentRef.current
+      scrollAdjustmentRef.current = null
+      const viewport = getViewport()
+      if (viewport) {
+        requestAnimationFrame(() => {
+          const delta = viewport.scrollHeight - prevHeight
+          viewport.scrollTop = prevTop + delta
+        })
+      }
+      return
+    }
     if (!isAtBottomRef.current) return
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [localMessages.length])
-
-  const canSend = useMemo(
-    () => Boolean(draft.trim()) && !isSending && !isRecording,
-    [draft, isSending, isRecording]
-  )
+  }, [localMessages.length, getViewport])
 
   const onToggleAgent = async (next: boolean) => {
     const previous = agentEnabled
@@ -175,7 +304,7 @@ export function ConversationMessagesPanel({
       setSendError(null)
       setRecordError(null)
       setIsSending(true)
-      const displayMessage = caption.trim() || "[audio]"
+      const displayMessage = caption.trim() || VOICE_PLACEHOLDER
       const optimistic = {
         id: -Date.now(),
         whatsapp_id: thread.whatsapp_id,
@@ -221,7 +350,7 @@ export function ConversationMessagesPanel({
 
   const onSend = async () => {
     const text = draft.trim()
-    if (!text || isSending) return
+    if (!text || isSending || composerLocked) return
 
     setIsSending(true)
     setSendError(null)
@@ -293,9 +422,10 @@ export function ConversationMessagesPanel({
   }, [])
 
   const onRecordClick = useCallback(() => {
+    if (composerLocked) return
     if (isRecording) stopRecording()
     else startRecording()
-  }, [isRecording, startRecording, stopRecording])
+  }, [isRecording, startRecording, stopRecording, composerLocked])
 
   useEffect(() => {
     return () => {
@@ -339,17 +469,31 @@ export function ConversationMessagesPanel({
                 <Building2 className="h-3 w-3 flex-shrink-0" />
                 <span className="truncate max-w-[100px]">{thread.business_name}</span>
               </div>
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Bot className="h-3 w-3 flex-shrink-0" />
-                <span>Agent</span>
+              <div className="flex items-center gap-1.5">
+                <Badge
+                  variant={agentEnabled ? "default" : "secondary"}
+                  className="text-xs px-2 py-0 gap-1"
+                >
+                  {agentEnabled ? (
+                    <Bot className="h-3 w-3" />
+                  ) : (
+                    <User className="h-3 w-3" />
+                  )}
+                  {agentEnabled ? "Bot atiende" : "Tú respondes"}
+                </Badge>
                 <Switch
                   checked={agentEnabled}
                   disabled={isTogglingAgent}
                   onCheckedChange={(checked) => void onToggleAgent(checked)}
                   className="scale-75 origin-left"
+                  aria-label={
+                    agentEnabled
+                      ? "Apagar el bot para responder tú"
+                      : "Activar el bot para que atienda"
+                  }
                 />
               </div>
-              <Badge variant="secondary" className="text-xs px-1.5 py-0">
+              <Badge variant="outline" className="text-xs px-1.5 py-0">
                 {thread.total_messages} msgs
               </Badge>
             </div>
@@ -360,6 +504,16 @@ export function ConversationMessagesPanel({
       {/* Messages */}
       <ScrollArea ref={scrollAreaRef} className="flex-1">
         <CardContent className="p-3 sm:p-4">
+          {loadingOlder && (
+            <div className="text-center text-xs text-muted-foreground py-2">
+              Cargando mensajes anteriores…
+            </div>
+          )}
+          {olderError && (
+            <div className="text-center text-xs text-destructive py-2">
+              {olderError}
+            </div>
+          )}
           {localMessages.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <p>No messages in this conversation</p>
@@ -443,9 +597,6 @@ export function ConversationMessagesPanel({
                               )
                             ) : att.url ? (
                               att.type === "image" ? (
-                                // Chat attachments have unknown intrinsic dimensions and come from
-                                // arbitrary CDNs; staying with <img> + lazy/async loading is simpler
-                                // than maintaining an images.remotePatterns allowlist for next/image.
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                   src={att.url}
@@ -485,64 +636,105 @@ export function ConversationMessagesPanel({
       </ScrollArea>
 
       {/* Composer */}
-      <div className="border-t p-3 flex-shrink-0 space-y-2">
-        {sendError && <p className="text-xs text-destructive">{sendError}</p>}
-        {recordError && <p className="text-xs text-destructive">{recordError}</p>}
-        {isRecording && (
-          <div className="text-xs text-muted-foreground flex items-center gap-2">
-            <span className="inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-            Recording… tap again to stop and send.
-          </div>
-        )}
+      <TooltipProvider delayDuration={150}>
+        <div className="border-t p-3 flex-shrink-0 space-y-2">
+          {sendError && <p className="text-xs text-destructive">{sendError}</p>}
+          {recordError && <p className="text-xs text-destructive">{recordError}</p>}
+          {isRecording && (
+            <div className="text-xs text-muted-foreground flex items-center gap-2">
+              <span className="inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+              Recording… tap again to stop and send.
+            </div>
+          )}
 
-        <div className="flex gap-2 items-end">
-          {/* Voice note button */}
-          <Button
-            type="button"
-            variant={isRecording ? "destructive" : "outline"}
-            size="icon"
-            className="flex-shrink-0 h-9 w-9"
-            onClick={onRecordClick}
-            disabled={isSending}
-            title={isRecording ? "Stop and send" : "Record voice note"}
-          >
-            {isRecording ? (
-              <Square className="h-4 w-4 fill-current" />
+          <div className="flex gap-2 items-end">
+            {/* Voice note button */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                {/* Wrapper span keeps Radix tooltip pointer-events alive even when the button is disabled. */}
+                <span className="flex-shrink-0">
+                  <Button
+                    type="button"
+                    variant={isRecording ? "destructive" : "outline"}
+                    size="icon"
+                    className="h-9 w-9"
+                    onClick={onRecordClick}
+                    disabled={composerLocked || isSending}
+                    aria-label={
+                      isRecording ? "Detener y enviar" : "Grabar nota de voz"
+                    }
+                  >
+                    {isRecording ? (
+                      <Square className="h-4 w-4 fill-current" />
+                    ) : (
+                      <Mic className="h-4 w-4" />
+                    )}
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {composerLocked && (
+                <TooltipContent>{COMPOSER_LOCK_TOOLTIP}</TooltipContent>
+              )}
+            </Tooltip>
+
+            {/* Textarea — wraps in a tooltip trigger only when locked, so normal typing is unaffected. */}
+            {composerLocked ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="flex-1">
+                    <Textarea
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      placeholder="Bot activo — apaga el switch para escribir"
+                      rows={1}
+                      className="resize-none min-h-[36px] max-h-[120px] py-2 w-full text-sm cursor-not-allowed"
+                      style={{ fieldSizing: "content" } as React.CSSProperties}
+                      disabled
+                      aria-label="Composer locked while bot is handling the conversation"
+                    />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{COMPOSER_LOCK_TOOLTIP}</TooltipContent>
+              </Tooltip>
             ) : (
-              <Mic className="h-4 w-4" />
+              <Textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="Type a message..."
+                rows={1}
+                className="resize-none min-h-[36px] max-h-[120px] py-2 flex-1 text-sm"
+                style={{ fieldSizing: "content" } as React.CSSProperties}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    void onSend()
+                  }
+                }}
+                disabled={composerDisabled}
+              />
             )}
-          </Button>
 
-          {/* Textarea — grows up to 4 lines */}
-          <Textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Type a message..."
-            rows={1}
-            className="resize-none min-h-[36px] max-h-[120px] py-2 flex-1 text-sm"
-            style={{ fieldSizing: "content" } as React.CSSProperties}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault()
-                void onSend()
-              }
-            }}
-            disabled={isSending || isRecording}
-          />
-
-          {/* Send button */}
-          <Button
-            onClick={() => void onSend()}
-            disabled={!canSend}
-            className="flex-shrink-0 h-9 px-3 sm:px-4"
-          >
-            <span className="hidden sm:inline">{isSending ? "Sending..." : "Send"}</span>
-            <span className="sm:hidden">
-              {isSending ? "…" : "↑"}
-            </span>
-          </Button>
+            {/* Send button */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="flex-shrink-0">
+                  <Button
+                    onClick={() => void onSend()}
+                    disabled={sendDisabled}
+                    className="h-9 px-3 sm:px-4"
+                  >
+                    <span className="hidden sm:inline">{isSending ? "Sending..." : "Send"}</span>
+                    <span className="sm:hidden">{isSending ? "…" : "↑"}</span>
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {composerLocked && (
+                <TooltipContent>{COMPOSER_LOCK_TOOLTIP}</TooltipContent>
+              )}
+            </Tooltip>
+          </div>
         </div>
-      </div>
+      </TooltipProvider>
     </Card>
   )
 }
