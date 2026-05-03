@@ -46,6 +46,9 @@ type ConversationsSidebarProps = {
     dateFrom?: string
     dateTo?: string
   }
+  /** Shared time tick from layout so every list item's relative timestamp
+   * updates on the same minute boundary. */
+  now: number
   onSelectConversation: (conversationId: string) => void
 }
 
@@ -58,6 +61,7 @@ export function ConversationsSidebar({
   showBusinessColumn,
   inboxBasePath,
   initialFilters,
+  now,
   onSelectConversation,
 }: ConversationsSidebarProps) {
   const router = useRouter()
@@ -260,6 +264,7 @@ export function ConversationsSidebar({
                   isSelected={conversationId === selectedConversationId}
                   isUnread={isUnread && conversationId !== selectedConversationId}
                   showBusiness={showBusinessColumn}
+                  now={now}
                   onClick={() =>
                     handleConversationClick(
                       conversation.whatsapp_id,

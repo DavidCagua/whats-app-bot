@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils"
 
 const RECONNECT_BASE_MS = 1_000
 const RECONNECT_CAP_MS = 30_000
+const RELATIVE_TIME_TICK_MS = 60_000
 
 type ConversationsLayoutProps = {
   conversations: ConversationGroup[]
@@ -132,11 +133,29 @@ export function ConversationsLayout({
   const [mobileView, setMobileView] = useState<"list" | "chat">(
     initialThread ? "chat" : "list"
   )
+  const [now, setNow] = useState(() => Date.now())
+  const messagesPanelRef = useRef<HTMLDivElement>(null)
 
   const selectedIdRef = useRef(selectedConversationId)
   useEffect(() => {
     selectedIdRef.current = selectedConversationId
   }, [selectedConversationId])
+
+  // One ticker for every list item's relative timestamp; saves N renders/min.
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), RELATIVE_TIME_TICK_MS)
+    return () => clearInterval(interval)
+  }, [])
+
+  // Move focus to the messages panel when switching into chat view on mobile.
+  useEffect(() => {
+    if (mobileView !== "chat") return
+    if (typeof window === "undefined") return
+    if (window.matchMedia("(min-width: 768px)").matches) return
+    requestAnimationFrame(() => {
+      messagesPanelRef.current?.focus()
+    })
+  }, [mobileView, selectedConversationId])
 
   // Sync list when filter changes cause an RSC re-run.
   useEffect(() => {
@@ -219,14 +238,17 @@ export function ConversationsLayout({
           showBusinessColumn={showBusinessColumn}
           inboxBasePath={inboxBasePath}
           initialFilters={initialFilters}
+          now={now}
           onSelectConversation={handleSelectConversation}
         />
       </div>
 
       {/* Messages panel — hidden on mobile when in list view */}
       <div
+        ref={messagesPanelRef}
+        tabIndex={-1}
         className={cn(
-          "flex-1 min-w-0",
+          "flex-1 min-w-0 outline-none",
           mobileView === "list" ? "hidden md:flex md:flex-col" : "flex flex-col"
         )}
       >

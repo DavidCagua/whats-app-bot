@@ -66,6 +66,8 @@ export function ConversationMessagesPanel({
 }: ConversationMessagesPanelProps) {
   const displayName = thread.customer_name || "Unknown Customer"
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const scrollAreaRef = useRef<HTMLDivElement>(null)
+  const isAtBottomRef = useRef(true)
   const [draft, setDraft] = useState("")
   const [isSending, setIsSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -101,7 +103,26 @@ export function ConversationMessagesPanel({
     }
   }, [thread.whatsapp_id, thread.business_id, thread.messages, thread.agent_enabled])
 
+  // Track whether the user is pinned to the bottom; only auto-scroll then so a
+  // user reading history doesn't get yanked when a poll/SSE update arrives.
   useEffect(() => {
+    const root = scrollAreaRef.current
+    if (!root) return
+    const viewport = root.querySelector<HTMLDivElement>("[data-radix-scroll-area-viewport]")
+    if (!viewport) return
+
+    const update = () => {
+      const distanceFromBottom =
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      isAtBottomRef.current = distanceFromBottom < 80
+    }
+    update()
+    viewport.addEventListener("scroll", update, { passive: true })
+    return () => viewport.removeEventListener("scroll", update)
+  }, [])
+
+  useEffect(() => {
+    if (!isAtBottomRef.current) return
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [localMessages.length])
 
@@ -195,7 +216,7 @@ export function ConversationMessagesPanel({
         setIsSending(false)
       }
     },
-    [thread.whatsapp_id, thread.business_id, sendPayload]
+    [thread, sendPayload]
   )
 
   const onSend = async () => {
@@ -337,7 +358,7 @@ export function ConversationMessagesPanel({
       </CardHeader>
 
       {/* Messages */}
-      <ScrollArea className="flex-1">
+      <ScrollArea ref={scrollAreaRef} className="flex-1">
         <CardContent className="p-3 sm:p-4">
           {localMessages.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
@@ -422,9 +443,15 @@ export function ConversationMessagesPanel({
                               )
                             ) : att.url ? (
                               att.type === "image" ? (
+                                // Chat attachments have unknown intrinsic dimensions and come from
+                                // arbitrary CDNs; staying with <img> + lazy/async loading is simpler
+                                // than maintaining an images.remotePatterns allowlist for next/image.
+                                // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                   src={att.url}
                                   alt="Attachment"
+                                  loading="lazy"
+                                  decoding="async"
                                   className="max-w-full rounded max-h-48 object-contain"
                                 />
                               ) : (

@@ -1,3 +1,4 @@
+import { unstable_cache } from "next/cache"
 import { prisma } from "./prisma"
 import { Prisma } from "@prisma/client"
 
@@ -268,13 +269,17 @@ export async function getConversationThread({
 }
 
 /**
- * Get conversation statistics
+ * Get conversation statistics. Wrapped in unstable_cache so the slow
+ * `groupBy` for unique-customer count doesn't gate the inbox RSC paint
+ * on every navigation; only revalidates once per minute. The header
+ * stats can tolerate a 60s lag without affecting message correctness.
  */
-export async function getConversationStats({
-  businessIds,
-}: {
-  businessIds: string[] | "all"
-}) {
+async function _getConversationStats(
+  businessIdsKey: string
+): Promise<{ totalMessages: number; uniqueCustomers: number; todayMessages: number }> {
+  const businessIds: string[] | "all" =
+    businessIdsKey === "all" ? "all" : (JSON.parse(businessIdsKey) as string[])
+
   const whereClause: Prisma.conversationsWhereInput =
     businessIds !== "all" ? { business_id: { in: businessIds } } : {}
 
@@ -296,9 +301,22 @@ export async function getConversationStats({
     }),
   ])
 
-  return {
-    totalMessages,
-    uniqueCustomers,
-    todayMessages,
-  }
+  return { totalMessages, uniqueCustomers, todayMessages }
+}
+
+const _cachedConversationStats = unstable_cache(
+  _getConversationStats,
+  ["conversation-stats"],
+  { revalidate: 60, tags: ["conversation-stats"] }
+)
+
+export async function getConversationStats({
+  businessIds,
+}: {
+  businessIds: string[] | "all"
+}) {
+  // Stable key: sorted JSON for arrays so [a,b] and [b,a] hit the same entry.
+  const key =
+    businessIds === "all" ? "all" : JSON.stringify([...businessIds].sort())
+  return _cachedConversationStats(key)
 }
