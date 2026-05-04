@@ -1,3 +1,19 @@
+/**
+ * Postgres LISTEN/NOTIFY bus for the admin-console inbox + orders SSE.
+ *
+ * Singleton pg.Client per Vercel instance fans `inbox_event` notifications
+ * out to all in-memory subscribers via an EventEmitter, so N open SSE
+ * panes cost one DB connection.
+ *
+ * IMPORTANT — DATABASE_URL_LISTEN must point to a SESSION-MODE Postgres
+ * URL (Supabase: "Session pooler" connection string, port 5432, or the
+ * direct connection). Supavisor's transaction-mode URL — what Prisma
+ * uses — silently strips `LISTEN`, so notifications never arrive AND
+ * the connection stays held, competing with the bot's connection pool
+ * on the upstream database. If unset, this bus falls back to
+ * DATABASE_URL, which is fine for local dev (direct Postgres) but
+ * wrong for any environment fronted by a transaction-mode pooler.
+ */
 import { EventEmitter } from "node:events"
 import { Client } from "pg"
 
