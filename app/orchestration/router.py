@@ -30,10 +30,11 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from ..services import business_greeting
+from ..services import business_greeting, catalog_cache
 from .turn_context import TurnContext, render_for_prompt
 
 
@@ -336,6 +337,76 @@ def _classify_with_llm(
     return _parse_segments(raw)
 
 
+# ── Deterministic pre-classifier ────────────────────────────────────
+# Catches the "price of named product" case before paying the LLM
+# router. The LLM prompt covers this in theory (see _ROUTER_SYSTEM_PROMPT
+# above) but production has shown it misroutes when the product name
+# is unfamiliar to the model — see logs around 2026-05-03 / Biela /
+# 3177000722, "Cuánto vale el pegoretti?" misrouted to
+# customer_service → cs_chat_fallback.
+#
+# Logic:
+#   1. message contains a price interrogative AND
+#   2. message contains at least one token that the catalog lookup-set
+#      flags as a product/tag/synonym AND
+#   3. that token is not a generic "policy" word (domicilio, propina, …)
+# → force DOMAIN_ORDER, skip the LLM.
+
+_PRICE_INTERROGATIVES: frozenset = frozenset({
+    "cuanto", "cuantos", "cuanta", "cuantas",
+    "cuesta", "cuestan",
+    "vale", "valen",
+    "precio", "precios",
+    "valor", "valores",
+})
+
+
+def _strip_accents_lower(s: str) -> str:
+    nfkd = unicodedata.normalize("NFD", (s or "").lower())
+    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+
+
+def _tokenize_for_router(message: str) -> List[str]:
+    s = _strip_accents_lower(message)
+    s = re.sub(r"[^\w\s]", " ", s)
+    return [t for t in s.split() if t]
+
+
+def _has_price_interrogative(tokens: List[str]) -> bool:
+    return any(t in _PRICE_INTERROGATIVES for t in tokens)
+
+
+def _deterministic_price_of_product(
+    message_body: str,
+    business_context: Optional[dict],
+) -> bool:
+    """
+    Return True iff the message is unambiguously "what does <named
+    product> cost?" — a price interrogative paired with at least one
+    catalog-recognized token.
+    """
+    business_id = str((business_context or {}).get("business_id") or "")
+    if not business_id:
+        return False
+
+    tokens = _tokenize_for_router(message_body)
+    if not tokens or not _has_price_interrogative(tokens):
+        return False
+
+    try:
+        lookup = catalog_cache.get_router_lookup_set(business_id)
+    except Exception as exc:
+        logger.warning("[ROUTER] router_lookup_set failed: %s", exc)
+        return False
+    if not lookup:
+        return False
+
+    for t in tokens:
+        if t in lookup:
+            return True
+    return False
+
+
 # ── Public entry point ──────────────────────────────────────────────
 
 def route(
@@ -362,9 +433,18 @@ def route(
         logger.info("[ROUTER] greeting fast-path hit")
         return RouterResult(direct_reply=greeting)
 
-    # 2. LLM classification
     if not (message_body or "").strip():
         return RouterResult()
+
+    # 2. Deterministic pre-classifier — price-of-product short-circuit.
+    # Skips the LLM when the catalog itself confirms the user named a
+    # product. Independent of conversation state (price questions are
+    # valid in any state).
+    if _deterministic_price_of_product(message_body, business_context):
+        logger.info("[ROUTER] deterministic price-of-product hit → order")
+        return RouterResult(segments=[(DOMAIN_ORDER, message_body)])
+
+    # 3. LLM classification
     segments = _classify_with_llm(message_body, business_context, ctx=ctx)
     if not segments:
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")

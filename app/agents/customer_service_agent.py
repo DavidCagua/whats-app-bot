@@ -619,6 +619,37 @@ class CustomerServiceAgent(BaseAgent):
 
         logging.warning("[CS_AGENT] Planner intent=%s params=%s", intent, params)
 
+        # Safety net: if the planner punted to CUSTOMER_SERVICE_CHAT but
+        # the message is actually a price question about a named catalog
+        # product, hand off to the order agent instead of replying with
+        # "no tengo información". The router's deterministic pre-classifier
+        # should already catch this upstream, but we belt-and-suspenders
+        # at this layer too — production has shown LLM misroutes here when
+        # the product name is unfamiliar (e.g. "Cuánto vale el pegoretti?"
+        # for Biela on 2026-05-03). See app/orchestration/router.py for
+        # the same logic at the routing layer.
+        if intent == INTENT_CUSTOMER_SERVICE_CHAT:
+            try:
+                from ..orchestration.router import _deterministic_price_of_product
+                if _deterministic_price_of_product(message_body, business_context):
+                    logging.warning(
+                        "[CS_AGENT] CHAT fallback overridden: price-of-product "
+                        "detected → handoff to order"
+                    )
+                    tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+                    return {
+                        "agent_type": self.agent_type,
+                        "message": "",
+                        "state_update": {},
+                        "handoff": {
+                            "to": "order",
+                            "segment": message_body,
+                            "context": {"reason": "price_of_product_misroute"},
+                        },
+                    }
+            except Exception as exc:
+                logging.warning("[CS_AGENT] price-of-product safety net failed: %s", exc)
+
         # 2) Executor
         exec_result = execute_customer_service_intent(
             wa_id=wa_id,

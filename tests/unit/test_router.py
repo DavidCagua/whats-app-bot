@@ -288,3 +288,146 @@ class TestRouterPromptHasOrderingOpenerRule:
             "Router prompt must show that the question form 'cuánto vale "
             "el domicilio' goes to customer_service"
         )
+
+
+class TestRouterDeterministicPriceOfProduct:
+    """
+    Regression: production observation 2026-05-03 (Biela / 3177000722) —
+    "Cuánto vale el pegoretti?" was misrouted to customer_service →
+    cs_chat_fallback. The LLM router prompt covers this case in theory,
+    but the LLM ignored the rule when the product name was unfamiliar.
+    The deterministic pre-classifier short-circuits the LLM: catalog match
+    + price interrogative → `order`, no LLM call.
+    """
+
+    @pytest.fixture
+    def biela_lookup_set(self):
+        return frozenset({
+            "pegoretti", "barracuda", "picada", "honey", "burger",
+            "montesa", "queso", "mora", "jugos", "americana",
+        })
+
+    def _route_with_lookup(self, message, lookup_set, mock_llm=None):
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=lookup_set,
+        ):
+            if mock_llm is not None:
+                with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+                    return router.route(message, BIELA_CONTEXT, "David")
+            with patch("app.orchestration.router._get_llm_classifier") as m:
+                result = router.route(message, BIELA_CONTEXT, "David")
+                return result, m
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "Cuánto vale el pegoretti?",
+            "cuanto vale el pegoretti",
+            "qué precio tiene la barracuda?",
+            "una picada qué valor?",
+            "cuánto cuesta la honey burger",
+            "el precio de la montesa",
+            "qué valor tiene la barracuda",
+        ],
+    )
+    def test_named_product_price_short_circuits_to_order(self, msg, biela_lookup_set):
+        result, llm_factory = self._route_with_lookup(msg, biela_lookup_set)
+        assert result.segments == [(router.DOMAIN_ORDER, msg)]
+        # Crucially: the LLM router was never built/called.
+        llm_factory.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "cuánto cobran de domicilio",
+            "cuánto vale el domicilio",
+            "qué precio tiene el envío",
+            "cuánto cuesta la propina",
+        ],
+    )
+    def test_policy_price_questions_fall_through_to_llm(self, msg, biela_lookup_set):
+        # No catalog token in the message — must NOT short-circuit; LLM router runs.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route(msg, BIELA_CONTEXT, "David")
+        # LLM ran (we routed to CS in the mock).
+        mock_llm.invoke.assert_called_once()
+        assert result.segments == [(router.DOMAIN_CUSTOMER_SERVICE, "x")]
+
+    def test_named_product_without_price_word_falls_through(self, biela_lookup_set):
+        # Bare product mention without an interrogative — let the LLM decide
+        # (could be ADD_TO_CART, GET_PRODUCT details, etc.).
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "order", "text": "una pegoretti"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("una pegoretti", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+        assert result.segments == [(router.DOMAIN_ORDER, "una pegoretti")]
+
+    def test_price_word_without_catalog_match_falls_through(self, biela_lookup_set):
+        # "cuánto vale" but the noun isn't in the lookup set — let the LLM decide.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("cuánto vale eso?", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+    def test_empty_lookup_set_falls_through(self):
+        # No catalog cached / new business — must NOT short-circuit on an
+        # empty set (would let any "cuánto vale X" through to order).
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("cuánto vale el pegoretti?", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+    def test_lookup_set_failure_falls_through(self):
+        # If the lookup-set helper raises, the router must not crash —
+        # it should fall through to the LLM classifier.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "order", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            side_effect=RuntimeError("boom"),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("cuánto vale el pegoretti?", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+    def test_accent_insensitive_match(self, biela_lookup_set):
+        # User writes "Pégorétti" — the normalizer must strip accents
+        # before checking against the (already-normalized) lookup set.
+        result, llm_factory = self._route_with_lookup(
+            "Cuánto vale el Pégorétti?", biela_lookup_set,
+        )
+        assert result.segments == [(router.DOMAIN_ORDER, "Cuánto vale el Pégorétti?")]
+        llm_factory.assert_not_called()
+
+    def test_greeting_still_takes_priority(self, biela_lookup_set):
+        # Greeting fast-path must still win over the deterministic check.
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            result = router.route("hola", BIELA_CONTEXT, "David")
+            m.assert_not_called()
+        assert result.direct_reply is not None
+        assert result.segments is None

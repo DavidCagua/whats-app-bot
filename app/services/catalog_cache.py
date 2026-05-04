@@ -39,9 +39,11 @@ that tenant — O(n) in total cached entries, but n is small (one per
 """
 
 import logging
+import re
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import unicodedata
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -159,4 +161,143 @@ def list_products_with_fallback(business_id: str, category: str) -> List[Dict]:
         lambda: product_order_service.list_products_with_fallback(
             business_id=business_id, category=category
         ),
+    )
+
+
+# ── Router lookup-set ──────────────────────────────────────────────────
+# A flat ``frozenset[str]`` of normalized tokens that signal "the user
+# named something from the catalog". Used by the router's deterministic
+# pre-classifier to route price questions about named products to the
+# order agent without an LLM call. See app/orchestration/router.py.
+#
+# Built once per (business_id, TTL window) from the cached product list:
+#   - product name tokens (post-normalize, post-stopword)
+#   - tag tokens
+#   - synonym keys + values (single-word entries)
+# Words that would create false positives for policy questions (e.g.
+# "cuánto vale el domicilio") are dropped — those must stay in CS.
+
+_NON_PRODUCT_TOKENS: FrozenSet[str] = frozenset({
+    "domicilio", "domicilios",
+    "envio", "envios", "delivery",
+    "propina", "propinas",
+    "menu", "carta",
+    "pedido", "pedidos", "orden", "ordenes",
+    "factura", "facturas", "recibo", "recibos",
+    "horario", "horarios",
+    "direccion", "telefono", "ubicacion",
+})
+
+_TOKEN_STOPWORDS: FrozenSet[str] = frozenset({
+    "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "y", "o", "u", "a", "al", "en", "con", "sin",
+    "para", "por", "que", "mi", "tu", "su",
+    "es", "son", "esta", "este", "esto", "esa", "ese", "eso",
+    "muy", "mas", "menos", "ya", "no", "si",
+})
+
+
+def _normalize_token(s: str) -> str:
+    if not s:
+        return ""
+    nfkd = unicodedata.normalize("NFD", s.lower())
+    cleaned = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^\w]", "", cleaned)
+
+
+def _split_tokens(text: str) -> List[str]:
+    if not text:
+        return []
+    nfkd = unicodedata.normalize("NFD", text.lower())
+    cleaned = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+    cleaned = re.sub(r"[^\w\s]", " ", cleaned)
+    return [t for t in cleaned.split() if t]
+
+
+def _build_router_lookup_set(business_id: str) -> FrozenSet[str]:
+    """
+    Build the router's product-token set for a business. Reads only
+    from already-cached helpers so a warm cache pays nothing extra.
+    """
+    tokens: set = set()
+
+    products = list_products(business_id) or []
+    for p in products:
+        for t in _split_tokens(p.get("name") or ""):
+            tokens.add(t)
+        for tag in (p.get("tags") or []):
+            nt = _normalize_token(tag)
+            if nt:
+                tokens.add(nt)
+
+    # Pull synonyms via a sibling cache entry — same TTL window, so
+    # we don't re-query the DB on every router turn.
+    try:
+        synonyms = get_or_fetch(
+            business_id,
+            "router_synonyms",
+            (),
+            lambda: _load_synonyms_for_router(business_id),
+        )
+    except Exception as exc:
+        logger.warning("[CATALOG_CACHE] router synonyms load failed: %s", exc)
+        synonyms = {}
+
+    for key, vals in (synonyms or {}).items():
+        nt = _normalize_token(key)
+        if nt:
+            tokens.add(nt)
+        for v in vals or []:
+            nt = _normalize_token(v)
+            if nt:
+                tokens.add(nt)
+
+    # Strip stopwords, denylist, and short noise.
+    tokens = {
+        t for t in tokens
+        if len(t) >= 3
+        and t not in _TOKEN_STOPWORDS
+        and t not in _NON_PRODUCT_TOKENS
+    }
+    return frozenset(tokens)
+
+
+def _load_synonyms_for_router(business_id: str) -> Dict[str, List[str]]:
+    """Read business.settings.search_synonyms for the lookup-set build."""
+    try:
+        from ..database.models import Business, get_db_session
+        import uuid as _uuid
+        db = get_db_session()
+        try:
+            biz = db.query(Business).filter(Business.id == _uuid.UUID(business_id)).first()
+            if not biz or not biz.settings:
+                return {}
+            settings = biz.settings if isinstance(biz.settings, dict) else {}
+            raw = settings.get("search_synonyms") or {}
+            if not isinstance(raw, dict):
+                return {}
+            return {str(k): list(v) for k, v in raw.items() if isinstance(v, list)}
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("[CATALOG_CACHE] _load_synonyms_for_router failed: %s", exc)
+        return {}
+
+
+def get_router_lookup_set(business_id: str) -> FrozenSet[str]:
+    """
+    Return a frozenset of normalized tokens that mean "the user named
+    something from the catalog" for ``business_id``.
+
+    Cached with the same TTL as the underlying catalog reads. Cheap on
+    a hit (one dict lookup); on a miss reuses the already-cached
+    product list and pays one extra DB read for synonyms.
+    """
+    if not business_id:
+        return frozenset()
+    return get_or_fetch(
+        business_id,
+        "router_lookup_set",
+        (),
+        lambda: _build_router_lookup_set(business_id),
     )
