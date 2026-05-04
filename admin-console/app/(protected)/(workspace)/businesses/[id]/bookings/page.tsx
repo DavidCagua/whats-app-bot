@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth"
 import { redirect } from "next/navigation"
 import { canAccessBusiness } from "@/lib/permissions"
+import { redirectIfModuleDisabled } from "@/lib/modules"
 import {
   getBookingsAccess,
   getBookings,
@@ -26,6 +27,7 @@ export default async function BusinessBookingsPage({
 
   if (!session) redirect("/login")
   if (!canAccessBusiness(session, businessId)) redirect("/businesses")
+  await redirectIfModuleDisabled(businessId, "bookings")
 
   const access = await getBookingsAccess(session)
   if (access.businessIds !== "all" && !access.businessIds.includes(businessId)) {

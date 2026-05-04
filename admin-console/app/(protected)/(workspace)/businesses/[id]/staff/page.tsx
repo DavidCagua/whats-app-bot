@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation"
 import { auth } from "@/lib/auth"
 import { canAccessBusiness } from "@/lib/permissions"
+import { redirectIfModuleDisabled } from "@/lib/modules"
 import { prisma } from "@/lib/prisma"
 import { StaffList } from "./components/staff-list"
 import { Button } from "@/components/ui/button"
@@ -28,6 +29,7 @@ export default async function StaffPage({ params }: StaffPageProps) {
   if (!canAccessBusiness(session, id)) {
     redirect("/")
   }
+  await redirectIfModuleDisabled(id, "staff")
 
   // Verify business exists
   const business = await prisma.businesses.findUnique({

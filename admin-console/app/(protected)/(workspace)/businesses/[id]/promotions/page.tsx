@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/lib/auth"
 import { canAccessBusiness } from "@/lib/permissions"
+import { redirectIfModuleDisabled } from "@/lib/modules"
 import { notFound, redirect } from "next/navigation"
 import { listPromotions } from "@/lib/actions/promotions"
 import { PromotionsManager } from "./components/promotions-manager"
@@ -16,6 +17,7 @@ export default async function PromotionsPage({ params }: PromotionsPageProps) {
   if (!canAccessBusiness(session, id)) {
     redirect("/businesses")
   }
+  await redirectIfModuleDisabled(id, "promotions")
 
   const business = await prisma.businesses.findUnique({ where: { id } })
   if (!business) notFound()

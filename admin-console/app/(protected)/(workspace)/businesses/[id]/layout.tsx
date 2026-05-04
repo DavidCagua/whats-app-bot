@@ -37,6 +37,7 @@ export default async function BusinessLayout({ children, params }: BusinessLayou
     <BusinessWorkspaceShell
       businessId={id}
       businessName={business.name}
+      enabledModules={business.enabled_modules}
       switcherBusinesses={switcherBusinesses}
       userName={session.user?.name}
       userEmail={session.user?.email}

@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils"
 import type { SwitcherBusiness } from "@/lib/workspace-businesses"
 import { BusinessSwitcher } from "./business-switcher"
 import logo from "@/app/logo.png"
+import { MODULES, type ModuleKey } from "@/lib/modules"
 import {
   BookUser,
   CalendarDays,
@@ -33,65 +34,36 @@ import {
   Tag,
   UserCog,
   Users,
+  type LucideIcon,
 } from "lucide-react"
 
-const nav = (id: string) =>
-  [
-    {
-      href: `/businesses/${id}`,
-      label: "Resumen",
-      icon: LayoutDashboard,
-    },
-    {
-      href: `/businesses/${id}/inbox`,
-      label: "Bandeja de entrada",
-      icon: MessageSquare,
-    },
-    {
-      href: `/businesses/${id}/bookings`,
-      label: "Reservas",
-      icon: CalendarDays,
-    },
-    {
-      href: `/businesses/${id}/orders`,
-      label: "Pedidos",
-      icon: ShoppingCart,
-    },
-    {
-      href: `/businesses/${id}/products`,
-      label: "Productos",
-      icon: Package,
-    },
-    {
-      href: `/businesses/${id}/promotions`,
-      label: "Promociones",
-      icon: Tag,
-    },
-    {
-      href: `/businesses/${id}/services`,
-      label: "Servicios",
-      icon: Scissors,
-    },
-    {
-      href: `/businesses/${id}/staff`,
-      label: "Personal",
-      icon: Users,
-    },
-    {
-      href: `/businesses/${id}/team`,
-      label: "Acceso",
-      icon: UserCog,
-    },
-    {
-      href: `/businesses/${id}/settings`,
-      label: "Configuración",
-      icon: Settings,
-    },
-  ] as const
+const MODULE_ICONS: Record<ModuleKey, LucideIcon> = {
+  overview: LayoutDashboard,
+  inbox: MessageSquare,
+  bookings: CalendarDays,
+  orders: ShoppingCart,
+  products: Package,
+  promotions: Tag,
+  services: Scissors,
+  staff: Users,
+  team: UserCog,
+  settings: Settings,
+}
+
+function buildNav(businessId: string, enabledModules: string[]) {
+  const enabled = new Set(enabledModules)
+  return MODULES.filter((m) => m.required || enabled.has(m.key)).map((m) => ({
+    href: `/businesses/${businessId}${m.hrefSegment}`,
+    label: m.label,
+    icon: MODULE_ICONS[m.key],
+  }))
+}
 
 type BusinessWorkspaceShellProps = {
   businessId: string
   businessName: string
+  /** Optional module keys this business has access to, from businesses.enabled_modules. */
+  enabledModules: string[]
   switcherBusinesses: SwitcherBusiness[]
   userName: string | null | undefined
   userEmail: string | null | undefined
@@ -104,6 +76,7 @@ type BusinessWorkspaceShellProps = {
 export function BusinessWorkspaceShell({
   businessId,
   businessName,
+  enabledModules,
   switcherBusinesses,
   userName,
   userEmail,
@@ -112,7 +85,7 @@ export function BusinessWorkspaceShell({
   children,
 }: BusinessWorkspaceShellProps) {
   const pathname = usePathname()
-  const items = nav(businessId)
+  const items = buildNav(businessId, enabledModules)
 
   function isNavActive(href: string) {
     if (pathname === href) return true

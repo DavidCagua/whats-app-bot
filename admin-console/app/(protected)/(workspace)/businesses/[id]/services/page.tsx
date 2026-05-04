@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth"
 import { canAccessBusiness } from "@/lib/permissions"
+import { redirectIfModuleDisabled } from "@/lib/modules"
 import { prisma } from "@/lib/prisma"
 import { redirect } from "next/navigation"
 import { ServicesManager } from "./services-manager"
@@ -18,6 +19,7 @@ export default async function ServicesPage({ params }: ServicesPageProps) {
   if (!canAccessBusiness(session, id)) {
     redirect("/businesses")
   }
+  await redirectIfModuleDisabled(id, "services")
 
   const [business, services] = await Promise.all([
     prisma.businesses.findUnique({ where: { id }, select: { id: true, name: true } }),

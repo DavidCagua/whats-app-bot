@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/lib/auth"
 import { canAccessBusiness } from "@/lib/permissions"
+import { redirectIfModuleDisabled } from "@/lib/modules"
 import { notFound, redirect } from "next/navigation"
 import { OrdersTable } from "./components/orders-table"
 import { getOrdersForBusiness } from "@/lib/orders-queries"
@@ -16,6 +17,7 @@ export default async function OrdersPage({ params }: OrdersPageProps) {
   if (!canAccessBusiness(session, id)) {
     redirect("/businesses")
   }
+  await redirectIfModuleDisabled(id, "orders")
 
   const business = await prisma.businesses.findUnique({ where: { id } })
   if (!business) notFound()
