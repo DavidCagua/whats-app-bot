@@ -181,6 +181,19 @@ def _format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
         location_parts.append(", ".join(filter(None, [city, state, country])))
     if location_parts:
         parts.append("Ubicación (para preguntas 'dónde están'): " + " ".join(location_parts))
+    payment_methods = settings.get("payment_methods") or []
+    if isinstance(payment_methods, list):
+        cleaned_methods = [str(m).strip() for m in payment_methods if str(m).strip()]
+        if cleaned_methods:
+            parts.append(
+                "Métodos de pago aceptados: "
+                + ", ".join(cleaned_methods)
+                + ". NO aceptes otros métodos. Si el cliente menciona uno distinto "
+                "(ej. Nequi, DaviPlata, tarjeta, PayPal) y no está en la lista, "
+                "OMITE el campo `payment_method` del SUBMIT_DELIVERY_INFO — "
+                "el negocio rechazará el método y le pediremos al cliente que "
+                "elija uno permitido."
+            )
     ai_prompt = (settings.get("ai_prompt") or "").strip()
     if ai_prompt:
         parts.append("IMPORTANTE: Reglas y contexto del negocio (usa para preguntas sobre combos, hamburguesas con papas, etc.):\n" + ai_prompt)
@@ -876,6 +889,26 @@ class OrderAgent(BaseAgent):
             missing = ds.get("missing") or []
             missing_es = {"name": "nombre", "address": "dirección", "phone": "teléfono", "payment": "medio de pago"}
             missing_labels = [missing_es.get(m, m) for m in missing]
+            allowed_methods = ds.get("payment_methods_allowed") or []
+            payment_rejected = ds.get("payment_rejected_input") or ""
+            payment_rules = ""
+            if allowed_methods:
+                payment_rules = (
+                    "\n- Métodos de pago aceptados: "
+                    + ", ".join(allowed_methods)
+                    + ". NO ofrezcas ni aceptes otros (Nequi, DaviPlata, tarjeta, etc.)."
+                )
+                if payment_rejected:
+                    payment_rules += (
+                        f"\n- El cliente propuso pagar con \"{payment_rejected}\", "
+                        "que NO aceptamos. Dile claramente que solo aceptamos los "
+                        "métodos listados y pídele que elija uno."
+                    )
+                elif "payment" in missing:
+                    payment_rules += (
+                        "\n- Cuando preguntes por el medio de pago, lista las opciones "
+                        "permitidas para que el cliente elija una."
+                    )
             system = base_system + (
                 "\n\nSITUACIÓN: Faltan algunos datos de entrega. "
                 "REGLAS:\n"
@@ -883,6 +916,7 @@ class OrderAgent(BaseAgent):
                 "- Si ya tenemos alguno, menciónalo brevemente (ej. 'ya tengo tu dirección').\n"
                 "- NO sugieras 'proceder con el pedido' hasta tener todos los datos.\n"
                 "- 1-3 líneas."
+                + payment_rules
             )
             inp = (
                 f"Cliente dijo: {message_body}\n"
@@ -893,6 +927,10 @@ class OrderAgent(BaseAgent):
                 f"- Pago: {ds.get('payment_method') or '(falta)'}\n"
                 f"Faltan: {', '.join(missing_labels) if missing_labels else '(ninguno)'}"
             )
+            if allowed_methods:
+                inp += f"\nMétodos de pago aceptados: {', '.join(allowed_methods)}"
+            if payment_rejected:
+                inp += f"\nMétodo propuesto por el cliente y rechazado: {payment_rejected}"
             return system, inp
 
         if result_kind == RESULT_KIND_ORDER_PLACED:

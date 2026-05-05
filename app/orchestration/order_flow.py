@@ -423,10 +423,56 @@ def _get_delivery_fee(business_context: Optional[Dict]) -> float:
     return float(settings.get("delivery_fee", DELIVERY_FEE_DEFAULT))
 
 
-def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:
+def _get_allowed_payment_methods(business_context: Optional[Dict]) -> List[str]:
+    """
+    Return the list of payment methods configured by the business in
+    settings.payment_methods. Empty list means "no enforcement" — every
+    payment string is accepted (legacy behaviour).
+    """
+    if not business_context:
+        return []
+    settings = (business_context.get("business") or {}).get("settings") or {}
+    raw = settings.get("payment_methods") or []
+    if not isinstance(raw, list):
+        return []
+    return [str(m).strip() for m in raw if str(m).strip()]
+
+
+def _normalize_payment_method(value: str, allowed: List[str]) -> Optional[str]:
+    """
+    Match `value` against the configured payment-method list (case-
+    insensitive, trim, partial substring). Returns the canonical entry
+    from `allowed` or None if no match.
+
+    If `allowed` is empty, returns the original value (no enforcement).
+    """
+    if not value:
+        return None
+    v = value.strip().lower()
+    if not v:
+        return None
+    if not allowed:
+        return value.strip()
+    for canonical in allowed:
+        c = canonical.strip().lower()
+        if not c:
+            continue
+        if v == c or v in c or c in v:
+            return canonical
+    return None
+
+
+def _build_delivery_status(
+    wa_id: str,
+    business_id: str,
+    business_context: Optional[Dict] = None,
+) -> Dict[str, Any]:
     """
     Build structured delivery status from session + DB customer.
-    Session delivery_info overrides DB customer.
+    Session delivery_info overrides DB customer. When the business
+    configures an allowed payment-method list, any resolved value that
+    doesn't match is treated as missing so the bot re-asks instead of
+    silently accepting an unsupported method.
     """
     cart = order_tools._cart_from_session(wa_id, business_id) if wa_id and business_id else {}
     session_di = cart.get("delivery_info") or {}
@@ -442,7 +488,12 @@ def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:
     name = (session_di.get("name") or "").strip() or (cust.get("name") or "").strip()
     address = (session_di.get("address") or "").strip() or (cust.get("address") or "").strip()
     phone = (session_di.get("phone") or "").strip() or (cust.get("phone") or "").strip()
-    payment = (session_di.get("payment_method") or "").strip() or (cust.get("payment_method") or "").strip()
+    payment_raw = (session_di.get("payment_method") or "").strip() or (cust.get("payment_method") or "").strip()
+
+    allowed = _get_allowed_payment_methods(business_context)
+    payment_canonical: Optional[str] = None
+    if payment_raw:
+        payment_canonical = _normalize_payment_method(payment_raw, allowed)
 
     missing = []
     if not name:
@@ -451,7 +502,7 @@ def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:
         missing.append("address")
     if not phone:
         missing.append("phone")
-    if not payment:
+    if not payment_canonical:
         missing.append("payment")
 
     return {
@@ -460,7 +511,8 @@ def _build_delivery_status(wa_id: str, business_id: str) -> Dict[str, Any]:
         "name": name or None,
         "address": address or None,
         "phone": phone or None,
-        "payment_method": payment or None,
+        "payment_method": payment_canonical,
+        "payment_methods_allowed": allowed,
     }
 
 
@@ -616,7 +668,12 @@ def _user_error_result(state_after: str, wa_id: str, business_id: str, message: 
     }
 
 
-def _recovery_result(state_after: str, wa_id: str, business_id: str) -> Dict[str, Any]:
+def _recovery_result(
+    state_after: str,
+    wa_id: str,
+    business_id: str,
+    business_context: Optional[Dict] = None,
+) -> Dict[str, Any]:
     """
     Build a 'soft' result when the planner emits a state-illegal intent.
     The allowlist rejection used to surface as a user-facing USER_ERROR
@@ -626,7 +683,7 @@ def _recovery_result(state_after: str, wa_id: str, business_id: str) -> Dict[str
     """
     if state_after in (ORDER_STATE_COLLECTING_DELIVERY, ORDER_STATE_READY_TO_PLACE):
         # Re-emit the confirmation/collection prompt the user was responding to.
-        delivery_status = _build_delivery_status(wa_id, business_id)
+        delivery_status = _build_delivery_status(wa_id, business_id, business_context)
         return _base_result(
             state_after, wa_id, business_id,
             RESULT_KIND_DELIVERY_STATUS,
@@ -842,7 +899,7 @@ def execute_order_intent(
                 "[ORDER_FLOW] [INVARIANT] Intent rejected: intent=%s state=%s allowed=%s",
                 intent, current_state, list(allowed),
             )
-            return _recovery_result(current_state, wa_id, business_id)
+            return _recovery_result(current_state, wa_id, business_id, business_context)
 
     # Pending disambiguation is one-shot: the planner already consumed it
     # (via the prompt context). Clear it now; if THIS intent raises another
@@ -866,7 +923,7 @@ def execute_order_intent(
                 {"order_context": {**order_context, "state": ORDER_STATE_COLLECTING_DELIVERY}},
             )
             turn_cache.current().invalidate_session(wa_id, business_id)
-            delivery_status = _build_delivery_status(wa_id, business_id)
+            delivery_status = _build_delivery_status(wa_id, business_id, business_context)
             state_after = ORDER_STATE_COLLECTING_DELIVERY
             if delivery_status["all_present"]:
                 cart_now = order_tools._cart_from_session(wa_id, business_id)
@@ -984,7 +1041,7 @@ def execute_order_intent(
             )
 
         if intent == INTENT_GET_CUSTOMER_INFO:
-            delivery_status = _build_delivery_status(wa_id, business_id)
+            delivery_status = _build_delivery_status(wa_id, business_id, business_context)
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_DELIVERY_STATUS,
@@ -1481,14 +1538,32 @@ def execute_order_intent(
             phone_param = (params.get("phone") or "").strip()
             if phone_param == "<SENDER>":
                 phone_param = _format_phone_from_wa_id(wa_id)
+
+            # Normalize payment_method against the business's allowed list.
+            # If the user/planner proposed something not configured (e.g. Nequi
+            # when only Efectivo + Transferencia are allowed), strip it before
+            # persisting and surface the rejected input to the response
+            # generator so it can tell the customer what we accept.
+            allowed_methods = _get_allowed_payment_methods(business_context)
+            raw_payment_param = (params.get("payment_method") or "").strip()
+            payment_param_canonical = _normalize_payment_method(
+                raw_payment_param, allowed_methods
+            ) if raw_payment_param else ""
+            payment_rejected_input: Optional[str] = None
+            if raw_payment_param and payment_param_canonical is None:
+                payment_rejected_input = raw_payment_param
+                payment_param_canonical = ""
+
             tool_fn.invoke({
                 "injected_business_context": ctx,
                 "address": params.get("address") or "",
-                "payment_method": params.get("payment_method") or "",
+                "payment_method": payment_param_canonical or "",
                 "phone": phone_param,
                 "name": params.get("name") or "",
             })
-            delivery_status = _build_delivery_status(wa_id, business_id)
+            delivery_status = _build_delivery_status(wa_id, business_id, business_context)
+            if payment_rejected_input:
+                delivery_status["payment_rejected_input"] = payment_rejected_input
 
             state_after = current_state
             if delivery_status["all_present"]:
@@ -1535,7 +1610,7 @@ def execute_order_intent(
 
             if "✅" not in result_str and "confirmado" not in result_str.lower():
                 if "MISSING_DELIVERY_INFO" in result_str:
-                    delivery_status = _build_delivery_status(wa_id, business_id)
+                    delivery_status = _build_delivery_status(wa_id, business_id, business_context)
                     return _base_result(
                         ORDER_STATE_COLLECTING_DELIVERY, wa_id, business_id,
                         RESULT_KIND_DELIVERY_STATUS,
