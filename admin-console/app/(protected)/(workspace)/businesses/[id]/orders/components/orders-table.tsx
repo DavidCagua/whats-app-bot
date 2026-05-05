@@ -74,6 +74,13 @@ const statusVariant = (
 const labelFor = (status: string): string =>
   isValidStatus(status) ? STATUS_LABELS[status] : status
 
+const capitalize = (value: string | null | undefined): string => {
+  if (!value) return "—"
+  const trimmed = value.trim()
+  if (!trimmed) return "—"
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
+}
+
 const formatAmountForToast = (value: number) =>
   new Intl.NumberFormat("es-CO", {
     style: "currency",
@@ -332,7 +339,10 @@ export function OrdersTable({
           <TableRow>
             <TableHead>ID</TableHead>
             <TableHead>Fecha</TableHead>
-            <TableHead>Cliente</TableHead>
+            <TableHead>Teléfono</TableHead>
+            <TableHead>Nombre</TableHead>
+            <TableHead>Dirección</TableHead>
+            <TableHead>Pago</TableHead>
             <TableHead>Ítems</TableHead>
             <TableHead>Total</TableHead>
             <TableHead>Estado</TableHead>
@@ -342,7 +352,7 @@ export function OrdersTable({
           {orders.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={6}
+                colSpan={9}
                 className="text-center text-muted-foreground py-8"
               >
                 Aún no hay pedidos.
@@ -375,6 +385,11 @@ export function OrdersTable({
                         ? `Cliente #${order.customer_id}`
                         : "—")}
                   </TableCell>
+                  <TableCell>{capitalize(order.customer_name)}</TableCell>
+                  <TableCell className="max-w-[220px] truncate" title={order.delivery_address || undefined}>
+                    {capitalize(order.delivery_address)}
+                  </TableCell>
+                  <TableCell>{capitalize(order.payment_method)}</TableCell>
                   <TableCell className="text-sm">
                     {order.items.length > 0
                       ? order.items.map((item) => (

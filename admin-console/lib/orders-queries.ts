@@ -5,6 +5,9 @@ export type OrderRow = {
   created_at: string | null
   whatsapp_id: string | null
   customer_id: number | null
+  customer_name: string | null
+  delivery_address: string | null
+  payment_method: string | null
   total_amount: number
   status: string
   items: {
@@ -28,6 +31,7 @@ export async function getOrdersForBusiness(businessId: string): Promise<OrderRow
       order_items: {
         include: { products: true },
       },
+      customers: true,
     },
   })
 
@@ -36,6 +40,9 @@ export async function getOrdersForBusiness(businessId: string): Promise<OrderRow
     created_at: order.created_at ? order.created_at.toISOString() : null,
     whatsapp_id: order.whatsapp_id ?? null,
     customer_id: order.customer_id ?? null,
+    customer_name: order.customers?.name ?? null,
+    delivery_address: order.delivery_address ?? order.customers?.address ?? null,
+    payment_method: order.payment_method ?? order.customers?.payment_method ?? null,
     total_amount: Number(order.total_amount.toString()),
     status: order.status ?? "pending",
     items: order.order_items.map((oi) => ({
