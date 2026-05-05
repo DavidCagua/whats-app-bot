@@ -4,8 +4,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ConversationThread } from "@/lib/conversations-queries"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { User, Building2, Phone, Bot, Mic, Square, ArrowLeft } from "lucide-react"
-import { format } from "date-fns"
+import {
+  User,
+  Building2,
+  Phone,
+  Bot,
+  Mic,
+  Square,
+  ArrowLeft,
+  ChevronDown,
+} from "lucide-react"
+import { format, isToday, isYesterday, differenceInCalendarDays } from "date-fns"
+import { es } from "date-fns/locale"
 import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
@@ -25,6 +35,10 @@ type ConversationMessagesPanelProps = {
 
 type ThreadMessage = ConversationThread["messages"][number]
 
+type RenderItem =
+  | { kind: "separator"; key: string; label: string }
+  | { kind: "message"; key: string; message: ThreadMessage }
+
 const OPTIMISTIC_MATCH_WINDOW_MS = 60_000
 const VOICE_PLACEHOLDER = "[audio]"
 const OLDER_PAGE_LIMIT = 50
@@ -32,6 +46,49 @@ const SCROLL_TOP_TRIGGER_PX = 150
 const SCROLL_BOTTOM_PINNED_PX = 80
 const COMPOSER_LOCK_TOOLTIP =
   "El bot está atendiendo. Apaga el switch para responder tú."
+
+/**
+ * Friendly Spanish day label for a message timestamp:
+ *   - Today  → "Hoy"
+ *   - Yesterday → "Ayer"
+ *   - Within last 6 days → weekday name capitalised ("Lunes")
+ *   - Otherwise → "5 de mayo de 2026"
+ */
+function formatDayLabel(timestamp: string | Date): string {
+  const date = new Date(timestamp)
+  if (isToday(date)) return "Hoy"
+  if (isYesterday(date)) return "Ayer"
+  const days = differenceInCalendarDays(new Date(), date)
+  if (days >= 0 && days < 7) {
+    const weekday = format(date, "EEEE", { locale: es })
+    return weekday.charAt(0).toUpperCase() + weekday.slice(1)
+  }
+  return format(date, "d 'de' MMMM 'de' yyyy", { locale: es })
+}
+
+function dayKey(timestamp: string | Date): string {
+  return format(new Date(timestamp), "yyyy-MM-dd")
+}
+
+/**
+ * Build a flat list of render items (day separators + messages). A
+ * separator is inserted before the first message of every new calendar
+ * day, mirroring WhatsApp's behaviour. Optimistic messages with id < 0
+ * still get a separator if their timestamp crosses a day boundary.
+ */
+function buildRenderItems(messages: ThreadMessage[]): RenderItem[] {
+  const items: RenderItem[] = []
+  let prevDay = ""
+  for (const m of messages) {
+    const k = dayKey(m.timestamp)
+    if (k !== prevDay) {
+      items.push({ kind: "separator", key: `sep-${k}`, label: formatDayLabel(m.timestamp) })
+      prevDay = k
+    }
+    items.push({ kind: "message", key: `msg-${m.id}`, message: m })
+  }
+  return items
+}
 
 /**
  * Merge a server snapshot with the local list. Preserves:
@@ -96,6 +153,9 @@ export function ConversationMessagesPanel({
   const [isTogglingAgent, setIsTogglingAgent] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderError, setOlderError] = useState<string | null>(null)
+  // Counter of new server messages received while the user is scrolled up.
+  // Drives the "↓ N nuevos mensajes" pill that lets them jump to the bottom.
+  const [unreadWhileScrolledUp, setUnreadWhileScrolledUp] = useState(0)
 
   const [localMessages, setLocalMessages] = useState(thread.messages)
   const [isRecording, setIsRecording] = useState(false)
@@ -113,6 +173,11 @@ export function ConversationMessagesPanel({
   useEffect(() => {
     isTogglingAgentRef.current = isTogglingAgent
   }, [isTogglingAgent])
+
+  // Highest server-confirmed message id seen so far on this thread. Used to
+  // detect "newly arrived" messages on snapshot updates so we can bump the
+  // unread counter when the user is scrolled up.
+  const lastSeenMaxIdRef = useRef<number>(0)
 
   // Scroll behaviour bookkeeping.
   const forceScrollToBottomRef = useRef(false)
@@ -135,6 +200,11 @@ export function ConversationMessagesPanel({
   const composerLocked = agentEnabled
   const composerDisabled = composerLocked || isSending || isRecording
   const sendDisabled = composerLocked || !draft.trim() || isSending || isRecording
+
+  const renderItems = useMemo<RenderItem[]>(
+    () => buildRenderItems(localMessages),
+    [localMessages]
+  )
 
   const getViewport = useCallback((): HTMLDivElement | null => {
     const root = scrollAreaRef.current
@@ -198,7 +268,28 @@ export function ConversationMessagesPanel({
       prevThreadIdRef.current = threadId
       forceScrollToBottomRef.current = true
       isAtBottomRef.current = true
+      // Reset unread bookkeeping for the new thread.
+      setUnreadWhileScrolledUp(0)
+      lastSeenMaxIdRef.current = thread.messages.reduce(
+        (max, m) => (m.id > max ? m.id : max),
+        0
+      )
       return
+    }
+    // Same-thread snapshot: detect newly arrived server messages (id > prev
+    // max). If the user is scrolled up, bump the unread counter so the pill
+    // can offer a one-click jump to the bottom.
+    const prevMaxId = lastSeenMaxIdRef.current
+    let arrivedDelta = 0
+    let newMaxId = prevMaxId
+    for (const m of thread.messages) {
+      if (m.id <= 0) continue
+      if (m.id > newMaxId) newMaxId = m.id
+      if (m.id > prevMaxId) arrivedDelta += 1
+    }
+    lastSeenMaxIdRef.current = newMaxId
+    if (arrivedDelta > 0 && !isAtBottomRef.current) {
+      setUnreadWhileScrolledUp((c) => c + arrivedDelta)
     }
     setLocalMessages((prev) => mergeMessages(prev, thread.messages))
     if (!isTogglingAgentRef.current) {
@@ -220,7 +311,14 @@ export function ConversationMessagesPanel({
     const onScroll = () => {
       const distanceFromBottom =
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      isAtBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_PINNED_PX
+      const atBottom = distanceFromBottom < SCROLL_BOTTOM_PINNED_PX
+      isAtBottomRef.current = atBottom
+
+      // Scrolled back to the bottom — implicitly acknowledge any unread
+      // messages that arrived while the user was up in history.
+      if (atBottom) {
+        setUnreadWhileScrolledUp((c) => (c === 0 ? c : 0))
+      }
 
       if (
         viewport.scrollTop < SCROLL_TOP_TRIGGER_PX &&
@@ -233,6 +331,16 @@ export function ConversationMessagesPanel({
     viewport.addEventListener("scroll", onScroll, { passive: true })
     return () => viewport.removeEventListener("scroll", onScroll)
   }, [getViewport, fetchOlder])
+
+  const jumpToLatest = useCallback(() => {
+    const viewport = getViewport()
+    if (!viewport) return
+    requestAnimationFrame(() => {
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" })
+    })
+    isAtBottomRef.current = true
+    setUnreadWhileScrolledUp(0)
+  }, [getViewport])
 
   // Apply scroll-position adjustments after layout has settled. Priority:
   //   1. Initial paint of a new thread → jump to bottom.
@@ -521,138 +629,170 @@ export function ConversationMessagesPanel({
       </CardHeader>
 
       {/* Messages */}
-      <ScrollArea ref={scrollAreaRef} className="flex-1">
-        <CardContent className="p-3 sm:p-4">
-          {loadingOlder && (
-            <div className="text-center text-xs text-muted-foreground py-2">
-              Cargando mensajes anteriores…
-            </div>
-          )}
-          {olderError && (
-            <div className="text-center text-xs text-destructive py-2">
-              {olderError}
-            </div>
-          )}
-          {localMessages.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">
-              <p>No messages in this conversation</p>
-            </div>
-          ) : (
-            <div className="space-y-3 sm:space-y-4">
-              {localMessages.map((message) => {
-                const isUser = message.role === "user"
-                const isAssistant = message.role === "assistant"
+      <div className="relative flex-1 min-h-0">
+        <ScrollArea ref={scrollAreaRef} className="h-full">
+          <CardContent className="p-3 sm:p-4">
+            {loadingOlder && (
+              <div className="text-center text-xs text-muted-foreground py-2">
+                Cargando mensajes anteriores…
+              </div>
+            )}
+            {olderError && (
+              <div className="text-center text-xs text-destructive py-2">
+                {olderError}
+              </div>
+            )}
+            {renderItems.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <p>No messages in this conversation</p>
+              </div>
+            ) : (
+              <div className="space-y-3 sm:space-y-4">
+                {renderItems.map((item) => {
+                  if (item.kind === "separator") {
+                    return (
+                      <div
+                        key={item.key}
+                        className="flex items-center justify-center py-1"
+                      >
+                        <div className="px-3 py-1 rounded-full bg-muted text-muted-foreground text-[11px] font-medium uppercase tracking-wide shadow-sm">
+                          {item.label}
+                        </div>
+                      </div>
+                    )
+                  }
+                  const message = item.message
+                  const isUser = message.role === "user"
+                  const isAssistant = message.role === "assistant"
 
-                return (
-                  <div
-                    key={message.id}
-                    className={cn("flex gap-2 sm:gap-3", isAssistant && "flex-row-reverse")}
-                  >
-                    {/* Avatar */}
+                  return (
                     <div
-                      className={cn(
-                        "h-7 w-7 sm:h-8 sm:w-8 rounded-full flex items-center justify-center flex-shrink-0 mt-1",
-                        isUser && "bg-blue-100 text-blue-600",
-                        isAssistant && "bg-green-100 text-green-600"
-                      )}
+                      key={item.key}
+                      className={cn("flex gap-2 sm:gap-3", isAssistant && "flex-row-reverse")}
                     >
-                      {isUser ? (
-                        <User className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
-                      ) : (
-                        <Bot className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
-                      )}
-                    </div>
-
-                    {/* Bubble */}
-                    <div
-                      className={cn(
-                        "flex-1 space-y-1 max-w-[80%] sm:max-w-[75%]",
-                        isAssistant && "flex flex-col items-end"
-                      )}
-                    >
+                      {/* Avatar */}
                       <div
                         className={cn(
-                          "text-xs text-muted-foreground flex items-center gap-1.5",
-                          isAssistant && "flex-row-reverse"
+                          "h-7 w-7 sm:h-8 sm:w-8 rounded-full flex items-center justify-center flex-shrink-0 mt-1",
+                          isUser && "bg-blue-100 text-blue-600",
+                          isAssistant && "bg-green-100 text-green-600"
                         )}
                       >
-                        <span className="font-medium">
-                          {isUser ? "Customer" : "Assistant"}
-                        </span>
-                        <span className="hidden sm:inline">
-                          {format(new Date(message.timestamp), "MMM d, yyyy 'at' h:mm a")}
-                        </span>
-                        <span className="sm:hidden">
-                          {format(new Date(message.timestamp), "h:mm a")}
-                        </span>
+                        {isUser ? (
+                          <User className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                        ) : (
+                          <Bot className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                        )}
                       </div>
 
+                      {/* Bubble */}
                       <div
                         className={cn(
-                          "rounded-2xl px-3 py-2 sm:rounded-lg sm:p-3 space-y-2",
-                          isUser && "bg-blue-50 text-blue-900",
-                          isAssistant && "bg-green-50 text-green-900"
+                          "flex-1 space-y-1 max-w-[80%] sm:max-w-[75%]",
+                          isAssistant && "flex flex-col items-end"
                         )}
                       >
-                        {message.message ? (
-                          <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
-                            {message.message}
-                          </p>
-                        ) : null}
-                        {message.attachments?.map((att) => (
-                          <div key={att.id} className="space-y-1">
-                            {att.type === "audio" ? (
-                              att.url ? (
-                                <audio
-                                  src={att.url}
-                                  controls
-                                  className="max-w-full h-9"
-                                  preload="metadata"
-                                />
-                              ) : (
-                                <span className="text-xs text-muted-foreground italic">
-                                  Audio — processing…
-                                </span>
-                              )
-                            ) : att.url ? (
-                              att.type === "image" ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
-                                  src={att.url}
-                                  alt="Attachment"
-                                  loading="lazy"
-                                  decoding="async"
-                                  className="max-w-full rounded max-h-48 object-contain"
-                                />
-                              ) : (
-                                <a
-                                  href={att.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-sm text-primary underline"
-                                >
-                                  View {att.type}
-                                </a>
-                              )
-                            ) : null}
-                            {att.transcript ? (
-                              <p className="text-xs text-muted-foreground border-l-2 pl-2 mt-1">
-                                <span className="font-medium">Transcript: </span>
-                                {att.transcript}
-                              </p>
-                            ) : null}
-                          </div>
-                        ))}
+                        <div
+                          className={cn(
+                            "text-xs text-muted-foreground flex items-center gap-1.5",
+                            isAssistant && "flex-row-reverse"
+                          )}
+                        >
+                          <span className="font-medium">
+                            {isUser ? "Customer" : "Assistant"}
+                          </span>
+                          <span className="hidden sm:inline">
+                            {format(new Date(message.timestamp), "h:mm a")}
+                          </span>
+                          <span className="sm:hidden">
+                            {format(new Date(message.timestamp), "h:mm a")}
+                          </span>
+                        </div>
+
+                        <div
+                          className={cn(
+                            "rounded-2xl px-3 py-2 sm:rounded-lg sm:p-3 space-y-2",
+                            isUser && "bg-blue-50 text-blue-900",
+                            isAssistant && "bg-green-50 text-green-900"
+                          )}
+                        >
+                          {message.message ? (
+                            <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
+                              {message.message}
+                            </p>
+                          ) : null}
+                          {message.attachments?.map((att) => (
+                            <div key={att.id} className="space-y-1">
+                              {att.type === "audio" ? (
+                                att.url ? (
+                                  <audio
+                                    src={att.url}
+                                    controls
+                                    className="max-w-full h-9"
+                                    preload="metadata"
+                                  />
+                                ) : (
+                                  <span className="text-xs text-muted-foreground italic">
+                                    Audio — processing…
+                                  </span>
+                                )
+                              ) : att.url ? (
+                                att.type === "image" ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    src={att.url}
+                                    alt="Attachment"
+                                    loading="lazy"
+                                    decoding="async"
+                                    className="max-w-full rounded max-h-48 object-contain"
+                                  />
+                                ) : (
+                                  <a
+                                    href={att.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-sm text-primary underline"
+                                  >
+                                    View {att.type}
+                                  </a>
+                                )
+                              ) : null}
+                              {att.transcript ? (
+                                <p className="text-xs text-muted-foreground border-l-2 pl-2 mt-1">
+                                  <span className="font-medium">Transcript: </span>
+                                  {att.transcript}
+                                </p>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-          <div ref={messagesEndRef} />
-        </CardContent>
-      </ScrollArea>
+                  )
+                })}
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </CardContent>
+        </ScrollArea>
+
+        {/* Floating "↓ N nuevos mensajes" pill — visible while user is
+            scrolled up and at least one new server message has arrived. */}
+        {unreadWhileScrolledUp > 0 && (
+          <Button
+            type="button"
+            size="sm"
+            onClick={jumpToLatest}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-lg gap-1.5 rounded-full h-8 px-3 z-10"
+            aria-label="Saltar a los mensajes nuevos"
+          >
+            <ChevronDown className="h-4 w-4" />
+            {unreadWhileScrolledUp === 1
+              ? "1 mensaje nuevo"
+              : `${unreadWhileScrolledUp} mensajes nuevos`}
+          </Button>
+        )}
+      </div>
 
       {/* Composer */}
       <TooltipProvider delayDuration={150}>
