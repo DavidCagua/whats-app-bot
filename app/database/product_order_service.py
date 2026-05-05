@@ -226,10 +226,19 @@ class ProductOrderService:
         self,
         business_id: str,
         query: str,
+        limit: int = 20,
+        unique: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Search products by name, description, category, tags, and semantic
         similarity. Delegates to the hybrid product_search module.
+
+        ``limit`` and ``unique`` are forwarded so callers (e.g.
+        catalog_service.search_products, which accepts these as a public
+        contract) don't crash with TypeError. Prior to this signature
+        fix, the catalog_service refactor in 3e9e02e silently passed
+        these kwargs and SEARCH_PRODUCTS in order_flow always crashed
+        with "got an unexpected keyword argument 'limit'".
         """
         try:
             if not query or not query.strip():
@@ -237,8 +246,8 @@ class ProductOrderService:
             return _search_products_hybrid(
                 business_id=business_id,
                 query=query.strip(),
-                limit=20,
-                unique=False,
+                limit=limit,
+                unique=unique,
             )
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error searching products: {e}")

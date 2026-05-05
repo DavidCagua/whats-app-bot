@@ -209,7 +209,10 @@ class _FakeProductService:
             if pid and pid not in self._by_id:
                 self._by_id[pid] = p
 
-    def search_products(self, business_id, query):
+    def search_products(self, business_id, query, limit=20, unique=False):
+        # Signature mirrors ProductOrderService.search_products so the
+        # catalog_service path (which forwards limit / unique) doesn't
+        # blow up here either.
         if self.scenario.stub_search_products is None:
             return []
         results = list(self.scenario.stub_search_products(business_id, query) or [])

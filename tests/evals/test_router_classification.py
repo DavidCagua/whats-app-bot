@@ -16,6 +16,8 @@ Marked `eval` — deselected by default; runs with `pytest -m eval`.
 Needs OPENAI_API_KEY to actually call the model.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 from app.orchestration import router
@@ -39,6 +41,39 @@ BIELA_CONTEXT = {
         },
     },
 }
+
+
+# Production has a populated catalog cache for every business — the
+# router's deterministic price-of-product short-circuit reads it via
+# catalog_cache.get_router_lookup_set. The eval uses the fake business_id
+# "biela-eval" which has no catalog rows, so without this patch the
+# lookup-set is empty and the deterministic check can't fire — every
+# "cuánto vale la barracuda" call falls through to the LLM, which is
+# flaky on the unfamiliar product name. Pin a realistic Biela token set
+# so we exercise the deterministic path the way production does.
+_BIELA_CATALOG_LOOKUP = frozenset({
+    # burger names
+    "barracuda", "honey", "burger", "bimota", "beta", "biela", "americana",
+    "arrabbiata", "montesa", "ramona", "pastor", "denver", "nairobi",
+    # other catalog products / categories
+    "picada", "pegoretti", "salchipapa", "salchipapas", "fries",
+    "cheese", "special", "perro", "perros",
+    # drinks
+    "coca", "cocacola", "soda", "michelada", "corona",
+    "jugos", "hervido", "malteada",
+    # tags / attributes
+    "picante", "queso", "azul", "mozzarella", "cheddar", "tocineta",
+})
+
+
+@pytest.fixture(autouse=True)
+def _stub_router_catalog_lookup_set():
+    """Populate the deterministic price-of-product short-circuit's input."""
+    with patch(
+        "app.orchestration.router.catalog_cache.get_router_lookup_set",
+        return_value=_BIELA_CATALOG_LOOKUP,
+    ):
+        yield
 
 
 # (phrase, expected_first_segment_domain, why)
