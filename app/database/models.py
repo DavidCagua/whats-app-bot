@@ -822,15 +822,34 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Create engine with connection pooling for Supabase/PostgreSQL
+# Create engine with connection pooling for Supabase/PostgreSQL.
+#
+# When DATABASE_URL points at Supavisor's session-mode pooler, the upstream
+# Supavisor backend idle-kills sessions on the order of minutes — much
+# shorter than pool_recycle=3600. With pool_pre_ping=True, every silently
+# dropped connection forced a full reconnect (TCP + TLS + auth + Supavisor
+# lease ≈ 800ms) on the very next checkout, making every Customer lookup
+# pay that tax. Mitigations:
+#   - pool_recycle=180 — proactively recycle connections before Supavisor
+#     declares them idle.
+#   - TCP keepalives — OS-level heartbeats keep the session alive on the
+#     wire so Supavisor doesn't tear it down.
+# pool_pre_ping stays on as a safety net for the rare case where a
+# connection still slips through stale.
 engine = create_engine(
     DATABASE_URL,
     echo=False,
-    pool_size=5,  # Max 5 persistent connections
-    max_overflow=10,  # Allow 10 additional connections if pool is full
-    pool_timeout=30,  # Wait 30s for connection before failing
-    pool_recycle=3600,  # Recycle connections after 1 hour
-    pool_pre_ping=True  # Verify connections before using them
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=180,
+    pool_pre_ping=True,
+    connect_args={
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+    },
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
