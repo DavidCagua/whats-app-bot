@@ -459,3 +459,51 @@ class TestPlannerPromptRules:
             "Planner prompt must use 'una picada que valor?' as an example"
         assert "no add_to_cart" in lower, \
             "Planner prompt must explicitly forbid ADD_TO_CART for price questions"
+
+    def test_planner_prompt_does_not_split_default_side_into_separate_item(self):
+        """
+        Regression: production observation 2026-05-04 (Biela / 3145798093)
+        — "Quiero una barracuda con papas" was decomposed into two cart
+        items (BARRACUDA + papas). The executor then resolved 'papas'
+        against the catalog, hit 5 ambiguous matches (SALCHIPAPA, BIELA
+        FRIES, CHEESE FRIES, SPECIAL FRIES, PAPAS PERGRETTI), added the
+        BARRACUDA, and asked the user to disambiguate. But every burger
+        at Biela includes fries by default — "con papas" was a redundant
+        confirmation, not a second line.
+
+        The planner prompt must rule that when a default-included
+        accompaniment is mentioned with "con", it does NOT become a
+        separate cart item.
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        lower = prompt.lower()
+        # The rule heading.
+        assert "acompañamientos incluidos por default" in lower, (
+            "Planner prompt must call out default-included accompaniments "
+            "as a non-decomposable case"
+        )
+        # The exact regression example.
+        assert "una barracuda con papas" in lower, (
+            "Planner prompt must use 'una barracuda con papas' as the "
+            "canonical example of the no-split rule"
+        )
+        # Must reference the business-rules section so the planner
+        # knows where the inclusion fact comes from.
+        assert "reglas y contexto del negocio" in lower
+        # Must enumerate the trigger words for the affirmative form.
+        for word in ("con", "papas"):
+            assert word in lower
+        # Must explicitly call out the negation form (which uses notes).
+        assert "sin papas" in lower, (
+            "Planner prompt must show that 'sin papas' goes in notes, "
+            "not as an item"
+        )
+        # Must enumerate the explicit exceptions (so the rule doesn't
+        # over-apply).
+        assert "biela fries" in lower or "salchipapa" in lower, (
+            "Planner prompt must show explicit-name catalog requests "
+            "DO get split into separate items"
+        )
+        assert "extras" in lower or "aparte" in lower, (
+            "Planner prompt must show extra/additional sides DO get split"
+        )
