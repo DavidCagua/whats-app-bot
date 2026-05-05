@@ -503,6 +503,12 @@ class TestPlannerHoursFieldReframedAsAvailability:
             "hay atención",
             "están atendiendo",
             "están abiertos",
+            # Service-phrasing anchors (production observation
+            # 2026-05-05, Biela / 3177000722: "hay servicio" was
+            # misclassified as CUSTOMER_SERVICE_CHAT).
+            "hay servicio",
+            "tienen servicio",
+            "ya abrieron",
         ):
             assert example.lower() in lower, f"hours rule missing example: {example!r}"
         # Must signal the LLM to generalize, not match keywords.
