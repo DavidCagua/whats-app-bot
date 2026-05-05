@@ -258,3 +258,159 @@ class TestCondenseHoursRows:
         out = bis._condense_hours_rows(rows)
         assert "Lun" in out
         assert "Dom" in out
+
+
+class TestComputeOpenStatus:
+    """
+    Live "are we open right now?" check. The bug we're guarding against
+    (Biela / 3177000722, 2026-05-05): bot answered "Sí, estamos abiertos"
+    at 00:42 Bogotá when the store opens at 17:00.
+    """
+
+    # Biela's actual schedule (from production):
+    #   Sun closed (is_active=False)
+    #   Mon-Thu 17:00-22:00
+    #   Fri-Sat 17:00-22:30
+    BIELA_ROWS = [
+        {"day_of_week": 0, "open_time": _time(17, 30), "close_time": _time(22, 0), "is_active": False},
+        {"day_of_week": 1, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 2, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 3, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 4, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 5, "open_time": _time(17, 0), "close_time": _time(22, 30), "is_active": True},
+        {"day_of_week": 6, "open_time": _time(17, 0), "close_time": _time(22, 30), "is_active": True},
+    ]
+
+    def _run(self, iso, rows=None):
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            pytest.skip("zoneinfo unavailable")
+        rows = rows if rows is not None else self.BIELA_ROWS
+        now = datetime.fromisoformat(iso).replace(tzinfo=ZoneInfo("America/Bogota"))
+        with patch(
+            "app.services.business_info_service._load_active_availability_rows",
+            return_value=rows,
+        ):
+            return bis.compute_open_status("biz", now=now)
+
+    def test_open_during_window(self):
+        # Tuesday 18:00 — within Tue 17:00-22:00.
+        s = self._run("2026-05-05T18:00:00")
+        assert s["has_data"] is True
+        assert s["is_open"] is True
+        assert s["closes_at"] == _time(22, 0)
+
+    def test_closed_before_open_today(self):
+        # Tuesday 14:45 — before today's 17:00 open.
+        s = self._run("2026-05-05T14:45:00")
+        assert s["is_open"] is False
+        assert s["opens_at"] == _time(17, 0)
+        assert s["next_open_dow"] == 2  # Tuesday
+        assert s["next_open_time"] == _time(17, 0)
+
+    def test_closed_after_close_today(self):
+        # Tuesday 22:30 — after Tue's 22:00 close. Next open: Wed 17:00.
+        s = self._run("2026-05-05T22:30:00")
+        assert s["is_open"] is False
+        # next_open should be Wednesday (3), not Tuesday.
+        assert s["next_open_dow"] == 3
+        assert s["next_open_time"] == _time(17, 0)
+
+    def test_post_midnight_same_day_in_db_terms(self):
+        # Wednesday 00:42 Bogotá — the original production bug timestamp.
+        # Should be CLOSED (Tue 22:00 close already passed in calendar).
+        # Next open is today at 17:00 (Wed).
+        s = self._run("2026-05-06T00:42:00")
+        assert s["is_open"] is False
+        assert s["opens_at"] == _time(17, 0)
+
+    def test_sunday_inactive_skipped(self):
+        # Sunday 19:00 — Sun row is inactive. next_open should be Monday.
+        s = self._run("2026-05-10T19:00:00")
+        assert s["is_open"] is False
+        assert s["next_open_dow"] == 1  # Monday
+        assert s["next_open_time"] == _time(17, 0)
+
+    def test_after_saturday_close_skips_sunday(self):
+        # Saturday 23:00 — after Sat's 22:30 close. Next open: Monday
+        # (Sunday is inactive so it's skipped).
+        s = self._run("2026-05-09T23:00:00")
+        assert s["is_open"] is False
+        assert s["next_open_dow"] == 1
+
+    def test_no_rows_returns_no_data(self):
+        s = self._run("2026-05-05T18:00:00", rows=[])
+        assert s["has_data"] is False
+        assert s["is_open"] is False
+
+    def test_empty_business_id_returns_no_data(self):
+        with patch(
+            "app.services.business_info_service._load_active_availability_rows",
+            return_value=[],
+        ) as loader:
+            s = bis.compute_open_status("")
+        loader.assert_not_called()
+        assert s["has_data"] is False
+
+
+class TestFormatOpenStatusSentence:
+    """Spanish copy for the open-status sentence."""
+
+    def _status(self, **overrides):
+        base = {
+            "is_open": False,
+            "has_data": True,
+            "opens_at": None,
+            "closes_at": None,
+            "next_open_dow": None,
+            "next_open_time": None,
+            "now_local": None,
+        }
+        base.update(overrides)
+        return base
+
+    def test_open_with_close_time(self):
+        s = self._status(is_open=True, closes_at=_time(22, 0))
+        out = bis.format_open_status_sentence(s)
+        assert "Sí, estamos abiertos" in out
+        assert "10:00 PM" in out
+
+    def test_closed_opens_today(self):
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            pytest.skip("zoneinfo unavailable")
+        # Tuesday 14:45 — closed, opens today at 17:00.
+        now = datetime.fromisoformat("2026-05-05T14:45:00").replace(
+            tzinfo=ZoneInfo("America/Bogota"))
+        s = self._status(
+            now_local=now, next_open_dow=2, next_open_time=_time(17, 0),
+        )
+        out = bis.format_open_status_sentence(s)
+        assert "Por ahora estamos cerrados" in out
+        assert "Hoy abrimos" in out
+        assert "5:00 PM" in out
+
+    def test_closed_opens_other_day(self):
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            pytest.skip("zoneinfo unavailable")
+        # Sunday — closed, next open Monday at 17:00.
+        now = datetime.fromisoformat("2026-05-10T19:00:00").replace(
+            tzinfo=ZoneInfo("America/Bogota"))
+        s = self._status(
+            now_local=now, next_open_dow=1, next_open_time=_time(17, 0),
+        )
+        out = bis.format_open_status_sentence(s)
+        assert "Volvemos a abrir el lunes" in out
+        assert "5:00 PM" in out
+
+    def test_no_data_returns_empty(self):
+        s = self._status(has_data=False)
+        out = bis.format_open_status_sentence(s)
+        assert out == ""

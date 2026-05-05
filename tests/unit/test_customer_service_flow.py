@@ -43,6 +43,83 @@ class TestGetBusinessInfo:
         result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"}, ctx=ctx)
         assert result["result_kind"] == csf.RESULT_KIND_INFO_MISSING
 
+    def test_hours_response_prepends_open_status_when_open(self):
+        # Simulate a populated availability table that puts the business
+        # currently open. The schedule string + a leading "Sí, estamos
+        # abiertos" sentence must both appear in the value.
+        with patch(
+            "app.services.business_info_service._get_hours_for_business",
+            return_value="Lun a Vie: 5:00 PM - 10:00 PM",
+        ), patch(
+            "app.services.business_info_service.compute_open_status",
+            return_value={
+                "has_data": True,
+                "is_open": True,
+                "closes_at": __import__("datetime").time(22, 0),
+                "opens_at": None,
+                "next_open_dow": None,
+                "next_open_time": None,
+                "now_local": None,
+            },
+        ):
+            result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"})
+        assert result["result_kind"] == csf.RESULT_KIND_BUSINESS_INFO
+        value = result["value"]
+        assert "Sí, estamos abiertos" in value
+        assert "Lun a Vie: 5:00 PM - 10:00 PM" in value
+
+    def test_hours_response_prepends_open_status_when_closed(self):
+        # Closed before opening today — must produce the
+        # "Hoy abrimos a las..." sentence.
+        from datetime import time as t, datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            pytest.skip("zoneinfo unavailable")
+        now_tue_1445 = datetime.fromisoformat("2026-05-05T14:45:00").replace(
+            tzinfo=ZoneInfo("America/Bogota"))
+        with patch(
+            "app.services.business_info_service._get_hours_for_business",
+            return_value="Lun a Vie: 5:00 PM - 10:00 PM",
+        ), patch(
+            "app.services.business_info_service.compute_open_status",
+            return_value={
+                "has_data": True,
+                "is_open": False,
+                "closes_at": None,
+                "opens_at": t(17, 0),
+                "next_open_dow": 2,  # Tuesday
+                "next_open_time": t(17, 0),
+                "now_local": now_tue_1445,
+            },
+        ):
+            result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"})
+        value = result["value"]
+        assert "Por ahora estamos cerrados" in value
+        assert "Hoy abrimos a las 5:00 PM" in value
+        assert "Lun a Vie: 5:00 PM - 10:00 PM" in value
+
+    def test_hours_response_no_open_status_when_no_availability_data(self):
+        # No availability rows → no sentence prepended; value is just
+        # the hours string (legacy fallback path).
+        with patch(
+            "app.services.business_info_service._get_hours_for_business",
+            return_value=None,  # falls back to settings.hours_text
+        ), patch(
+            "app.services.business_info_service.compute_open_status",
+            return_value={
+                "has_data": False, "is_open": False,
+                "closes_at": None, "opens_at": None,
+                "next_open_dow": None, "next_open_time": None,
+                "now_local": None,
+            },
+        ):
+            result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"})
+        value = result["value"]
+        assert value == "Lun-Vie 5PM"  # the BIZ_CTX settings fallback
+        assert "estamos abiertos" not in value
+        assert "estamos cerrados" not in value
+
 
 class TestGetOrderStatus:
     def test_existing_order(self):

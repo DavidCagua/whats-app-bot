@@ -18,7 +18,13 @@ businesses that haven't migrated yet.
 import logging
 import threading
 import time
+from datetime import date as _date, datetime as _datetime, time as _time, timedelta as _timedelta
 from typing import Optional, Callable, Any, Dict, List, Tuple
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9 — should not happen in our deploys
+    ZoneInfo = None  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -168,6 +174,203 @@ def invalidate_hours_cache(business_id: Optional[str] = None) -> None:
             _hours_cache.clear()
             return
         _hours_cache.pop(str(business_id), None)
+
+
+# ── Open-now status ─────────────────────────────────────────────────────
+# Live "are we open right now?" check. Reads the same
+# business_availability rows the schedule formatter uses, but compares
+# against the current Bogotá time and surfaces whichever transition
+# (closes_at today / opens_at today / next_open weekday) is most
+# relevant for a Spanish customer-facing reply.
+#
+# Production observation 2026-05-05 (Biela / 3177000722): user asked
+# "Buenas hay servicio" at 00:42 Bogotá and the bot answered "Sí,
+# estamos abiertos" — the LLM hallucinated the open status because
+# nothing in the flow actually checked current time vs schedule. This
+# helper closes that gap.
+
+_BUSINESS_TIMEZONE_NAME = "America/Bogota"
+
+
+def _business_now(now: Optional[_datetime] = None) -> _datetime:
+    """Return ``now`` in the business timezone (Bogotá). Pure for tests."""
+    if now is not None:
+        if now.tzinfo is None and ZoneInfo is not None:
+            now = now.replace(tzinfo=ZoneInfo(_BUSINESS_TIMEZONE_NAME))
+        return now
+    if ZoneInfo is not None:
+        return _datetime.now(tz=ZoneInfo(_BUSINESS_TIMEZONE_NAME))
+    return _datetime.utcnow() - _timedelta(hours=5)
+
+
+def _load_active_availability_rows(business_id: str) -> List[Dict[str, Any]]:
+    """Load every active availability row for the business. Returns []
+    on DB failure or unknown business."""
+    if not business_id:
+        return []
+    try:
+        from ..database.models import BusinessAvailability, get_db_session
+        import uuid as _uuid
+        db = get_db_session()
+        try:
+            rows = (
+                db.query(BusinessAvailability)
+                .filter(
+                    BusinessAvailability.business_id == _uuid.UUID(str(business_id)),
+                    BusinessAvailability.is_active == True,
+                )
+                .all()
+            )
+            return [r.to_dict() for r in rows]
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("[BUSINESS_INFO] active availability load failed: %s", exc)
+        return []
+
+
+def _row_window_for_dow(rows: List[Dict[str, Any]], dow: int) -> Optional[Tuple[_time, _time]]:
+    """Pick the widest open/close window across rows for ``dow``."""
+    chosen: Optional[Tuple[_time, _time]] = None
+    for r in rows:
+        if r.get("day_of_week") != dow:
+            continue
+        if not r.get("is_active", True):
+            continue
+        ot = r.get("open_time")
+        ct = r.get("close_time")
+        if ot is None or ct is None:
+            continue
+        if chosen is None:
+            chosen = (ot, ct)
+        else:
+            new_ot = ot if ot < chosen[0] else chosen[0]
+            new_ct = ct if ct > chosen[1] else chosen[1]
+            chosen = (new_ot, new_ct)
+    return chosen
+
+
+_DAY_NAMES_LONG = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"]
+
+
+def _next_open_lookup(rows: List[Dict[str, Any]], starting_dow: int) -> Optional[Tuple[int, _time]]:
+    """
+    Find the next (day_of_week, open_time) window strictly AFTER
+    today (within the next 7 days). Used to render
+    "Volvemos a abrir el lunes a las 5:00 PM".
+    """
+    for offset in range(1, 8):
+        dow = (starting_dow + offset) % 7
+        window = _row_window_for_dow(rows, dow)
+        if window is not None:
+            return (dow, window[0])
+    return None
+
+
+def compute_open_status(
+    business_id: str,
+    now: Optional[_datetime] = None,
+) -> Dict[str, Any]:
+    """
+    Return a structured open-now status for ``business_id``.
+
+    Result fields:
+      - ``is_open`` (bool)
+      - ``has_data`` (bool) — False when we couldn't load any rows;
+        callers should NOT render an open-now sentence in that case.
+      - ``opens_at`` (time | None) — today's open time, when the
+        business is closed but will open today.
+      - ``closes_at`` (time | None) — today's close time, when the
+        business is open right now.
+      - ``next_open_dow`` / ``next_open_time`` — the next weekday +
+        time the business reopens (used when closed for the rest of
+        today, or closed today entirely).
+      - ``now_local`` — the timezone-aware Bogotá datetime the
+        decision was made against (handy for tests).
+    """
+    base: Dict[str, Any] = {
+        "is_open": False,
+        "has_data": False,
+        "opens_at": None,
+        "closes_at": None,
+        "next_open_dow": None,
+        "next_open_time": None,
+        "now_local": None,
+    }
+    if not business_id:
+        return base
+
+    rows = _load_active_availability_rows(business_id)
+    if not rows:
+        return base
+
+    now_local = _business_now(now)
+    base["now_local"] = now_local
+    base["has_data"] = True
+
+    # Python's weekday() is 0=Mon..6=Sun. The DB schema uses
+    # 0=Sun..6=Sat (matches Postgres extract(dow)). Convert.
+    dow_today = (now_local.weekday() + 1) % 7
+    today_window = _row_window_for_dow(rows, dow_today)
+    cur_time = now_local.time().replace(microsecond=0)
+
+    if today_window is not None:
+        ot, ct = today_window
+        if cur_time < ot:
+            # Closed but opens later today.
+            base["opens_at"] = ot
+            base["next_open_dow"] = dow_today
+            base["next_open_time"] = ot
+            return base
+        if ot <= cur_time < ct:
+            # Open now.
+            base["is_open"] = True
+            base["closes_at"] = ct
+            return base
+
+    # Either no row for today (closed all day) or already past today's
+    # close. Look forward for the next open weekday.
+    nxt = _next_open_lookup(rows, dow_today)
+    if nxt is not None:
+        base["next_open_dow"] = nxt[0]
+        base["next_open_time"] = nxt[1]
+    return base
+
+
+def _format_time_lower(t: _time) -> str:
+    """5:30 PM (matches the schedule formatter style)."""
+    return _format_time_12h(t)
+
+
+def format_open_status_sentence(status: Dict[str, Any]) -> str:
+    """
+    One-liner Spanish sentence summarizing whether the business is
+    currently open. Empty string when ``status['has_data']`` is
+    False — callers should fall back to the schedule alone.
+    """
+    if not status.get("has_data"):
+        return ""
+    if status.get("is_open") and status.get("closes_at") is not None:
+        return f"Sí, estamos abiertos. Cerramos hoy a las {_format_time_lower(status['closes_at'])}."
+    # Closed cases.
+    now_local = status.get("now_local")
+    today_dow = ((now_local.weekday() + 1) % 7) if now_local else None
+    next_dow = status.get("next_open_dow")
+    next_time = status.get("next_open_time")
+    if next_dow is not None and next_time is not None:
+        if today_dow is not None and next_dow == today_dow:
+            return (
+                "Por ahora estamos cerrados. "
+                f"Hoy abrimos a las {_format_time_lower(next_time)}."
+            )
+        # Different day — render the day name.
+        day_name = _DAY_NAMES_LONG[next_dow] if 0 <= next_dow < 7 else ""
+        if day_name:
+            return (
+                "Por ahora estamos cerrados. "
+                f"Volvemos a abrir el {day_name} a las {_format_time_lower(next_time)}."
+            )
+    return "Por ahora estamos cerrados."
 
 
 # Canonical field keys. Keep in sync with the customer service agent

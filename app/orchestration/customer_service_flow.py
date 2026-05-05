@@ -228,6 +228,20 @@ def _handle_business_info(
             available_fields=business_info_service.supported_fields(),
         )
 
+    # Hours: prepend a live open-now sentence so questions like
+    # "hay servicio?" / "están abiertos?" get an unambiguous answer
+    # for the current Bogotá time, not just the schedule. The
+    # schedule still follows on a new line so customers also see
+    # the full window.
+    if field == "hours":
+        try:
+            status = business_info_service.compute_open_status(business_id)
+            sentence = business_info_service.format_open_status_sentence(status)
+            if sentence:
+                value = f"{sentence}\n{value}"
+        except Exception as exc:
+            logger.warning("[CS_FLOW] open-status compute failed: %s", exc)
+
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_BUSINESS_INFO,
