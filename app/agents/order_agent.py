@@ -997,6 +997,8 @@ class OrderAgent(BaseAgent):
                 "como ítems separados con precios base.\n"
                 + savings_clause +
                 "- El subtotal y total que te doy YA reflejan los descuentos. NO recalcules.\n"
+                "- Después del total, agrega una línea aclarando que el valor del domicilio "
+                "puede variar según la dirección de entrega.\n"
                 "- Dile que pronto se comunicarán para coordinar la entrega.\n"
                 f"- Indica que el pedido se demora {NOMINAL_RANGE_TEXT} en su entrega.\n"
                 "- 3-6 líneas."
