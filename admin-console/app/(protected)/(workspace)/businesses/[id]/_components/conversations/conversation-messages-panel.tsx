@@ -207,11 +207,17 @@ export function ConversationMessagesPanel({
   }, [thread.whatsapp_id, thread.business_id, thread.messages, thread.agent_enabled])
 
   // Track at-bottom state and trigger lazy load when scrolling near top.
+  // Only triggers fetchOlder on actual user-driven scroll events — never on
+  // the initial mount, where viewport.scrollTop is naturally 0 before the
+  // force-bottom rAF runs. Without this gate, the synchronous initial
+  // measurement would race fetchOlder against force-bottom and the older-
+  // page prepend's scroll-adjustment would land the user mid-thread instead
+  // of at the latest message.
   useEffect(() => {
     const viewport = getViewport()
     if (!viewport) return
 
-    const update = () => {
+    const onScroll = () => {
       const distanceFromBottom =
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
       isAtBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_PINNED_PX
@@ -224,9 +230,8 @@ export function ConversationMessagesPanel({
         void fetchOlder()
       }
     }
-    update()
-    viewport.addEventListener("scroll", update, { passive: true })
-    return () => viewport.removeEventListener("scroll", update)
+    viewport.addEventListener("scroll", onScroll, { passive: true })
+    return () => viewport.removeEventListener("scroll", onScroll)
   }, [getViewport, fetchOlder])
 
   // Apply scroll-position adjustments after layout has settled. Priority:
@@ -245,6 +250,9 @@ export function ConversationMessagesPanel({
     if (forceScrollToBottomRef.current) {
       forceScrollToBottomRef.current = false
       isAtBottomRef.current = true
+      // Drop any queued scroll-adjustment from a stale older-page fetch — on
+      // a fresh thread mount we want bottom, not "preserve previous scroll".
+      scrollAdjustmentRef.current = null
       // Two rAFs: first lets the new tree commit, second runs after Radix
       // ScrollArea has measured its viewport. Setting scrollTop directly
       // is reliable on the radix viewport; scrollIntoView often isn't.
