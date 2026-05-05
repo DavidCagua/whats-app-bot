@@ -8,13 +8,166 @@ info questions like "a qué hora abren" without full agent dispatch).
 Supported fields map a canonical key to a settings path + optional
 formatter. Unknown keys return None so callers can produce a safe
 "no tengo ese dato" fallback.
+
+Hours are sourced from the structured ``business_availability`` table
+(per-day open/close rows), NOT from ``business.settings.hours_text`` —
+that legacy free-text field is only consulted as a fallback for
+businesses that haven't migrated yet.
 """
 
 import logging
-from typing import Optional, Callable, Any, Dict, List
+import threading
+import time
+from typing import Optional, Callable, Any, Dict, List, Tuple
 
 
 logger = logging.getLogger(__name__)
+
+
+# Process cache for the formatted hours string per business. Same TTL
+# pattern as catalog_cache — admin edits will be picked up after at
+# most _HOURS_TTL_SECONDS (5 min). Keyed on business_id only, since
+# the formatter depends entirely on the per-business
+# business_availability rows.
+_HOURS_TTL_SECONDS = 300.0
+_hours_cache: Dict[str, Tuple[float, Optional[str]]] = {}
+_hours_lock = threading.Lock()
+
+
+# Spanish day names matching BusinessAvailability.day_of_week:
+# 0=Sunday, 1=Monday, ..., 6=Saturday.
+_DAY_NAMES_SHORT = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"]
+
+
+def _format_time_12h(t) -> str:
+    """Render a datetime.time as `5:30 PM` (Colombian convention)."""
+    if t is None:
+        return ""
+    hour = t.hour
+    minute = t.minute
+    suffix = "AM" if hour < 12 else "PM"
+    h12 = hour % 12
+    if h12 == 0:
+        h12 = 12
+    if minute:
+        return f"{h12}:{minute:02d} {suffix}"
+    return f"{h12}:00 {suffix}"
+
+
+def _condense_hours_rows(rows: List[Dict[str, Any]]) -> str:
+    """
+    Build the Spanish hours summary from a list of (active) availability
+    rows. Groups consecutive weekdays that share the same open/close
+    times into a range ("Lun a Vie: 5:30 PM - 10:00 PM"). One row per
+    distinct schedule.
+    """
+    if not rows:
+        return ""
+
+    # Pick one open/close pair per day (when there are multiple rows
+    # per day — e.g. per-staff — collapse to the widest window).
+    by_day: Dict[int, Tuple] = {}
+    for r in rows:
+        dow = r.get("day_of_week")
+        if dow is None:
+            continue
+        if not r.get("is_active", True):
+            continue
+        ot = r.get("open_time")
+        ct = r.get("close_time")
+        if ot is None or ct is None:
+            continue
+        prev = by_day.get(dow)
+        if prev is None:
+            by_day[dow] = (ot, ct)
+            continue
+        # Take widest window (earliest open, latest close).
+        prev_ot, prev_ct = prev
+        new_ot = ot if ot < prev_ot else prev_ot
+        new_ct = ct if ct > prev_ct else prev_ct
+        by_day[dow] = (new_ot, new_ct)
+
+    if not by_day:
+        return ""
+
+    # Order with Monday first (week feels Monday-led in Colombia for
+    # business hours), Sunday last.
+    week_order = [1, 2, 3, 4, 5, 6, 0]
+    ordered = [(d, by_day[d]) for d in week_order if d in by_day]
+
+    # Group consecutive same-window days into ranges.
+    groups: List[Tuple[List[int], Tuple]] = []
+    for dow, window in ordered:
+        if groups and groups[-1][1] == window and (
+            week_order.index(dow) == week_order.index(groups[-1][0][-1]) + 1
+        ):
+            groups[-1][0].append(dow)
+        else:
+            groups.append(([dow], window))
+
+    parts: List[str] = []
+    for days, (ot, ct) in groups:
+        if len(days) == 1:
+            label = _DAY_NAMES_SHORT[days[0]]
+        else:
+            label = f"{_DAY_NAMES_SHORT[days[0]]} a {_DAY_NAMES_SHORT[days[-1]]}"
+        parts.append(f"{label}: {_format_time_12h(ot)} - {_format_time_12h(ct)}")
+    return ". ".join(parts)
+
+
+def _load_hours_from_availability(business_id: str) -> Optional[str]:
+    """
+    Read active rows from ``business_availability`` for this business
+    and format them. Returns None on DB failure or when no rows exist.
+    """
+    if not business_id:
+        return None
+    try:
+        from ..database.models import BusinessAvailability, get_db_session
+        import uuid as _uuid
+        db = get_db_session()
+        try:
+            rows = (
+                db.query(BusinessAvailability)
+                .filter(
+                    BusinessAvailability.business_id == _uuid.UUID(str(business_id)),
+                    BusinessAvailability.is_active == True,
+                )
+                .order_by(BusinessAvailability.day_of_week)
+                .all()
+            )
+            dicts = [r.to_dict() for r in rows]
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("[BUSINESS_INFO] hours load from availability failed: %s", exc)
+        return None
+    return _condense_hours_rows(dicts) or None
+
+
+def _get_hours_for_business(business_id: str) -> Optional[str]:
+    """Cached wrapper over the availability loader."""
+    if not business_id:
+        return None
+    key = str(business_id)
+    now = time.time()
+    with _hours_lock:
+        cached = _hours_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+    value = _load_hours_from_availability(key)
+    with _hours_lock:
+        _hours_cache[key] = (now + _HOURS_TTL_SECONDS, value)
+    return value
+
+
+def invalidate_hours_cache(business_id: Optional[str] = None) -> None:
+    """Drop the cached hours string. ``None`` clears every entry."""
+    with _hours_lock:
+        if business_id is None:
+            _hours_cache.clear()
+            return
+        _hours_cache.pop(str(business_id), None)
 
 
 # Canonical field keys. Keep in sync with the customer service agent
@@ -134,6 +287,10 @@ def get_business_info(
 
     Callers should produce a safe fallback reply ("no tengo ese dato exacto,
     te pongo en contacto con el equipo") when None is returned.
+
+    For ``hours`` the structured ``business_availability`` table is the
+    primary source; ``business.settings.hours_text`` is consulted only
+    as a fallback when no availability rows exist.
     """
     if not business_context:
         return None
@@ -145,6 +302,15 @@ def get_business_info(
 
     biz = business_context.get("business") or {}
     settings = biz.get("settings") or {}
+
+    # Hours: read from business_availability first; settings.hours_text
+    # is only the fallback for businesses that haven't migrated.
+    if field_key == FIELD_HOURS:
+        bid = (business_context or {}).get("business_id")
+        if bid:
+            availability_text = _get_hours_for_business(str(bid))
+            if availability_text:
+                return availability_text
 
     value: Any = None
     for key in spec["keys"]:

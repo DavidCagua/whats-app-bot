@@ -381,10 +381,18 @@ class TestCancelOrderRequiresExplicitKeyword:
         ],
     )
     def test_polite_close_with_recent_cancellable_order_is_refused(self, msg):
+        """
+        Safety property: regardless of which guard fires (the cancel-
+        keyword downgrade or the despedida-post-pedido handoff added
+        2026-05-05), ``cancel_order`` MUST NOT be called and the
+        result must NOT be ORDER_CANCELLED.
+        """
         agent = CustomerServiceAgent()
         llm = MagicMock()
-        # Planner hallucinates CANCEL_ORDER; response LLM still runs
-        # because the new guard downgrades to CHAT.
+        # Planner hallucinates CANCEL_ORDER; either the cancel-keyword
+        # guard downgrades to CHAT (and the response LLM runs) or the
+        # despedida safety net hands off to order (no second LLM call).
+        # Provide two stubs so both paths work.
         llm.invoke.side_effect = [
             _llm_response('{"intent": "CANCEL_ORDER", "params": {}}'),
             _llm_response("¡Con gusto!"),
@@ -410,12 +418,19 @@ class TestCancelOrderRequiresExplicitKeyword:
                 conversation_history=[],
                 turn_ctx=ctx,
             )
-        # Hard guard fired: cancel_order MUST NOT have been called.
+        # Hard property: cancel_order MUST NOT have been called.
         cancel_mock.assert_not_called()
-        # Intent was downgraded to CHAT.
-        ctx_out = output["state_update"]["customer_service_context"]
-        assert ctx_out["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
-        assert ctx_out["last_result_kind"] != csf.RESULT_KIND_ORDER_CANCELLED
+        # Either the despedida safety net handed off to order (preferred —
+        # cleaner UX), or the cancel-keyword guard downgraded to CHAT.
+        # Both prevent the cancellation.
+        handoff = output.get("handoff") or {}
+        if handoff:
+            assert handoff.get("to") == "order"
+            assert handoff.get("context", {}).get("reason") == "despedida_post_pedido_misroute"
+        else:
+            ctx_out = output["state_update"]["customer_service_context"]
+            assert ctx_out["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
+            assert ctx_out["last_result_kind"] != csf.RESULT_KIND_ORDER_CANCELLED
 
     def test_explicit_cancel_with_cancellable_order_proceeds(self):
         """Sanity: legitimate cancellations still go through."""
@@ -492,3 +507,150 @@ class TestPlannerHoursFieldReframedAsAvailability:
             assert example.lower() in lower, f"hours rule missing example: {example!r}"
         # Must signal the LLM to generalize, not match keywords.
         assert "ilustrativas" in lower or "ilustrativos" in lower
+
+
+class TestPostOrderCloseHelper:
+    """Unit tests for _is_post_order_close — must NOT match questions."""
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "Gracias",
+            "gracias",
+            "muchas gracias",
+            "si gracias",
+            "ok gracias",
+            "listo gracias",
+            "perfecto gracias",
+            "vale gracias",
+            "bueno gracias",
+            "dale gracias",
+            "mil gracias",
+            "perfecto",
+            "listo",
+            "ok",
+            "okay",
+            "dale",
+            "genial",
+            "con gusto",
+            "todo bien",
+            "así está bien",
+            "chao",
+            "bye",
+            "que disfruten",
+        ],
+    )
+    def test_polite_closes_match(self, msg):
+        from app.agents.customer_service_agent import _is_post_order_close
+        assert _is_post_order_close(msg) is True, msg
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "",
+            None,
+            "Hay atención?",
+            "Una bimota",
+            "quiero pedir algo",
+            "cuánto vale el pegoretti",
+            "qué tienen para tomar",
+            "no quiero el pedido",
+            "vale",                # ambiguous (price)
+            "bueno",               # ambiguous (filler)
+            "ok pero cuánto?",     # interrogative
+            "cuánto cuesta?",
+            "que tienen",
+            "ok dame otra",        # too long + new request
+        ],
+    )
+    def test_non_closes_do_not_match(self, msg):
+        from app.agents.customer_service_agent import _is_post_order_close
+        assert _is_post_order_close(msg) is False, msg
+
+
+class TestDespedidaPostPedidoSafetyNet:
+    """
+    Regression: 2026-05-05 (Biela / 3177000722) — "Gracias" after
+    PLACE_ORDER misrouted to CS, fell into cs_chat_fallback. The
+    safety net hands off to the order agent so the status-aware
+    DESPEDIDA template fires.
+    """
+
+    def _ctx_post_order(self, status="confirmed"):
+        from app.orchestration.turn_context import TurnContext
+        return TurnContext(
+            order_state="GREETING",
+            has_active_cart=False,
+            latest_order_status=status,
+            latest_order_id="abc-123",
+        )
+
+    @pytest.mark.parametrize(
+        "msg",
+        ["Gracias", "si gracias", "perfecto", "ok gracias", "listo gracias", "dale"],
+    )
+    def test_post_order_close_is_handed_off_to_order(self, msg):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CUSTOMER_SERVICE_CHAT", "params": {}}'),
+        ]
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body=msg,
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                turn_ctx=self._ctx_post_order(),
+            )
+        # Handoff payload populated; order agent will run next.
+        assert output["handoff"]["to"] == "order"
+        assert output["handoff"]["context"]["reason"] == "despedida_post_pedido_misroute"
+        assert output["message"] == ""
+
+    def test_no_handoff_when_no_recent_order(self):
+        # Without latest_order_status, the safety net must NOT fire —
+        # falls through to the regular CS chat fallback.
+        from app.orchestration.turn_context import TurnContext
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CUSTOMER_SERVICE_CHAT", "params": {}}'),
+            _llm_response("Hola, ¿en qué te ayudo?"),
+        ]
+        ctx = TurnContext(order_state="GREETING")
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body="gracias",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                turn_ctx=ctx,
+            )
+        assert output.get("handoff") in (None, {})
+        assert "Hola" in output["message"]
+
+    def test_no_handoff_when_msg_is_a_question(self):
+        # Even with a recent order, a question must NOT trigger the
+        # despedida safety net — the user is asking, not closing.
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CUSTOMER_SERVICE_CHAT", "params": {}}'),
+            _llm_response("Información, claro."),
+        ]
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body="cuánto cuesta el domicilio?",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                turn_ctx=self._ctx_post_order(),
+            )
+        assert output.get("handoff") in (None, {})

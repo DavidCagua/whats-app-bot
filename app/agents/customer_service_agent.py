@@ -98,6 +98,85 @@ _CANCEL_KEYWORDS = (
 )
 
 
+_POST_ORDER_CLOSE_LONE_TOKENS = (
+    # Lone tokens that mean "polite close" with very low ambiguity.
+    # Conservative: words like "vale" (also "cuánto vale") and "bueno"
+    # (often a question filler) are NOT included as lone tokens — they
+    # need to appear with another close word ("vale gracias",
+    # "bueno gracias"). The multi-word phrase list below covers those.
+    "gracias", "graciassss", "graciasss",
+    "ok", "okay", "listo", "perfecto", "dale", "genial",
+    "chao", "bye",
+)
+_POST_ORDER_CLOSE_PHRASES = (
+    "muchas gracias", "muchisimas gracias", "muchísimas gracias",
+    "mil gracias", "gracias bro", "gracias amigo",
+    "si gracias", "ok gracias", "listo gracias", "vale gracias",
+    "perfecto gracias", "bueno gracias", "dale gracias", "ya gracias",
+    "todo bien", "ya esta", "esta bien", "asi esta bien",
+    "con gusto",
+    "hasta luego", "nos vemos",
+    "que disfrute", "que disfruten", "que estes bien",
+)
+# Interrogatives that block the post-order close detection — even if
+# the message contains a polite token, we MUST NOT treat it as a close
+# when the user is asking something. "ok pero cuánto?" is not a close.
+_BLOCKING_INTERROGATIVES = frozenset({
+    "cuanto", "cuantos", "cuanta", "cuantas",
+    "que", "qué", "como", "cómo", "donde", "dónde",
+    "cuando", "cuándo", "cual", "cuál", "cuales",
+    "quien", "quién", "quienes",
+    "porque", "por", "porqué",
+    "vale", "cuesta", "cuestan", "valen", "precio",
+})
+
+
+def _is_post_order_close(message: Optional[str]) -> bool:
+    """
+    Return True iff ``message`` reads as a polite close / thanks /
+    affirmation that fits the post-PLACE_ORDER scenario.
+
+    Caller MUST gate the call on ``turn_ctx.latest_order_status`` —
+    otherwise this fires on plain greetings.
+    """
+    if not message:
+        return False
+    nfkd = unicodedata.normalize("NFD", message.lower())
+    cleaned = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+    cleaned = re.sub(r"[^\w\s!]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return False
+    tokens = cleaned.split()
+    # Cap at 5 tokens — post-order closes are short by definition.
+    if len(tokens) > 5:
+        return False
+    token_set = set(tokens)
+    # Multi-word phrases (substring match on the normalized message).
+    # Checked BEFORE the interrogative blocker so "vale gracias" /
+    # "bueno gracias" still count as closes — the gratitude word
+    # disambiguates them from a price question.
+    for phrase in _POST_ORDER_CLOSE_PHRASES:
+        nfkd2 = unicodedata.normalize("NFD", phrase.lower())
+        norm = "".join(c for c in nfkd2 if unicodedata.category(c) != "Mn")
+        if norm in cleaned:
+            return True
+    # Hard block: any interrogative-like word means the user is asking,
+    # not closing. "ok pero cuánto?" / "vale" alone (price) → False.
+    if token_set & _BLOCKING_INTERROGATIVES:
+        return False
+    # Lone tokens (word-level match, very conservative list). Only
+    # applied when the message is essentially that token alone — a
+    # 3+ token message like "ok dame otra" must NOT match because the
+    # extra tokens carry a different intent (a new order, a question,
+    # etc.).
+    if len(tokens) <= 2:
+        for tok in _POST_ORDER_CLOSE_LONE_TOKENS:
+            if tok in token_set:
+                return True
+    return False
+
+
 def _has_explicit_cancel_keyword(message: Optional[str]) -> bool:
     """
     Return True iff the user message contains an explicit cancel verb
@@ -730,6 +809,36 @@ class CustomerServiceAgent(BaseAgent):
                     }
             except Exception as exc:
                 logging.warning("[CS_AGENT] price-of-product safety net failed: %s", exc)
+
+        # Safety net: post-PLACE_ORDER despedida ("gracias", "si gracias",
+        # "perfecto", etc.). The router should already route these to the
+        # order agent (DESPEDIDA POST-PEDIDO rule) so the order agent's
+        # status-aware response template runs. This is the belt-and-
+        # suspenders layer for when the router still lands the turn on
+        # CS — production observation 2026-05-05 (Biela / 3177000722)
+        # had "Gracias" right after PLACE_ORDER misrouted to CS chat.
+        if intent == INTENT_CUSTOMER_SERVICE_CHAT:
+            try:
+                latest_status = getattr(turn_ctx, "latest_order_status", None) if turn_ctx is not None else None
+                if latest_status and _is_post_order_close(message_body):
+                    logging.warning(
+                        "[CS_AGENT] CHAT fallback overridden: despedida post-pedido "
+                        "(latest_status=%s) → handoff to order",
+                        latest_status,
+                    )
+                    tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+                    return {
+                        "agent_type": self.agent_type,
+                        "message": "",
+                        "state_update": {},
+                        "handoff": {
+                            "to": "order",
+                            "segment": message_body,
+                            "context": {"reason": "despedida_post_pedido_misroute"},
+                        },
+                    }
+            except Exception as exc:
+                logging.warning("[CS_AGENT] despedida-post-pedido safety net failed: %s", exc)
 
         # Safety net 2: stuck-article typos like "unabimota" / "elpegoretti".
         # If the message contains a stuck-article token whose suffix is in

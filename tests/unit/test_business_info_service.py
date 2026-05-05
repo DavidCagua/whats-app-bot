@@ -1,12 +1,25 @@
 """Unit tests for app/services/business_info_service.py."""
 
+from datetime import time as _time
+from unittest.mock import patch
+
 import pytest
 
 from app.services import business_info_service as bis
 
 
-def _ctx(settings: dict) -> dict:
-    return {"business": {"name": "Biela", "settings": settings}}
+def _ctx(settings: dict, business_id: str = "") -> dict:
+    out = {"business": {"name": "Biela", "settings": settings}}
+    if business_id:
+        out["business_id"] = business_id
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _clear_hours_cache():
+    bis.invalidate_hours_cache()
+    yield
+    bis.invalidate_hours_cache()
 
 
 class TestGetBusinessInfo:
@@ -138,3 +151,110 @@ class TestGetBusinessInfo:
             bis.FIELD_DELIVERY_FEE, bis.FIELD_DELIVERY_TIME,
             bis.FIELD_MENU_URL, bis.FIELD_PAYMENT_METHODS,
         }
+
+
+class TestHoursFromBusinessAvailability:
+    """
+    Hours are now sourced from the structured ``business_availability``
+    table; ``business.settings.hours_text`` is the fallback for
+    businesses that haven't migrated.
+    """
+
+    def _row(self, dow, open_h, open_m, close_h, close_m, active=True):
+        return {
+            "day_of_week": dow,
+            "open_time": _time(open_h, open_m),
+            "close_time": _time(close_h, close_m),
+            "is_active": active,
+        }
+
+    def test_hours_renders_mon_to_fri_range_with_distinct_saturday(self):
+        rows = [self._row(d, 17, 30, 22, 0) for d in (1, 2, 3, 4, 5)]
+        rows.append(self._row(6, 18, 0, 23, 0))
+        with patch(
+            "app.services.business_info_service._load_hours_from_availability",
+            return_value=bis._condense_hours_rows(rows),
+        ):
+            result = bis.get_business_info(
+                _ctx({}, business_id="biz-1"), "hours",
+            )
+        assert "Lun a Vie" in result
+        assert "5:30 PM" in result
+        assert "10:00 PM" in result
+        assert "Sáb" in result
+        assert "11:00 PM" in result
+
+    def test_hours_falls_back_to_settings_when_no_availability_rows(self):
+        # Empty availability → fall back to the legacy hours_text.
+        with patch(
+            "app.services.business_info_service._load_hours_from_availability",
+            return_value=None,
+        ):
+            result = bis.get_business_info(
+                _ctx({"hours_text": "Lun-Vie 5PM a 10PM"}, business_id="biz-1"),
+                "hours",
+            )
+        assert result == "Lun-Vie 5PM a 10PM"
+
+    def test_hours_settings_override_used_when_business_id_missing(self):
+        # No business_id in context → cannot consult availability;
+        # legacy settings.hours_text path runs.
+        result = bis.get_business_info(
+            _ctx({"hours_text": "10am-10pm"}), "hours",
+        )
+        assert result == "10am-10pm"
+
+    def test_availability_takes_precedence_over_settings(self):
+        with patch(
+            "app.services.business_info_service._load_hours_from_availability",
+            return_value="Lun a Vie: 5:30 PM - 10:00 PM",
+        ):
+            result = bis.get_business_info(
+                _ctx({"hours_text": "STALE TEXT"}, business_id="biz-1"),
+                "hours",
+            )
+        assert "STALE" not in result
+        assert "Lun a Vie" in result
+
+
+class TestCondenseHoursRows:
+    """Direct unit tests for the row-formatter."""
+
+    def test_groups_consecutive_same_window_days(self):
+        rows = [
+            {"day_of_week": 1, "open_time": _time(10, 0), "close_time": _time(20, 0), "is_active": True},
+            {"day_of_week": 2, "open_time": _time(10, 0), "close_time": _time(20, 0), "is_active": True},
+            {"day_of_week": 3, "open_time": _time(10, 0), "close_time": _time(20, 0), "is_active": True},
+        ]
+        out = bis._condense_hours_rows(rows)
+        assert out == "Lun a Mié: 10:00 AM - 8:00 PM"
+
+    def test_skips_inactive_rows(self):
+        rows = [
+            {"day_of_week": 1, "open_time": _time(10, 0), "close_time": _time(20, 0), "is_active": False},
+            {"day_of_week": 2, "open_time": _time(10, 0), "close_time": _time(20, 0), "is_active": True},
+        ]
+        out = bis._condense_hours_rows(rows)
+        assert out == "Mar: 10:00 AM - 8:00 PM"
+
+    def test_empty_returns_empty_string(self):
+        assert bis._condense_hours_rows([]) == ""
+
+    def test_widest_window_per_day_when_multiple_rows(self):
+        # Two staff rows for Monday with different windows → widest wins.
+        rows = [
+            {"day_of_week": 1, "open_time": _time(10, 0), "close_time": _time(18, 0), "is_active": True},
+            {"day_of_week": 1, "open_time": _time(8, 0), "close_time": _time(20, 0), "is_active": True},
+        ]
+        out = bis._condense_hours_rows(rows)
+        assert "8:00 AM" in out
+        assert "8:00 PM" in out
+
+    def test_sunday_renders_separately_when_distinct(self):
+        rows = [
+            {"day_of_week": 1, "open_time": _time(17, 30), "close_time": _time(22, 0), "is_active": True},
+            {"day_of_week": 0, "open_time": _time(11, 0), "close_time": _time(15, 0), "is_active": True},
+        ]
+        out = bis._condense_hours_rows(rows)
+        assert "Lun" in out
+        assert "Dom" in out

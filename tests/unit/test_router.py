@@ -279,6 +279,34 @@ class TestRouterPromptHasOrderingOpenerRule:
         ):
             assert example in prompt, f"Router prompt missing example: {example!r}"
 
+    def test_prompt_has_despedida_post_pedido_rule(self):
+        """
+        Regression: 2026-05-05 (Biela / 3177000722) — user said "Gracias"
+        right after PLACE_ORDER. Bot replied with a generic CS chat
+        fallback ("¡Hola! ¿En qué puedo ayudarte?..."). The order
+        agent's DESPEDIDA rule never fired because the router put the
+        turn on the customer_service path.
+
+        After the post-PLACE_ORDER router fix, the router must have a
+        DESPEDIDA POST-PEDIDO rule that routes brief polite-close
+        replies to ``order`` whenever ``Último pedido (estado)`` is
+        present.
+        """
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        lower = prompt.lower()
+        assert "despedida post-pedido" in lower
+        # Must reference the latest_order_status signal.
+        assert "último pedido (estado)" in lower
+        # Concrete examples the LLM can pattern-match.
+        for ex in ("gracias", "si gracias", "perfecto"):
+            assert ex in lower, f"despedida rule missing example: {ex!r}"
+        # Must require GREETING + empty cart antecedent (so it doesn't
+        # over-apply mid-flow).
+        assert "estado del pedido" in lower
+        assert "carrito actual: vacío" in lower or "carrito vacío" in lower or "carrito actual: vac" in lower
+        # Must signal it's illustrative, not a closed list.
+        assert "ilustrativas" in lower
+
     def test_prompt_has_continuation_of_order_flow_rule(self):
         """
         Regression: 2026-05-05 (Biela / 3147139789) — user wrote "porfsvor"
