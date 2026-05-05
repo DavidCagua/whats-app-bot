@@ -13,6 +13,7 @@ export type ModuleKey =
   | "overview"
   | "inbox"
   | "bookings"
+  | "availability"
   | "orders"
   | "products"
   | "promotions"
@@ -47,6 +48,12 @@ export const MODULES: readonly Module[] = [
     hrefSegment: "/bookings",
     required: false,
     description: "Citas y reservas con calendario.",
+  },
+  {
+    key: "availability",
+    label: "Disponibilidad",
+    hrefSegment: "/availability",
+    required: true,
   },
   {
     key: "orders",

@@ -2,11 +2,7 @@ import { auth } from "@/lib/auth"
 import { redirect } from "next/navigation"
 import { canAccessBusiness } from "@/lib/permissions"
 import { redirectIfModuleDisabled } from "@/lib/modules"
-import {
-  getBookingsAccess,
-  getBookings,
-  getAvailabilityRules,
-} from "@/lib/bookings-queries"
+import { getBookingsAccess, getBookings } from "@/lib/bookings-queries"
 import { prisma } from "@/lib/prisma"
 import { BookingsView } from "../_components/bookings/bookings-view"
 
@@ -58,7 +54,7 @@ export default async function BusinessBookingsPage({
   const dateFrom = paramsQ.dateFrom ? new Date(paramsQ.dateFrom) : weekStart
   const dateTo = paramsQ.dateTo ? new Date(paramsQ.dateTo) : weekEnd
 
-  const [bookings, availabilityRules, initialStaff, businessRow, initialServices] = await Promise.all([
+  const [bookings, initialStaff, businessRow, initialServices] = await Promise.all([
     getBookings({
       businessIds: access.businessIds,
       businessFilter: businessId,
@@ -66,7 +62,6 @@ export default async function BusinessBookingsPage({
       dateTo,
       limit: 500,
     }),
-    getAvailabilityRules(businessId),
     prisma.staff_members.findMany({
       where: { business_id: businessId, is_active: true },
       select: { id: true, name: true, role: true },
@@ -103,7 +98,6 @@ export default async function BusinessBookingsPage({
       <BookingsView
         bookings={bookings}
         access={singleBusinessAccess}
-        availabilityRules={availabilityRules}
         fixedBusinessId={businessId}
         initialFilters={{
           business: businessId,

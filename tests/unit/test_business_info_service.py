@@ -48,17 +48,17 @@ class TestGetBusinessInfo:
         """
         Regression: CS used to return None ("no configurado") when
         settings.delivery_fee was absent, while the order side silently
-        applied the hardcoded $5.000 default. The two surfaces disagreed
+        applied the hardcoded default. The two surfaces disagreed
         about the same number. Now the lookup uses DELIVERY_FEE_DEFAULT
         as a fallback so receipts and CS info answers stay in sync.
         """
         result = bis.get_business_info(_ctx({}), "delivery_fee")
-        assert result == "$5.000"
+        assert result == "$7.000"
 
     def test_delivery_fee_falls_back_when_explicitly_none(self):
         """None / "" are treated as absent — same fallback applies."""
-        assert bis.get_business_info(_ctx({"delivery_fee": None}), "delivery_fee") == "$5.000"
-        assert bis.get_business_info(_ctx({"delivery_fee": ""}), "delivery_fee") == "$5.000"
+        assert bis.get_business_info(_ctx({"delivery_fee": None}), "delivery_fee") == "$7.000"
+        assert bis.get_business_info(_ctx({"delivery_fee": ""}), "delivery_fee") == "$7.000"
 
     def test_delivery_time_reads_from_settings_when_set(self):
         result = bis.get_business_info(
