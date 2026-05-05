@@ -431,3 +431,189 @@ class TestRouterDeterministicPriceOfProduct:
             m.assert_not_called()
         assert result.direct_reply is not None
         assert result.segments is None
+
+
+class TestRouterStuckArticleSplitter:
+    """
+    Regression: production observation 2026-05-05 (Biela / 3177000722) —
+    "unabimota" (no space) was misrouted to customer_service →
+    cs_chat_fallback. The LLM router saw a single unknown token and
+    couldn't recover. The splitter rewrites stuck-article tokens
+    against the catalog lookup-set and forces DOMAIN_ORDER.
+    """
+
+    @pytest.fixture
+    def biela_lookup_set(self):
+        return frozenset({
+            "bimota", "barracuda", "picada", "honey", "burger",
+            "montesa", "pegoretti", "ramona", "americana",
+        })
+
+    @pytest.mark.parametrize(
+        "msg,expected_segment",
+        [
+            ("unabimota", "una bimota"),
+            ("unaBimota", "una Bimota"),
+            ("UNABIMOTA", "UNA BIMOTA"),
+            ("elpegoretti", "el pegoretti"),
+            ("lapicada", "la picada"),
+            ("unabarracuda", "una barracuda"),
+            ("unaramona", "una ramona"),
+        ],
+    )
+    def test_stuck_article_token_routes_to_order_with_rewrite(
+        self, msg, expected_segment, biela_lookup_set,
+    ):
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            result = router.route(msg, BIELA_CONTEXT, "David")
+            m.assert_not_called()
+        # The LLM must NOT have been called.
+        assert result.segments is not None
+        assert len(result.segments) == 1
+        domain, segment_text = result.segments[0]
+        assert domain == router.DOMAIN_ORDER
+        # Casing of the original article is preserved.
+        assert expected_segment.lower() in segment_text.lower()
+        assert " " in segment_text  # split actually inserted a space
+
+    def test_stuck_article_with_punctuation_preserved(self, biela_lookup_set):
+        # Trailing punctuation ("!", "?") must survive the rewrite.
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            result = router.route("unabimota!", BIELA_CONTEXT, "David")
+            m.assert_not_called()
+        assert result.segments[0][0] == router.DOMAIN_ORDER
+        assert "!" in result.segments[0][1]
+
+    def test_short_suffix_does_not_split(self, biela_lookup_set):
+        # "elote" must NOT split into "el ote" (suffix too short, and
+        # "ote" isn't in the lookup anyway). Falls through to the LLM.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("elote", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+    def test_no_stuck_article_falls_through(self, biela_lookup_set):
+        # Plain message without a stuck-article token must NOT be
+        # rewritten — LLM router runs as normal.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "order", "text": "una bimota"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("una bimota", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+    def test_stuck_article_with_unknown_suffix_falls_through(self, biela_lookup_set):
+        # "unaXXXXX" where the suffix isn't in the catalog — splitter
+        # must NOT fire, LLM runs normally.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("unaxxxxx", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+    def test_price_of_product_takes_priority_over_splitter(self, biela_lookup_set):
+        # If both checks would fire, the existing price-of-product
+        # check runs first — splitter is a separate hop. Verify the
+        # message goes to order either way.
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            result = router.route("cuánto vale el pegoretti?", BIELA_CONTEXT, "David")
+            m.assert_not_called()
+        assert result.segments[0][0] == router.DOMAIN_ORDER
+
+    def test_greeting_still_takes_priority_over_splitter(self, biela_lookup_set):
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            result = router.route("hola", BIELA_CONTEXT, "David")
+            m.assert_not_called()
+        assert result.direct_reply is not None
+        assert result.segments is None
+
+    def test_empty_lookup_falls_through(self):
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("unabimota", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+    def test_lookup_failure_falls_through(self):
+        # If the lookup-set helper raises, the splitter must not crash —
+        # router falls through to the LLM classifier.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            side_effect=RuntimeError("boom"),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("unabimota", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+
+
+class TestExpandStuckArticlesUnit:
+    """Unit tests for the pure rewrite helper."""
+
+    def test_basic_split(self):
+        out = router._expand_stuck_articles("unabimota", frozenset({"bimota"}))
+        assert out == "una bimota"
+
+    def test_preserves_casing_of_article(self):
+        out = router._expand_stuck_articles("UnaBimota", frozenset({"bimota"}))
+        assert out.lower() == "una bimota"
+        # The "U" prefix stays uppercase.
+        assert out[0] == "U"
+
+    def test_no_match_returns_original(self):
+        msg = "una bimota"
+        assert router._expand_stuck_articles(msg, frozenset({"bimota"})) is msg
+
+    def test_empty_lookup_returns_original(self):
+        msg = "unabimota"
+        assert router._expand_stuck_articles(msg, frozenset()) is msg
+
+    def test_preserves_trailing_punctuation(self):
+        out = router._expand_stuck_articles("unabimota?", frozenset({"bimota"}))
+        assert "?" in out
+        assert "una" in out.lower()
+        assert "bimota" in out.lower()
+
+    def test_only_one_token_in_multi_word_message(self):
+        # Only the stuck token gets rewritten; the rest stays intact.
+        out = router._expand_stuck_articles(
+            "hola unabimota gracias",
+            frozenset({"bimota"}),
+        )
+        assert out.lower().count("bimota") == 1
+        assert "hola" in out
+        assert "gracias" in out
+
+    def test_short_suffix_not_split(self):
+        # "elote" — suffix "ote" is too short, must not split.
+        out = router._expand_stuck_articles("elote", frozenset({"ote"}))
+        assert out == "elote"

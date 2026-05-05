@@ -650,6 +650,42 @@ class CustomerServiceAgent(BaseAgent):
             except Exception as exc:
                 logging.warning("[CS_AGENT] price-of-product safety net failed: %s", exc)
 
+        # Safety net 2: stuck-article typos like "unabimota" / "elpegoretti".
+        # If the message contains a stuck-article token whose suffix is in
+        # the catalog lookup-set, hand off to the order agent with the
+        # rewritten message. Mirrors the router-level splitter — see
+        # app/orchestration/router.py::_expand_stuck_articles. Production
+        # observation 2026-05-05 (Biela / 3177000722): "unabimota" was
+        # misrouted to customer_service.
+        if intent == INTENT_CUSTOMER_SERVICE_CHAT:
+            try:
+                from ..orchestration.router import _expand_stuck_articles
+                from ..services import catalog_cache as _catalog_cache
+                _bid = str((business_context or {}).get("business_id") or "")
+                if _bid:
+                    _lookup = _catalog_cache.get_router_lookup_set(_bid)
+                    if _lookup:
+                        _expanded = _expand_stuck_articles(message_body, _lookup)
+                        if _expanded != message_body:
+                            logging.warning(
+                                "[CS_AGENT] CHAT fallback overridden: stuck-article "
+                                "typo → handoff to order: %r → %r",
+                                message_body, _expanded,
+                            )
+                            tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+                            return {
+                                "agent_type": self.agent_type,
+                                "message": "",
+                                "state_update": {},
+                                "handoff": {
+                                    "to": "order",
+                                    "segment": _expanded,
+                                    "context": {"reason": "stuck_article_misroute"},
+                                },
+                            }
+            except Exception as exc:
+                logging.warning("[CS_AGENT] stuck-article safety net failed: %s", exc)
+
         # 2) Executor
         exec_result = execute_customer_service_intent(
             wa_id=wa_id,

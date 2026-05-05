@@ -361,6 +361,26 @@ _PRICE_INTERROGATIVES: frozenset = frozenset({
 })
 
 
+# Spanish indefinite/definite articles that, when a user types fast on
+# WhatsApp, often run together with the noun: "una bimota" → "unabimota",
+# "el pegoretti" → "elpegoretti". The router treats the resulting blob
+# as an unknown noun and routes to customer_service. The splitter below
+# expands these stuck-article tokens against the catalog lookup-set so
+# downstream classification (or the deterministic price helper) can
+# still see the product token.
+_STUCK_ARTICLE_PREFIXES: tuple = (
+    "una", "uno", "unos", "unas",
+    "los", "las",
+    "un", "el", "la",
+)
+# Order matters: longer prefixes first so "unas" wins over "un".
+# Frozen tuple sorted descending by length to make the matcher
+# deterministic.
+_STUCK_ARTICLE_PREFIXES = tuple(
+    sorted(set(_STUCK_ARTICLE_PREFIXES), key=lambda p: (-len(p), p))
+)
+
+
 def _strip_accents_lower(s: str) -> str:
     nfkd = unicodedata.normalize("NFD", (s or "").lower())
     return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
@@ -374,6 +394,79 @@ def _tokenize_for_router(message: str) -> List[str]:
 
 def _has_price_interrogative(tokens: List[str]) -> bool:
     return any(t in _PRICE_INTERROGATIVES for t in tokens)
+
+
+def _split_stuck_article(token: str, lookup: frozenset) -> Optional[str]:
+    """
+    If ``token`` looks like a Spanish article concatenated with a
+    catalog token (e.g. ``"unabimota"`` → ``"bimota"`` when ``"bimota"``
+    is in ``lookup``), return the catalog token. Otherwise return None.
+
+    Rules:
+      - Token must start with one of _STUCK_ARTICLE_PREFIXES.
+      - Stripped suffix must be in ``lookup``.
+      - Stripped suffix must be at least 4 chars (avoids stripping
+        ``"el"`` from ``"elote"`` to expose ``"ote"``).
+    """
+    if not token or len(token) < 6:
+        return None
+    if not lookup:
+        return None
+    for prefix in _STUCK_ARTICLE_PREFIXES:
+        if not token.startswith(prefix):
+            continue
+        suffix = token[len(prefix):]
+        if len(suffix) < 4:
+            continue
+        if suffix in lookup:
+            return suffix
+    return None
+
+
+def _expand_stuck_articles(message: str, lookup: frozenset) -> str:
+    """
+    Return ``message`` with every stuck-article token replaced by
+    ``"<article> <catalog_token>"``. Pure rewrite — does not
+    re-classify. If no token is rewritten, returns the original
+    string unchanged so callers can detect a no-op.
+    """
+    if not message or not lookup:
+        return message
+    rewritten = []
+    changed = False
+    # Tokenize while preserving non-word separators so we don't lose
+    # punctuation like "?" / "!".
+    parts = re.split(r"(\s+)", message)
+    for part in parts:
+        if not part or part.isspace():
+            rewritten.append(part)
+            continue
+        # Strip surrounding punctuation, normalize for matching, but
+        # preserve original casing/punctuation in the output.
+        stripped = re.sub(r"[^\w]", "", part)
+        if not stripped:
+            rewritten.append(part)
+            continue
+        norm = _strip_accents_lower(stripped)
+        match = _split_stuck_article(norm, lookup)
+        if match is None:
+            rewritten.append(part)
+            continue
+        # Found a stuck-article token. Insert a space before the
+        # matched suffix in the original text, preserving the original
+        # leading article casing.
+        prefix_len = len(stripped) - len(match)
+        # Locate the stripped substring inside the original part to
+        # preserve leading punctuation (e.g. ``"(unabimota)"``).
+        idx = part.lower().find(stripped.lower())
+        if idx < 0:
+            rewritten.append(part)
+            continue
+        head = part[: idx + prefix_len]
+        tail = part[idx + prefix_len:]
+        rewritten.append(f"{head} {tail}")
+        changed = True
+    return "".join(rewritten) if changed else message
 
 
 def _deterministic_price_of_product(
@@ -444,7 +537,29 @@ def route(
         logger.info("[ROUTER] deterministic price-of-product hit → order")
         return RouterResult(segments=[(DOMAIN_ORDER, message_body)])
 
-    # 3. LLM classification
+    # 3. Stuck-article splitter — "unabimota" / "elpegoretti" /
+    # "lapicada" with a catalog match → force order with the
+    # rewritten message. Production observation 2026-05-05 (Biela /
+    # 3177000722): "unabimota" was misrouted to customer_service →
+    # cs_chat_fallback because the LLM saw a single unknown token
+    # with no article cue.
+    business_id = str((business_context or {}).get("business_id") or "")
+    if business_id:
+        try:
+            lookup = catalog_cache.get_router_lookup_set(business_id)
+        except Exception as exc:
+            logger.warning("[ROUTER] router_lookup_set failed: %s", exc)
+            lookup = frozenset()
+        if lookup:
+            expanded = _expand_stuck_articles(message_body, lookup)
+            if expanded != message_body:
+                logger.info(
+                    "[ROUTER] stuck-article splitter rewrote message → order: %r → %r",
+                    message_body, expanded,
+                )
+                return RouterResult(segments=[(DOMAIN_ORDER, expanded)])
+
+    # 4. LLM classification
     segments = _classify_with_llm(message_body, business_context, ctx=ctx)
     if not segments:
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")
