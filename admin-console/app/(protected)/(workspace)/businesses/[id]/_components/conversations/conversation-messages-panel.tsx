@@ -156,6 +156,10 @@ export function ConversationMessagesPanel({
   // Counter of new server messages received while the user is scrolled up.
   // Drives the "↓ N nuevos mensajes" pill that lets them jump to the bottom.
   const [unreadWhileScrolledUp, setUnreadWhileScrolledUp] = useState(0)
+  // True whenever the user has scrolled away from the bottom. Drives the
+  // round chevron-down button that lets them jump back to the latest message
+  // (mirrors WhatsApp's behaviour).
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
 
   const [localMessages, setLocalMessages] = useState(thread.messages)
   const [isRecording, setIsRecording] = useState(false)
@@ -268,6 +272,7 @@ export function ConversationMessagesPanel({
       prevThreadIdRef.current = threadId
       forceScrollToBottomRef.current = true
       isAtBottomRef.current = true
+      setShowJumpToLatest(false)
       // Reset unread bookkeeping for the new thread.
       setUnreadWhileScrolledUp(0)
       lastSeenMaxIdRef.current = thread.messages.reduce(
@@ -313,6 +318,7 @@ export function ConversationMessagesPanel({
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
       const atBottom = distanceFromBottom < SCROLL_BOTTOM_PINNED_PX
       isAtBottomRef.current = atBottom
+      setShowJumpToLatest(!atBottom)
 
       // Scrolled back to the bottom — implicitly acknowledge any unread
       // messages that arrived while the user was up in history.
@@ -339,6 +345,7 @@ export function ConversationMessagesPanel({
       viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" })
     })
     isAtBottomRef.current = true
+    setShowJumpToLatest(false)
     setUnreadWhileScrolledUp(0)
   }, [getViewport])
 
@@ -790,6 +797,22 @@ export function ConversationMessagesPanel({
             {unreadWhileScrolledUp === 1
               ? "1 mensaje nuevo"
               : `${unreadWhileScrolledUp} mensajes nuevos`}
+          </Button>
+        )}
+
+        {/* Plain round "scroll to latest" button — shown whenever the user
+            is scrolled up but no new messages have arrived (otherwise the
+            pill above takes over). */}
+        {showJumpToLatest && unreadWhileScrolledUp === 0 && (
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            onClick={jumpToLatest}
+            className="absolute bottom-3 right-3 h-9 w-9 rounded-full shadow-lg z-10"
+            aria-label="Saltar al último mensaje"
+          >
+            <ChevronDown className="h-4 w-4" />
           </Button>
         )}
       </div>
