@@ -170,9 +170,10 @@ def send_typing_indicator(
         timeout: HTTP request timeout in seconds (default: 5). Prevents webhook hang.
     
     Returns:
-        True if typing indicator sent successfully (HTTP 201), False otherwise.
-        Note: Failures are logged but don't block message processing.
-    
+        True if typing indicator sent successfully (any 2xx response),
+        False otherwise. Note: Failures are logged but don't block message
+        processing.
+
     Behavior:
         - Typing indicator auto-disappears after 25 seconds OR when reply is delivered
         - This is a fire-and-forget call (non-blocking, doesn't delay webhook response)
@@ -181,10 +182,10 @@ def send_typing_indicator(
     if not message_sid or not message_sid.startswith("SM"):
         logging.warning(f"[TYPING] Invalid message_sid format: {message_sid}")
         return False
-    
+
     try:
         endpoint = "https://messaging.twilio.com/v2/Indicators/Typing.json"
-        
+
         response = requests.post(
             endpoint,
             auth=(twilio_account_sid, twilio_auth_token),
@@ -194,8 +195,11 @@ def send_typing_indicator(
             },
             timeout=timeout
         )
-        
-        if response.status_code == 201:
+
+        # Twilio's typing indicator endpoint returns 200 with {"success": true}
+        # on success — not 201 as the legacy check assumed. Accept any 2xx so
+        # we don't log every successful call as an error.
+        if 200 <= response.status_code < 300:
             logging.warning(f"[TYPING] ✅ Typing indicator sent for message {message_sid}")
             return True
         else:
