@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +68,67 @@ from ..orchestration.customer_service_flow import (
 from ..database.conversation_service import conversation_service
 from ..services import business_info_service
 from ..services.tracing import tracer
+
+
+# Explicit Spanish cancellation tokens. CANCEL_ORDER is destructive —
+# we refuse it unless the user actually said one of these words. The
+# planner LLM has hallucinated cancel intent on bare "Si Gracias" turns
+# right after PLACE_ORDER (production 2026-05-04, Biela / 3108069647).
+_CANCEL_KEYWORDS = (
+    # cancelar (+ imperative + clitic forms)
+    "cancela", "cancelalo", "cancelala", "cancelalos", "cancelalas",
+    "cancelar", "cancelarlo", "cancelarla",
+    "cancelo", "cancele", "cancelen", "celenlo",
+    "cancelacion",
+    "cancelado", "cancelados", "cancelada",
+    # anular (+ imperative + clitic forms)
+    "anula", "anulalo", "anulala", "anulalos", "anulalas",
+    "anular", "anularlo", "anularla",
+    "anulo", "anulen",
+    "anulada", "anulado",
+    # English form sometimes used
+    "cancel",
+    # destructive verbs scoped to "el/la/mi pedido / orden"
+    "borra el pedido", "borrar el pedido", "borralo",
+    "elimina el pedido", "eliminar el pedido",
+    "descarta", "descartar",
+    "no quiero el pedido", "no quiero la orden", "no quiero mi pedido",
+    "ya no quiero el pedido", "ya no quiero la orden",
+    "deja el pedido", "dejalo asi mejor no", "olvidalo",
+)
+
+
+def _has_explicit_cancel_keyword(message: Optional[str]) -> bool:
+    """
+    Return True iff the user message contains an explicit cancel verb
+    or phrase. Accent-insensitive, case-insensitive.
+
+    Used as a hard precondition for INTENT_CANCEL_ORDER so the LLM
+    cannot trigger an order cancellation on bare affirmations like
+    "Si Gracias" or "Listo".
+    """
+    if not message:
+        return False
+    nfkd = unicodedata.normalize("NFD", message.lower())
+    cleaned = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+    # Collapse punctuation so "no quiero el pedido!" still matches
+    # "no quiero el pedido".
+    cleaned = re.sub(r"[^\w\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return False
+    # Single-word keywords matched as whole tokens; multi-word
+    # keywords matched as a contiguous substring of the normalized
+    # message.
+    tokens = set(cleaned.split())
+    for kw in _CANCEL_KEYWORDS:
+        if " " in kw:
+            if kw in cleaned:
+                return True
+        else:
+            if kw in tokens:
+                return True
+    return False
 
 
 PLANNER_SYSTEM_TEMPLATE = """Eres el clasificador de intención para el agente de servicio al cliente de un restaurante. Manejas preguntas pre-venta (horarios, ubicación, domicilio, medios de pago, promos) Y post-venta (estado de pedido, historial, cancelación).
@@ -613,6 +675,23 @@ class CustomerServiceAgent(BaseAgent):
                 "(state=%s active_cart=%s) — downgrading to CHAT",
                 getattr(turn_ctx, "order_state", "?"),
                 getattr(turn_ctx, "has_active_cart", False),
+            )
+            intent = INTENT_CUSTOMER_SERVICE_CHAT
+            params = {}
+
+        # Hard guard: refuse CANCEL_ORDER unless the user message contains
+        # an explicit cancel keyword. Prior production incident
+        # (2026-05-04, Biela / 3108069647): user said "Si\nGracias" right
+        # after PLACE_ORDER and the CS planner emitted CANCEL_ORDER for it,
+        # which deleted order #6A8D5250. The customer never said "cancela"
+        # / "anula" / etc. — the LLM hallucinated a cancellation question
+        # that the bot had not asked. Without an explicit verb of
+        # cancellation, we MUST not act on a destructive intent.
+        if intent == INTENT_CANCEL_ORDER and not _has_explicit_cancel_keyword(message_body):
+            logging.warning(
+                "[CS_AGENT] CANCEL_ORDER refused: no explicit cancel keyword in "
+                "message=%r — downgrading to CHAT",
+                (message_body or "")[:120],
             )
             intent = INTENT_CUSTOMER_SERVICE_CHAT
             params = {}

@@ -5,6 +5,8 @@ Tests the branch logic in _build_response_prompt without any LLM or DB calls.
 
 from unittest.mock import patch
 
+import pytest
+
 from app.agents.order_agent import OrderAgent, PLANNER_SYSTEM_TEMPLATE
 from app.orchestration.order_flow import (
     CART_ACTION_ADDED,
@@ -459,6 +461,98 @@ class TestPlannerPromptRules:
             "Planner prompt must use 'una picada que valor?' as an example"
         assert "no add_to_cart" in lower, \
             "Planner prompt must explicitly forbid ADD_TO_CART for price questions"
+
+    @pytest.mark.parametrize("status,expected_phrase_substr", [
+        ("pending", "cocina"),
+        ("confirmed", "disfrutes"),
+        ("out_for_delivery", "camino"),
+        ("completed", "disfrutado"),
+        ("cancelled", "vuelves"),
+    ])
+    def test_chat_response_prompt_uses_status_aware_closing(self, status, expected_phrase_substr):
+        """
+        Response generator's CHAT branch must produce a status-aware
+        closing instruction when ``latest_order_status`` is set, and
+        must NOT include the generic "¿qué te gustaría ordenar?"
+        invitation.
+        """
+        from app.agents.order_agent import OrderAgent
+        agent = OrderAgent()
+        system, _ = agent._build_response_prompt(
+            result_kind="chat",
+            exec_result={},
+            message_body="si gracias",
+            business_context=None,
+            cart_summary_after="Pedido vacío.",
+            latest_order_status=status,
+        )
+        # Status-aware section must be present.
+        assert "DESPEDIDA POST-PEDIDO" in system, (
+            f"system prompt must trigger the post-order despedida branch for status={status!r}"
+        )
+        # The "qué te gustaría ordenar" phrase IS in the system, but only
+        # as a NEGATIVE example ("NUNCA digas..."). Assert the negation
+        # framing is present so the LLM is told NOT to use it.
+        lower = system.lower()
+        assert "nunca" in lower and "te gustaría ordenar" in lower
+        # Branch-specific phrase guides the LLM toward the right tone.
+        assert expected_phrase_substr.lower() in lower
+
+    def test_chat_response_prompt_no_latest_order_uses_default(self):
+        from app.agents.order_agent import OrderAgent
+        agent = OrderAgent()
+        system, _ = agent._build_response_prompt(
+            result_kind="chat",
+            exec_result={},
+            message_body="hola",
+            business_context=None,
+            cart_summary_after="Pedido vacío.",
+            latest_order_status=None,
+        )
+        # No status → fall back to the generic CHAT instructions.
+        assert "DESPEDIDA POST-PEDIDO" not in system
+
+    def test_planner_prompt_routes_polite_close_after_recent_order_to_chat(self):
+        """
+        Regression: 2026-05-04 (Biela / 3177000722). User said "si gracias"
+        right after PLACE_ORDER. Planner classified as CONFIRM, response
+        template invited a new order ("¿qué te gustaría ordenar hoy?").
+
+        And worse — same pattern on 2026-05-04 (Biela / 3108069647) caused
+        the CS planner to hallucinate CANCEL_ORDER and delete the order.
+
+        The planner prompt must classify polite-close turns as CHAT when
+        the cart is empty AND there's a recent placed order. NEVER as
+        CONFIRM (nothing to confirm, the order is already placed).
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        lower = prompt.lower()
+        # The rule heading.
+        assert "despedida / agradecimiento" in lower or "despedida" in lower, (
+            "Planner prompt must declare a despedida-after-recent-order rule"
+        )
+        # The signal it depends on (rendered by turn_context).
+        assert "último pedido (estado)" in lower or "ultimo pedido (estado)" in lower
+        # The classification target.
+        assert "intent\": \"chat\"" in lower
+        # The example phrases the LLM can pattern-match against.
+        for example in ("si gracias", "gracias", "ok gracias", "listo gracias"):
+            assert example in lower, f"Planner prompt missing example: {example!r}"
+        # Must explicitly forbid CONFIRM in this scenario.
+        assert "nunca uses confirm" in lower or "no uses confirm" in lower
+        # Must explicitly carve out REMOVE_FROM_CART and ABANDON_CART
+        # so they keep working.
+        assert "remove_from_cart" in lower
+        assert "abandon_cart" in lower
+
+    def test_planner_prompt_has_latest_order_block_placeholder(self):
+        """
+        The PLANNER_SYSTEM_TEMPLATE must accept a {latest_order_block}
+        placeholder; older callers that don't pass one should pass an
+        empty string. We assert the placeholder is in the raw template.
+        """
+        from app.agents.order_agent import PLANNER_SYSTEM_TEMPLATE as T
+        assert "{latest_order_block}" in T
 
     def test_planner_prompt_does_not_split_default_side_into_separate_item(self):
         """

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
 from ..database import order_lookup_service
 from ..database.conversation_service import conversation_service
@@ -24,9 +25,23 @@ from ..database.session_state_service import (
     session_state_service,
 )
 from ..services.order_modification_policy import can_customer_cancel
+from ..services.order_status_machine import (
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    is_terminal,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+# Terminal-status orders only count as "the latest order" for prompt
+# context within this window. Without it, a months-old `completed`
+# order would forever bias every fresh greeting toward thank-you
+# templates. Active-status orders (pending / confirmed /
+# out_for_delivery) are always relevant — a customer asking about a
+# delivery 90 min later is still talking about that order.
+_TERMINAL_RELEVANCE_MINUTES = 30
 
 
 @dataclass(frozen=True)
@@ -43,7 +58,16 @@ class TurnContext:
       "" when there isn't one.
     - `has_recent_cancellable_order`: a placed order in a status the
       customer is allowed to cancel themselves.
-    - `recent_order_id`: id of that order (None otherwise).
+    - `recent_order_id`: id of that cancellable order (None otherwise).
+    - `latest_order_status`: status of the most recent placed order
+      (any of the 5 OrderStatus values) when relevant for prompt
+      context: always for active states, only within
+      _TERMINAL_RELEVANCE_MINUTES for terminal states. None when
+      stale or absent. Used by planner / response generator to
+      disambiguate polite-close turns ("si gracias") immediately
+      after PLACE_ORDER.
+    - `latest_order_id`: id of that order. None when
+      ``latest_order_status`` is None.
     """
 
     order_state: str = "GREETING"
@@ -52,6 +76,8 @@ class TurnContext:
     last_assistant_message: str = ""
     has_recent_cancellable_order: bool = False
     recent_order_id: Optional[str] = None
+    latest_order_status: Optional[str] = None
+    latest_order_id: Optional[str] = None
 
 
 def build_turn_context(
@@ -103,11 +129,17 @@ def build_turn_context(
 
     has_recent_cancellable_order = False
     recent_order_id: Optional[str] = None
+    latest_order_status: Optional[str] = None
+    latest_order_id: Optional[str] = None
     try:
         latest = order_lookup_service.get_latest_order(wa_id, str(business_id))
-        if latest and can_customer_cancel(latest.get("status")):
-            has_recent_cancellable_order = True
-            recent_order_id = str(latest.get("id") or "") or None
+        if latest:
+            if can_customer_cancel(latest.get("status")):
+                has_recent_cancellable_order = True
+                recent_order_id = str(latest.get("id") or "") or None
+            if _latest_order_is_relevant(latest):
+                latest_order_status = (latest.get("status") or "").strip() or None
+                latest_order_id = str(latest.get("id") or "") or None
     except Exception as exc:
         logger.warning("[TURN_CONTEXT] latest order load failed: %s", exc)
 
@@ -118,7 +150,59 @@ def build_turn_context(
         last_assistant_message=last_assistant_message,
         has_recent_cancellable_order=has_recent_cancellable_order,
         recent_order_id=recent_order_id,
+        latest_order_status=latest_order_status,
+        latest_order_id=latest_order_id,
     )
+
+
+def _latest_order_is_relevant(order: Dict[str, Any]) -> bool:
+    """
+    Decide whether the most-recent order should surface in the prompt.
+
+    - Active states (not terminal) → always relevant.
+    - Terminal states (completed / cancelled) → only within
+      ``_TERMINAL_RELEVANCE_MINUTES`` of the terminal timestamp
+      (``completed_at`` for completed, ``cancelled_at`` for cancelled).
+      Without that timestamp we conservatively drop it.
+    """
+    status = (order.get("status") or "").strip()
+    if not status:
+        return False
+    if not is_terminal(status):
+        return True
+    ts_raw: Optional[str] = None
+    if status == STATUS_COMPLETED:
+        ts_raw = order.get("completed_at")
+    elif status == STATUS_CANCELLED:
+        ts_raw = order.get("cancelled_at")
+    if not ts_raw:
+        return False
+    ts = _parse_iso_aware(ts_raw)
+    if ts is None:
+        return False
+    age = datetime.now(tz=timezone.utc) - ts
+    return age <= timedelta(minutes=_TERMINAL_RELEVANCE_MINUTES)
+
+
+def _parse_iso_aware(raw: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp; ensure it's timezone-aware (assume UTC if naive)."""
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    # datetime.fromisoformat handles "+00:00" but not the common "Z" suffix
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def render_for_prompt(ctx: TurnContext, include_last_assistant: bool = True) -> str:
@@ -136,6 +220,11 @@ def render_for_prompt(ctx: TurnContext, include_last_assistant: bool = True) -> 
         lines.append("Pedido confirmado pendiente: sí (cancelable)")
     else:
         lines.append("Pedido confirmado pendiente: no")
+    if ctx.latest_order_status:
+        # Visible to planners and response templates so they can branch
+        # on whether the user just completed an order, has one in
+        # flight, or is talking after a cancellation.
+        lines.append(f"Último pedido (estado): {ctx.latest_order_status}")
     if include_last_assistant and ctx.last_assistant_message:
         snippet = ctx.last_assistant_message
         if len(snippet) > 240:

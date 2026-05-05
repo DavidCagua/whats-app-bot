@@ -301,3 +301,163 @@ class TestCancelOrderGuard:
                 conversation_history=[],
             )
         assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CANCEL_ORDER
+
+
+class TestExplicitCancelKeywordHelper:
+    """Unit tests for _has_explicit_cancel_keyword."""
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "cancela mi pedido",
+            "Cancela ya",
+            "cancelar el pedido",
+            "anula el pedido",
+            "anúlalo por favor",  # accent + clitic
+            "no quiero el pedido",
+            "Ya no quiero la orden",
+            "borra el pedido",
+            "elimina el pedido",
+            "descarta el pedido",
+            "Cancel my order",  # English token also caught by "cancel"
+            "CANCELA YA",
+        ],
+    )
+    def test_explicit_cancel_phrases_match(self, msg):
+        from app.agents.customer_service_agent import _has_explicit_cancel_keyword
+        assert _has_explicit_cancel_keyword(msg) is True, msg
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "Si",
+            "Si\nGracias",
+            "Si Gracias",
+            "gracias",
+            "Muchas gracias",
+            "ok gracias",
+            "listo",
+            "perfecto",
+            "vale",
+            "dale",
+            "que lo disfrutes",
+            "ya no más",
+            "así está bien",
+            "No más, gracias",
+            "ok",
+            "perfect, thanks",
+            "",
+            None,
+        ],
+    )
+    def test_polite_closes_do_not_match(self, msg):
+        from app.agents.customer_service_agent import _has_explicit_cancel_keyword
+        assert _has_explicit_cancel_keyword(msg) is False, msg
+
+
+class TestCancelOrderRequiresExplicitKeyword:
+    """
+    Regression: 2026-05-04 (Biela / 3108069647). User said "Si\\nGracias"
+    right after PLACE_ORDER and the CS planner hallucinated CANCEL_ORDER,
+    cancelling order #6A8D5250. The hard guard must refuse CANCEL_ORDER
+    unless the message contains an explicit cancel keyword — even if
+    has_recent_cancellable_order is True.
+    """
+
+    def _ctx(self, **kwargs):
+        from app.orchestration.turn_context import TurnContext
+        return TurnContext(**kwargs)
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "Si",
+            "Si\nGracias",
+            "Si Gracias",
+            "gracias",
+            "ok",
+            "listo",
+            "perfecto",
+        ],
+    )
+    def test_polite_close_with_recent_cancellable_order_is_refused(self, msg):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        # Planner hallucinates CANCEL_ORDER; response LLM still runs
+        # because the new guard downgrades to CHAT.
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CANCEL_ORDER", "params": {}}'),
+            _llm_response("¡Con gusto!"),
+        ]
+        ctx = self._ctx(
+            order_state="GREETING",
+            has_active_cart=False,
+            has_recent_cancellable_order=True,
+            recent_order_id="abc-123",
+            latest_order_status="confirmed",
+            latest_order_id="abc-123",
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch(
+                 "app.orchestration.customer_service_flow.order_modification_service.cancel_order",
+             ) as cancel_mock:
+            output = agent.execute(
+                message_body=msg,
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                turn_ctx=ctx,
+            )
+        # Hard guard fired: cancel_order MUST NOT have been called.
+        cancel_mock.assert_not_called()
+        # Intent was downgraded to CHAT.
+        ctx_out = output["state_update"]["customer_service_context"]
+        assert ctx_out["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
+        assert ctx_out["last_result_kind"] != csf.RESULT_KIND_ORDER_CANCELLED
+
+    def test_explicit_cancel_with_cancellable_order_proceeds(self):
+        """Sanity: legitimate cancellations still go through."""
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intent": "CANCEL_ORDER", "params": {}}'),
+            _llm_response("Listo, tu pedido fue cancelado."),
+        ]
+        fake_order = {
+            "id": "abc-123",
+            "status": "pending",
+            "total_amount": 24500,
+            "items": [],
+        }
+        ctx = self._ctx(
+            order_state="GREETING",
+            has_active_cart=False,
+            has_recent_cancellable_order=True,
+            recent_order_id="abc-123",
+            latest_order_status="pending",
+            latest_order_id="abc-123",
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch(
+                 "app.orchestration.customer_service_flow.order_lookup_service.get_latest_order",
+                 return_value=fake_order,
+             ), \
+             patch(
+                 "app.orchestration.customer_service_flow.order_modification_service.cancel_order",
+                 return_value={**fake_order, "status": "cancelled"},
+             ) as cancel_mock:
+            output = agent.execute(
+                message_body="cancela mi pedido",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                turn_ctx=ctx,
+            )
+        cancel_mock.assert_called_once()
+        ctx_out = output["state_update"]["customer_service_context"]
+        assert ctx_out["last_intent"] == csf.INTENT_CANCEL_ORDER
+        assert ctx_out["last_result_kind"] == csf.RESULT_KIND_ORDER_CANCELLED

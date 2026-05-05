@@ -22,12 +22,17 @@ from langchain_core.messages import HumanMessage, SystemMessage
 pytestmark = pytest.mark.integration
 
 
-def _classify_intent(message: str, order_state: str = "GREETING", cart_summary: str = "Pedido vacío."):
+def _classify_intent(message: str, order_state: str = "GREETING", cart_summary: str = "Pedido vacío.", latest_order_status: str = ""):
     """Helper: send a message through the real planner LLM and return parsed intent + params."""
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, max_tokens=256)
+    latest_order_block = (
+        f"\nÚltimo pedido (estado): {latest_order_status}"
+        if latest_order_status else ""
+    )
     planner_system = PLANNER_SYSTEM_TEMPLATE.format(
         order_state=order_state,
         cart_summary=cart_summary,
+        latest_order_block=latest_order_block,
     )
     messages = [
         SystemMessage(content=planner_system),
@@ -49,6 +54,7 @@ def _classify_with_pending(message: str, pending_options, requested_name: str, o
     planner_system = PLANNER_SYSTEM_TEMPLATE.format(
         order_state=order_state,
         cart_summary="Pedido vacío.",
+        latest_order_block="",
     )
     pending = {
         "requested_name": requested_name,

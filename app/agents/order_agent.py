@@ -63,7 +63,7 @@ _STATUS_INQUIRY_RE = re.compile(
 PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de pedidos. Dado el estado actual del pedido y el mensaje del usuario, devuelves EXACTAMENTE una intención y sus parámetros en JSON.
 
 Estado actual: {order_state}
-Productos YA en el pedido (NO los incluyas de nuevo en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad con frases como "quiero otro", "dame uno más", "agrega otro". Si el usuario pide UN producto NUEVO, emite SOLO ese producto — no repitas los que ya están aquí): {cart_summary}
+Productos YA en el pedido (NO los incluyas de nuevo en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad con frases como "quiero otro", "dame uno más", "agrega otro". Si el usuario pide UN producto NUEVO, emite SOLO ese producto — no repitas los que ya están aquí): {cart_summary}{latest_order_block}
 
 Intenciones válidas: GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, ADD_PROMO_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, ABANDON_CART, CHAT.
 
@@ -96,6 +96,7 @@ Otras reglas:
 - Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Usa SOLO el nombre BASE del producto, SIN las notas entre paréntesis. Ejemplo: el pedido tiene "Jugos en leche (mango)" → product_name="Jugos en leche" (NO "Jugos en leche (mango)"). Otro ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
 - ABANDONAR EL PEDIDO COMPLETO: cuando el usuario quiere CANCELAR / DESCARTAR el pedido en curso (ANTES de confirmarlo), sin nombrar un producto específico. Frases típicas: "cancela el pedido", "anula", "ya no quiero pedir", "déjalo así, mejor no", "olvídalo", "mejor nada", "borrar todo", "cancelar todo". Usa `{{"intent": "ABANDON_CART", "params": {{}}}}`. Distinción clave: si el mensaje NOMBRA un producto del pedido ("quita la coca", "elimina la malteada"), eso es REMOVE_FROM_CART (un solo item). ABANDON_CART aplica SOLO cuando NO se nombra producto y la intención es vaciar todo. NUNCA uses ABANDON_CART como respuesta a "¿algo más?" / "¿procedemos?" — esos negativos son CONFIRM (ver regla de CONFIRMACIÓN).
 - Si pregunta por el ESTADO DE SU PEDIDO — no por el menú — usa VIEW_CART sin params. Frases típicas: "¿qué tengo en mi pedido?", "¿qué hay en mi pedido?", "cómo va mi pedido", "mi orden", "qué llevo", "qué he pedido", "muéstrame mi pedido", "ver mi pedido", "mi carrito", "cómo quedó mi pedido". NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar qué tiene el restaurante, VIEW_CART es para revisar lo que el cliente ya agregó al pedido.
+- DESPEDIDA / AGRADECIMIENTO TRAS UN PEDIDO RECIÉN PLACEADO: si el contexto del turno indica `Último pedido (estado): pending|confirmed|out_for_delivery|completed|cancelled` Y el carrito actual está VACÍO Y `Estado del pedido: GREETING`, los agradecimientos cortos y afirmaciones cortas son una DESPEDIDA, NO una nueva confirmación. Frases típicas: "gracias", "si gracias", "ok gracias", "listo gracias", "muchas gracias", "perfecto gracias", "bueno gracias", "vale gracias", "dale gracias", e incluso "si" / "ok" / "listo" SOLO cuando el carrito está vacío y hay un `Último pedido` reciente. En todos esos casos clasifica como `{{"intent": "CHAT", "params": {{}}}}`. NUNCA uses CONFIRM en este escenario — el pedido ya fue colocado, no hay nada que confirmar. Esta regla TIENE PRIORIDAD sobre la regla de CONFIRMACIÓN cuando el carrito está vacío + hay un pedido reciente. NO la apliques a REMOVE_FROM_CART (esos requieren mencionar un producto: "quita la coca") ni a ABANDON_CART (esos requieren un verbo de cancelar: "cancela el pedido", "anula"). Si el mensaje sí menciona un producto del pedido o un verbo de cancelar, esas reglas siguen aplicando como antes — esta regla cubre solo despedidas/agradecimientos cortos.
 - CONFIRMACIÓN (regla única, muy importante): si el mensaje del usuario es una confirmación pura — "listo", "procedamos", "procedemos", "confirmar", "confirmo", "dale", "sí", "si", "ok", "okay", "perfecto", "ya", "vale", "de acuerdo" — SIN nombrar producto, dirección, teléfono ni medio de pago, usa SIEMPRE `{{"intent": "CONFIRM", "params": {{}}}}`. TAMBIÉN cuenta como CONFIRM cuando el ÚLTIMO mensaje del bot preguntó si desea agregar algo más o si procedemos (ej. "¿algo más?", "¿quieres agregar algo más?", "¿procedemos?", "¿procedemos con el pedido?") y el usuario responde con una NEGACIÓN que significa "no quiero nada más, procede" — "no", "que no", "nada", "nada más", "eso es todo", "no más", "así está bien", "ya no", "estamos bien", "no gracias", "así déjalo", "con eso". IMPORTANTE: estas negaciones SOLO son CONFIRM cuando el bot ofreció agregar más o preguntó si procede; si el bot hizo otra pregunta de sí/no (ej. "¿quieres la hamburguesa?", "¿te la cambio?"), una negación NO es CONFIRM sino CHAT. No decidas tú si significa "proceder al checkout" o "colocar el pedido": el backend lo resuelve según el estado actual. NUNCA uses PROCEED_TO_CHECKOUT ni PLACE_ORDER directamente para palabras de confirmación. Si además de confirmar el usuario provee datos de entrega (ej. "listo, mi dirección es calle 1"), usa SUBMIT_DELIVERY_INFO con los datos, no CONFIRM.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY) y el usuario PROVEE datos: usa SUBMIT_DELIVERY_INFO con uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}. Si solo necesitas saber qué falta (sin que el usuario haya dado nada nuevo), usa GET_CUSTOMER_INFO.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
@@ -433,6 +434,7 @@ class OrderAgent(BaseAgent):
         message_body: str,
         business_context: Optional[Dict],
         cart_summary_after: str,
+        latest_order_status: Optional[str] = None,
     ) -> tuple:
         """
         Build (response_system, resp_input) pair tailored to the result_kind.
@@ -481,13 +483,62 @@ class OrderAgent(BaseAgent):
             return system, inp
 
         if result_kind == RESULT_KIND_CHAT:
-            system = base_system + (
-                "\n\nSITUACIÓN: El cliente está conversando sin pedir una acción específica. "
-                "Si mencionó que quiere hacer un pedido pero no dijo qué, invítalo a decirte qué quiere ordenar. "
-                "Si saludó o hizo small talk, responde amable y breve (1-2 líneas) y ofrécele ayuda con su pedido. "
-                "NO listes el menú a menos que lo pida."
-            )
+            # Status-aware closing when the user is winding down a turn
+            # right after a recently placed order. The planner already
+            # routes "si gracias" to CHAT in this scenario (see the
+            # DESPEDIDA / AGRADECIMIENTO rule in PLANNER_SYSTEM_TEMPLATE);
+            # the response template here picks the right closing line
+            # based on the latest order's lifecycle status.
+            post_order_guide = ""
+            if latest_order_status:
+                _status_guides = {
+                    "pending": (
+                        "El cliente acaba de placear un pedido y está pendiente de "
+                        "confirmación de la cocina. Responde con una despedida cálida y breve "
+                        "(1-2 líneas) reconociendo el pedido sin invitar a uno nuevo. Ej: "
+                        "\"¡Con gusto! En cuanto la cocina lo confirme te aviso.\""
+                    ),
+                    "confirmed": (
+                        "El cliente acaba de placear un pedido que ya fue confirmado. "
+                        "Responde con una despedida cálida y breve (1-2 líneas) sin invitar a un "
+                        "pedido nuevo. Ej: \"¡Con gusto, que disfrutes tu pedido!\""
+                    ),
+                    "out_for_delivery": (
+                        "El cliente tiene un pedido EN CAMINO. Responde con una despedida "
+                        "cálida y breve (1-2 líneas) sin invitar a uno nuevo. Ej: "
+                        "\"¡Con gusto! Ya va en camino.\""
+                    ),
+                    "completed": (
+                        "El cliente acaba de recibir su pedido. Responde con una despedida "
+                        "cálida y breve agradeciéndole sin invitar a uno nuevo. Ej: "
+                        "\"¡Gracias a ti! Que lo hayas disfrutado.\""
+                    ),
+                    "cancelled": (
+                        "El último pedido fue cancelado. Responde con una despedida cordial "
+                        "y breve sin presionar a un nuevo pedido. Ej: \"Con gusto. Cuando "
+                        "quieras vuelves a ordenar.\""
+                    ),
+                }
+                guide = _status_guides.get(latest_order_status)
+                if guide:
+                    post_order_guide = (
+                        "\n\nSITUACIÓN ESPECIAL — DESPEDIDA POST-PEDIDO:\n"
+                        + guide
+                        + "\nNUNCA digas \"¿qué te gustaría ordenar hoy?\" ni invites a un nuevo "
+                        "pedido en este turno; el cliente solo está cerrando."
+                    )
+            if post_order_guide:
+                system = base_system + post_order_guide
+            else:
+                system = base_system + (
+                    "\n\nSITUACIÓN: El cliente está conversando sin pedir una acción específica. "
+                    "Si mencionó que quiere hacer un pedido pero no dijo qué, invítalo a decirte qué quiere ordenar. "
+                    "Si saludó o hizo small talk, responde amable y breve (1-2 líneas) y ofrécele ayuda con su pedido. "
+                    "NO listes el menú a menos que lo pida."
+                )
             inp = f"Cliente dijo: {message_body}\nEstado del pedido: {cart_summary_after}"
+            if latest_order_status:
+                inp += f"\nÚltimo pedido (estado): {latest_order_status}"
             return system, inp
 
         if result_kind == RESULT_KIND_MENU_CATEGORIES:
@@ -1134,10 +1185,23 @@ class OrderAgent(BaseAgent):
             handoff_context = kwargs.get("handoff_context") or {}
             handoff_promo_id = (handoff_context.get("promo_id") or "").strip() if handoff_context else ""
 
-            # 1) Planner: one intent + params
+            # 1) Planner: one intent + params.
+            # Surface the latest placed-order status when present so the
+            # planner can tell post-PLACE_ORDER thank-you turns
+            # ("si gracias") apart from a fresh CONFIRM. Source: per-turn
+            # TurnContext built by conversation_manager; agents that don't
+            # receive one fall back to no extra context (legacy callers
+            # / tests).
+            turn_ctx_local = kwargs.get("turn_ctx")
+            latest_status = getattr(turn_ctx_local, "latest_order_status", None) if turn_ctx_local is not None else None
+            latest_block = (
+                f"\nÚltimo pedido (estado): {latest_status}"
+                if latest_status else ""
+            )
             planner_system = PLANNER_SYSTEM_TEMPLATE.format(
                 order_state=order_state,
                 cart_summary=cart_summary_str,
+                latest_order_block=latest_block,
             )
 
             # Pending disambiguation: if last turn we offered the customer a set
@@ -1323,6 +1387,7 @@ class OrderAgent(BaseAgent):
                 message_body=message_body,
                 business_context=business_context,
                 cart_summary_after=cart_summary_after,
+                latest_order_status=latest_status,
             )
             response_messages = [
                 SystemMessage(content=response_system),
