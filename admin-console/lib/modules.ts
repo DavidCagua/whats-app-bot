@@ -51,7 +51,7 @@ export const MODULES: readonly Module[] = [
   },
   {
     key: "availability",
-    label: "Disponibilidad",
+    label: "Horario de atención",
     hrefSegment: "/availability",
     required: true,
   },

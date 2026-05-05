@@ -30,7 +30,7 @@ export default async function BusinessAvailabilityPage({
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Disponibilidad</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Horario de atención</h1>
         <p className="text-sm text-muted-foreground">
           Horarios de atención y duración de turnos para este negocio.
         </p>
