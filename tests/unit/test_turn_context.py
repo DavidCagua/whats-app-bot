@@ -70,6 +70,121 @@ class TestLatestOrderRelevance:
         assert tc._latest_order_is_relevant(order) is True
 
 
+class TestRecentHistoryRendering:
+    """``recent_history`` should produce a uniform multi-turn block visible to every layer."""
+
+    def test_renders_multi_turn_block_when_set(self):
+        ctx = TurnContext(
+            order_state="ORDERING",
+            has_active_cart=True,
+            cart_summary="1x BARRACUDA",
+            recent_history=(
+                ("user", "necesito una barracuda sin queso azul"),
+                ("assistant", "Listo, hemos agregado la BARRACUDA... procedemos con el pedido?"),
+                ("user", "porfsvor"),
+            ),
+        )
+        out = render_for_prompt(ctx)
+        assert "Historial reciente" in out
+        # All three turns surface.
+        assert "necesito una barracuda" in out
+        assert "procedemos con el pedido" in out
+        assert "porfsvor" in out
+        # Role labels are humanized.
+        assert "usuario:" in out
+        assert "bot:" in out
+
+    def test_falls_back_to_last_assistant_when_history_empty(self):
+        # Backward-compat: callers that build TurnContext by hand and only
+        # set last_assistant_message still get the legacy single-line form.
+        ctx = TurnContext(last_assistant_message="¿procedemos con el pedido?")
+        out = render_for_prompt(ctx)
+        assert "Historial reciente" not in out
+        assert "Última respuesta del bot" in out
+        assert "procedemos" in out
+
+    def test_empty_history_omits_block(self):
+        ctx = TurnContext()
+        out = render_for_prompt(ctx)
+        assert "Historial reciente" not in out
+        assert "Última respuesta del bot" not in out
+
+
+class TestBuildTurnContextHistoryUniformity:
+    """``build_turn_context`` must populate recent_history to ≤ 10 turns."""
+
+    def _patch_no_orders(self):
+        return patch(
+            "app.orchestration.turn_context.order_lookup_service.get_latest_order",
+            return_value=None,
+        )
+
+    def _patch_session(self):
+        return patch(
+            "app.orchestration.turn_context.session_state_service.load",
+            return_value={"session": {}},
+        )
+
+    def test_history_capped_at_10_messages(self):
+        # Even if the loader returns more, the recent_history field must
+        # have at most _HISTORY_MAX_MESSAGES entries.
+        long_history = [
+            {"role": "user" if i % 2 == 0 else "assistant", "message": f"msg-{i}"}
+            for i in range(20)
+        ]
+        with self._patch_session(), self._patch_no_orders(), patch(
+            "app.orchestration.turn_context.conversation_service.get_conversation_history",
+            return_value=long_history[:10],  # the loader is the one capped via limit=
+        ) as history_mock:
+            ctx = tc.build_turn_context(wa_id="+1", business_id="biz")
+        # Loader called with limit=10.
+        history_mock.assert_called_once()
+        _, kwargs = history_mock.call_args
+        assert kwargs.get("limit") == 10
+        assert len(ctx.recent_history) == 10
+
+    def test_each_message_truncated_to_max_chars(self):
+        long_msg = "x" * 1000
+        with self._patch_session(), self._patch_no_orders(), patch(
+            "app.orchestration.turn_context.conversation_service.get_conversation_history",
+            return_value=[{"role": "assistant", "message": long_msg}],
+        ):
+            ctx = tc.build_turn_context(wa_id="+1", business_id="biz")
+        assert len(ctx.recent_history) == 1
+        role, msg = ctx.recent_history[0]
+        # 240 chars + ellipsis marker.
+        assert len(msg) <= 241  # 240 + "…"
+        assert msg.endswith("…")
+
+    def test_last_assistant_message_still_populated_for_backcompat(self):
+        with self._patch_session(), self._patch_no_orders(), patch(
+            "app.orchestration.turn_context.conversation_service.get_conversation_history",
+            return_value=[
+                {"role": "user", "message": "hola"},
+                {"role": "assistant", "message": "Hola David, en qué te ayudo?"},
+                {"role": "user", "message": "barracuda"},
+                {"role": "assistant", "message": "¿procedemos con el pedido?"},
+            ],
+        ):
+            ctx = tc.build_turn_context(wa_id="+1", business_id="biz")
+        # Most recent assistant turn lands in last_assistant_message.
+        assert ctx.last_assistant_message == "¿procedemos con el pedido?"
+        # And the full history is preserved in recent_history.
+        assert len(ctx.recent_history) == 4
+
+    def test_blank_role_or_message_skipped(self):
+        with self._patch_session(), self._patch_no_orders(), patch(
+            "app.orchestration.turn_context.conversation_service.get_conversation_history",
+            return_value=[
+                {"role": "", "message": "noop"},
+                {"role": "user", "message": ""},
+                {"role": "user", "message": "hola"},
+            ],
+        ):
+            ctx = tc.build_turn_context(wa_id="+1", business_id="biz")
+        assert ctx.recent_history == (("user", "hola"),)
+
+
 class TestRenderForPromptLatestOrderLine:
     def test_emits_latest_order_line_when_status_set(self):
         ctx = TurnContext(latest_order_status="confirmed", latest_order_id="abc")

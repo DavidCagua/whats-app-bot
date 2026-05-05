@@ -139,7 +139,7 @@ Intenciones válidas: GET_BUSINESS_INFO, GET_ORDER_STATUS, GET_ORDER_HISTORY, CA
 
 Reglas:
 - GET_BUSINESS_INFO con params.field: pregunta sobre el negocio. Valores de field:
-    "hours"           → horarios ("a qué hora abren", "cuándo cierran", "abren los domingos")
+    "hours"           → cualquier pregunta sobre HORARIOS, DISPONIBILIDAD, o si el local está OPERANDO ahora. Cubre tanto preguntas explícitas de hora ("a qué hora abren", "cuándo cierran", "abren los domingos", "qué horario tienen") como preguntas de disponibilidad/atención ("hay atención", "hay atención hoy", "están atendiendo", "siguen atendiendo", "ya atienden", "todavía atienden", "están abiertos", "siguen abiertos", "están operando", "ya cerraron"). Son la misma intención: saber si el negocio está operando. Las frases listadas son ilustrativas, NO exhaustivas — interpreta contextualmente.
     "address"         → ubicación ("dónde quedan", "cuál es la dirección")
     "phone"           → teléfono de contacto
     "delivery_fee"    → costo del domicilio ("cuánto cobran domicilio", "cuánto vale el envío")
@@ -613,7 +613,9 @@ class CustomerServiceAgent(BaseAgent):
 
         # 1) Planner
         history_text = ""
-        for msg in (conversation_history or [])[-4:]:
+        # Uniform 10-msg window across router / order planner / CS planner
+        # so every layer sees the same stateful view of the conversation.
+        for msg in (conversation_history or [])[-10:]:
             role = msg.get("role", "")
             content = (msg.get("content") or msg.get("message", ""))[:180]
             history_text += f"{role}: {content}\n"

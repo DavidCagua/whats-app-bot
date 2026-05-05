@@ -461,3 +461,34 @@ class TestCancelOrderRequiresExplicitKeyword:
         ctx_out = output["state_update"]["customer_service_context"]
         assert ctx_out["last_intent"] == csf.INTENT_CANCEL_ORDER
         assert ctx_out["last_result_kind"] == csf.RESULT_KIND_ORDER_CANCELLED
+
+
+class TestPlannerHoursFieldReframedAsAvailability:
+    """
+    Regression: 2026-05-05 (Biela / 3147139789) — user wrote "hay atencion"
+    (an availability/operating-hours question) and the CS planner emitted
+    CUSTOMER_SERVICE_CHAT instead of GET_BUSINESS_INFO {field: "hours"}.
+
+    The hours field's old description listed only time-explicit examples
+    ("a qué hora abren", "cuándo cierran", "abren los domingos"), so the
+    LLM didn't generalize to availability phrasings. Reframed as a
+    CATEGORY ("horarios, disponibilidad, o si el local está operando")
+    with both kinds of examples as anchors.
+    """
+
+    def test_prompt_describes_hours_as_availability_or_schedule(self):
+        from app.agents.customer_service_agent import PLANNER_SYSTEM_TEMPLATE
+        lower = PLANNER_SYSTEM_TEMPLATE.lower()
+        # Category description (not a bare list).
+        assert "disponibilidad" in lower or "operando" in lower
+        # Both classic and availability anchor phrases must be present.
+        for example in (
+            "a qué hora abren",
+            "cuándo cierran",
+            "hay atención",
+            "están atendiendo",
+            "están abiertos",
+        ):
+            assert example.lower() in lower, f"hours rule missing example: {example!r}"
+        # Must signal the LLM to generalize, not match keywords.
+        assert "ilustrativas" in lower or "ilustrativos" in lower

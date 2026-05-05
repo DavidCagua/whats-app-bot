@@ -512,6 +512,37 @@ class TestPlannerPromptRules:
         # No status → fall back to the generic CHAT instructions.
         assert "DESPEDIDA POST-PEDIDO" not in system
 
+    def test_confirm_rule_is_contextual_not_keyword_only(self):
+        """
+        Regression: 2026-05-05 (Biela / 3147139789) — user wrote "porfsvor"
+        (typo for "por favor") after the bot asked "¿procedemos?".  The
+        old CONFIRM rule was a keyword whitelist; "por favor" wasn't on it,
+        so even when the message reached the order planner it would have
+        missed.
+
+        The new rule is contextual: anchor on the bot's prior continuation
+        question (visible via Historial reciente / 10-msg uniform window)
+        and treat ANY brief affirmative/courtesy/acceptance reply as
+        CONFIRM. The keyword list is illustrative, not exhaustive.
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        lower = prompt.lower()
+        # Rule heading + contextual framing.
+        assert "confirmación (regla principal" in lower
+        assert "historial reciente" in lower
+        # Must enumerate what counts as a continuation question (the
+        # anchor the LLM should look for).
+        for cue in ("¿procedemos?", "¿algo más?"):
+            assert cue.lower() in lower
+        # Politeness affirmatives explicitly covered (the production miss).
+        for word in ("por favor", "porfa", "please"):
+            assert word in lower
+        # The "ilustrativas, NO exhaustivas" framing — gives the LLM
+        # permission to generalize to typos like "porfsvor" or
+        # regional variants we didn't enumerate.
+        assert "ilustrativas" in lower
+        assert "no exhaustivas" in lower or "no exhaustivos" in lower
+
     def test_planner_prompt_routes_polite_close_after_recent_order_to_chat(self):
         """
         Regression: 2026-05-04 (Biela / 3177000722). User said "si gracias"

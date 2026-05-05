@@ -279,6 +279,36 @@ class TestRouterPromptHasOrderingOpenerRule:
         ):
             assert example in prompt, f"Router prompt missing example: {example!r}"
 
+    def test_prompt_has_continuation_of_order_flow_rule(self):
+        """
+        Regression: 2026-05-05 (Biela / 3147139789) — user wrote "porfsvor"
+        (typo for "por favor") right after the bot asked
+        "¿procedemos con el pedido?". Router classified as customer_service
+        because the LLM saw the bare unknown token and bucketed it.
+
+        After wiring the recent_history block into the router context, the
+        router must have a contextual rule that biases mid-flow short replies
+        to `order` when the bot just asked a continuation question, instead
+        of letting the LLM treat unknown tokens as CS.
+        """
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        lower = prompt.lower()
+        assert "continuación del flujo de pedido" in lower
+        # Must reference the conversational anchor (last bot question).
+        assert "historial reciente" in lower
+        # Must call out the regression example explicitly.
+        assert "porfsvor" in lower
+        # Must instruct the LLM the affirmative list is illustrative, not
+        # exhaustive — that's the whole point of using context, not keywords.
+        assert "ilustrativas" in lower or "ilustrativos" in lower
+        # The antecedent must be tight so this rule does NOT poison
+        # legitimate browsing queries like "qué hamburguesas tienen?"
+        # (production regression on 2026-05-05 when the rule was first
+        # written too broadly). Sentinel phrase + browsing example
+        # carve-out.
+        assert "antecedente no se cumple" in lower
+        assert "qué hamburguesas tienen" in lower
+
     def test_prompt_disambiguates_opener_from_delivery_price_question(self):
         """The discriminator: bare opener vs. interrogative."""
         prompt = router._ROUTER_SYSTEM_PROMPT

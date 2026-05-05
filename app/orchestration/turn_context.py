@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..database import order_lookup_service
 from ..database.conversation_service import conversation_service
@@ -44,6 +44,15 @@ logger = logging.getLogger(__name__)
 _TERMINAL_RELEVANCE_MINUTES = 30
 
 
+# How many history messages every layer (router / order planner /
+# CS planner) sees. Uniform across layers so the LLM has the same
+# stateful view regardless of which planner is running. Each message
+# is truncated to _HISTORY_MSG_MAX_CHARS so a long bot reply (full
+# menu listing, order summary) doesn't blow the prompt budget.
+_HISTORY_MAX_MESSAGES = 10
+_HISTORY_MSG_MAX_CHARS = 240
+
+
 @dataclass(frozen=True)
 class TurnContext:
     """
@@ -55,7 +64,13 @@ class TurnContext:
     - `has_active_cart`: True when items exist in session order_context.
     - `cart_summary`: one-line human summary of the cart, "" when empty.
     - `last_assistant_message`: most recent assistant turn from history,
-      "" when there isn't one.
+      "" when there isn't one. (Backward-compat — the renderer prefers
+      ``recent_history`` when set.)
+    - `recent_history`: list of (role, message) tuples for the last
+      ``_HISTORY_MAX_MESSAGES`` turns, oldest first. Each message is
+      already truncated. Surfaces the full conversational state to
+      every layer (router, order planner, CS planner) so they
+      classify intent against context, not just the bare message.
     - `has_recent_cancellable_order`: a placed order in a status the
       customer is allowed to cancel themselves.
     - `recent_order_id`: id of that cancellable order (None otherwise).
@@ -74,6 +89,7 @@ class TurnContext:
     has_active_cart: bool = False
     cart_summary: str = ""
     last_assistant_message: str = ""
+    recent_history: Tuple[Tuple[str, str], ...] = ()
     has_recent_cancellable_order: bool = False
     recent_order_id: Optional[str] = None
     latest_order_status: Optional[str] = None
@@ -116,13 +132,24 @@ def build_turn_context(
         logger.warning("[TURN_CONTEXT] session load failed: %s", exc)
 
     last_assistant_message = ""
+    recent_history: List[Tuple[str, str]] = []
     try:
         history = conversation_service.get_conversation_history(
-            wa_id, limit=4, business_id=str(business_id),
+            wa_id, limit=_HISTORY_MAX_MESSAGES, business_id=str(business_id),
         )
-        for entry in reversed(history or []):
-            if (entry.get("role") or "").lower() == "assistant":
-                last_assistant_message = (entry.get("message") or "").strip()
+        for entry in (history or []):
+            role = (entry.get("role") or "").strip().lower()
+            msg = (entry.get("message") or "").strip()
+            if not role or not msg:
+                continue
+            if len(msg) > _HISTORY_MSG_MAX_CHARS:
+                msg = msg[:_HISTORY_MSG_MAX_CHARS].rstrip() + "…"
+            recent_history.append((role, msg))
+        # Backward-compat: keep last_assistant_message populated from
+        # the same history load so existing callers don't break.
+        for role, msg in reversed(recent_history):
+            if role == "assistant":
+                last_assistant_message = msg
                 break
     except Exception as exc:
         logger.warning("[TURN_CONTEXT] history load failed: %s", exc)
@@ -148,6 +175,7 @@ def build_turn_context(
         has_active_cart=has_active_cart,
         cart_summary=cart_summary,
         last_assistant_message=last_assistant_message,
+        recent_history=tuple(recent_history),
         has_recent_cancellable_order=has_recent_cancellable_order,
         recent_order_id=recent_order_id,
         latest_order_status=latest_order_status,
@@ -210,6 +238,12 @@ def render_for_prompt(ctx: TurnContext, include_last_assistant: bool = True) -> 
     Render the turn context block injected into router/order/CS planner
     prompts. One canonical wording so the three layers don't drift.
     Returns a single string, ready to drop into a system or user prompt.
+
+    When ``ctx.recent_history`` is populated, emits a multi-turn
+    ``Historial reciente:`` block (oldest first). Otherwise falls back
+    to the ``Última respuesta del bot:`` single-line legacy form so
+    callers that build TurnContext by hand (e.g. tests) still get
+    something useful.
     """
     lines = [f"Estado del pedido: {ctx.order_state}"]
     if ctx.has_active_cart and ctx.cart_summary:
@@ -225,9 +259,19 @@ def render_for_prompt(ctx: TurnContext, include_last_assistant: bool = True) -> 
         # on whether the user just completed an order, has one in
         # flight, or is talking after a cancellation.
         lines.append(f"Último pedido (estado): {ctx.latest_order_status}")
-    if include_last_assistant and ctx.last_assistant_message:
+    if ctx.recent_history:
+        # Render the rolling window so every layer sees the same
+        # stateful view (router was previously starved of user-turn
+        # history; uniform 10-msg window closes that gap).
+        lines.append("Historial reciente (más antiguo arriba):")
+        for role, msg in ctx.recent_history:
+            label = "usuario" if role == "user" else (
+                "bot" if role == "assistant" else role
+            )
+            lines.append(f"  {label}: {msg}")
+    elif include_last_assistant and ctx.last_assistant_message:
         snippet = ctx.last_assistant_message
-        if len(snippet) > 240:
-            snippet = snippet[:240].rstrip() + "…"
+        if len(snippet) > _HISTORY_MSG_MAX_CHARS:
+            snippet = snippet[:_HISTORY_MSG_MAX_CHARS].rstrip() + "…"
         lines.append(f'Última respuesta del bot: "{snippet}"')
     return "\n".join(lines)
