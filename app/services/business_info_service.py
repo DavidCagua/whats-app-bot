@@ -43,7 +43,7 @@ ALL_FIELDS = (
 # (order_tools, order_flow) and the customer service info lookup so the
 # two surfaces agree on the same number — a customer asking the price
 # never gets "no configurado" while orders silently apply $5.000.
-DELIVERY_FEE_DEFAULT = 5000
+DELIVERY_FEE_DEFAULT = 7000
 
 
 def _format_cop(value: Any) -> str:
