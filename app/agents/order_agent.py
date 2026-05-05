@@ -871,11 +871,27 @@ class OrderAgent(BaseAgent):
         if result_kind == RESULT_KIND_DELIVERY_STATUS:
             ds = exec_result.get("delivery_status") or {}
             if ds.get("all_present"):
+                allowed_methods = ds.get("payment_methods_allowed") or []
+                payment_rejected = ds.get("payment_rejected_input") or ""
+                payment_rules = ""
+                if payment_rejected and allowed_methods:
+                    # User just proposed an invalid method but we still have a
+                    # valid stored one. Don't pretend nothing happened —
+                    # acknowledge the rejection BEFORE re-confirming the data.
+                    payment_rules = (
+                        f"\n- IMPORTANTE: el cliente acaba de proponer pagar con "
+                        f"\"{payment_rejected}\", que NO aceptamos. PRIMERO dile "
+                        f"claramente que solo aceptamos {', '.join(allowed_methods)}, "
+                        f"y que su pago actual seguirá siendo {ds.get('payment_method')} "
+                        f"a menos que elija otro permitido. LUEGO pregúntale si "
+                        f"procede así o quiere cambiar a uno permitido."
+                    )
                 system = base_system + (
                     "\n\nSITUACIÓN: Ya tenemos todos los datos de entrega del cliente. "
                     "Confírmale los datos que tenemos y pregúntale si gusta proceder o quiere cambiar algo. "
                     "FORMATO: 'Tengo esta dirección: [addr], teléfono [phone] y pago [payment]. ¿Procedemos o quieres cambiar algo?'. "
                     "1-3 líneas."
+                    + payment_rules
                 )
                 inp = (
                     f"Cliente dijo: {message_body}\n"
@@ -885,6 +901,10 @@ class OrderAgent(BaseAgent):
                     f"- Teléfono: {ds.get('phone')}\n"
                     f"- Pago: {ds.get('payment_method')}"
                 )
+                if allowed_methods:
+                    inp += f"\nMétodos de pago aceptados: {', '.join(allowed_methods)}"
+                if payment_rejected:
+                    inp += f"\nMétodo propuesto por el cliente y rechazado: {payment_rejected}"
                 return system, inp
             missing = ds.get("missing") or []
             missing_es = {"name": "nombre", "address": "dirección", "phone": "teléfono", "payment": "medio de pago"}
