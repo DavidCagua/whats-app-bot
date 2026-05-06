@@ -462,6 +462,16 @@ _SCORE_DESCRIPTION = 15
 _SCORE_EMBEDDING_MAX = 50  # cosine 0..1 → 0..50
 _SCORE_STEM_BONUS = 5
 
+# Phrase-level boosts. A multi-word phrase from the query (e.g. "burguer master")
+# matching verbatim inside a product's tag / description / category is intrinsically
+# more selective than the sum of single-token hits, so it earns a separate boost.
+# Without these, a campaign-style tag like "burguer master" loses to a generic
+# tag like "hamburguesa" because the latter is a single token that lands the full
+# _SCORE_TAG on every burger in the catalog.
+_SCORE_PHRASE_TAG = 80
+_SCORE_PHRASE_DESCRIPTION = 35
+_SCORE_PHRASE_CATEGORY = 25
+
 # Minimum cosine similarity for a semantic hit to count. Below this, the
 # match is near-random noise from nearest-neighbor search — e.g. "pizza" at
 # a burger shop returning burgers because they're the closest vectors in
@@ -819,6 +829,43 @@ def _score_product(
         if tok in cat_norm:
             score += _SCORE_CATEGORY
             has_lexical_hit = True
+
+    # Phrase-level boosts. A distinctive multi-word phrase from the query
+    # ("burguer master") matching verbatim inside tag / description / category
+    # is much more selective than the sum of its single-token hits — campaign
+    # tags would otherwise lose to generic single-word tags like "hamburguesa".
+    #
+    # We build the phrase set from the post-stopword token stream so common
+    # filler ("la del...") doesn't generate noise bigrams. Each phrase fires
+    # at most once per field per product.
+    phrases: List[str] = []
+    if len(tokens) >= 2:
+        core = " ".join(tokens)
+        phrases.append(core)
+        for i in range(len(tokens) - 1):
+            bg = f"{tokens[i]} {tokens[i + 1]}"
+            if bg != core:
+                phrases.append(bg)
+
+    if phrases:
+        seen_tag = False
+        seen_desc = False
+        seen_cat = False
+        for phrase in phrases:
+            if not seen_tag and any(phrase == t or phrase in t for t in tags_norm if " " in t):
+                score += _SCORE_PHRASE_TAG
+                has_lexical_hit = True
+                seen_tag = True
+            if not seen_desc and phrase in desc_norm:
+                score += _SCORE_PHRASE_DESCRIPTION
+                has_lexical_hit = True
+                seen_desc = True
+            if not seen_cat and phrase in cat_norm:
+                score += _SCORE_PHRASE_CATEGORY
+                has_lexical_hit = True
+                seen_cat = True
+            if seen_tag and seen_desc and seen_cat:
+                break
 
     # Tag hits (exact and substring)
     for tag in tags_norm:
