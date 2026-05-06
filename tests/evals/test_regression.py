@@ -1373,3 +1373,162 @@ def test_hay_pizza_llm_judge_full_semantic_check():
     )
     run = run_scenario(scenario)
     assert_scenario(scenario, run)
+
+
+# ---------------------------------------------------------------------------
+# Pronominal-reference INTERROGATIVE form (Biela / 3177000722, 2026-05-06).
+# User had LA VUELTA in cart and asked "esa viene con papitas?". The planner
+# classified it as ADD_TO_CART(LA VUELTA) and the response generator — with
+# only cart items in scope, no descriptions — hallucinated "La Barracuda y La
+# Vuelta no vienen con papitas". LA VUELTA's description literally lists
+# "papas fritas".
+#
+# Fix lives in order_agent.py rule 82: pronominal references in interrogative
+# form route to GET_PRODUCT (which brings the description into the response
+# prompt) instead of ADD_TO_CART. These tests pin the routing.
+# ---------------------------------------------------------------------------
+
+
+def test_esa_viene_con_papitas_routes_to_get_product():
+    """
+    "esa viene con papitas?" with LA VUELTA in the recent context must
+    route to GET_PRODUCT, NOT ADD_TO_CART. The response must not falsely
+    deny that the burger comes with papas.
+    """
+    LA_VUELTA = product(
+        "LA VUELTA", 28000,
+        category="HAMBURGUESAS",
+        description="Pan artesanal, 150gr de carne, tocineta crispy de cebolla, caramelizado de chilacuan, queso quajada, salsa tártara, salsa chipotle, mostaza americana y papas fritas.",
+        tags=["hamburguesa", "burger", "papas"],
+        matched_by="exact",
+    )
+    scenario = AgentScenario(
+        name="esa_viene_con_papitas_routes_to_get_product",
+        user_message="esa viene con papitas?",
+        # Cart already has LA VUELTA so "esa" has a clear referent.
+        initial_order_context={
+            "state": "ORDERING",
+            "items": [{
+                "product_id": LA_VUELTA["id"],
+                "name": "LA VUELTA",
+                "quantity": 1,
+                "price": 28000,
+                "notes": "",
+            }],
+            "total": 28000,
+        },
+        conversation_history=[
+            {"role": "user", "content": "Una a la vuelta"},
+            {"role": "assistant", "content": "Listo, agregué la LA VUELTA a tu pedido."},
+        ],
+        known_products=[LA_VUELTA],
+        stub_search_products=lambda biz, q: [LA_VUELTA],
+        reference_trajectory=expected_planner_call(
+            user_message="esa viene con papitas?",
+            intent="GET_PRODUCT",
+            params={"product_name": "LA VUELTA"},
+        ),
+        # tool_args_match_mode default is "exact"; relax to ignore arg
+        # variations (the planner may emit product_name in either
+        # "LA VUELTA" or "La Vuelta" casing).
+        tool_args_match_mode="ignore",
+        must_not_contain=[
+            # The exact failure phrase from prod — bot can't deny papas.
+            r"no\s+vienen?\s+con\s+papit?as",
+            r"no\s+incluye[ns]?\s+papit?as",
+        ],
+        must_contain_any=[
+            # The response generator should surface description content
+            # showing papas are part of the dish.
+            r"papas?\s+frit",
+            r"\bs[ií]\b.*papit?as",
+            r"\bvienen?\s+con\s+papit?as",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+def test_esa_que_trae_routes_to_get_product():
+    """
+    Sibling case: "esa qué trae?" — also a question about composition
+    using a pronominal reference. Must route to GET_PRODUCT and bring
+    back the description, not silently re-add to cart.
+    """
+    LA_VUELTA = product(
+        "LA VUELTA", 28000,
+        category="HAMBURGUESAS",
+        description="Pan artesanal, 150gr de carne, tocineta crispy de cebolla, caramelizado de chilacuan, queso quajada, salsa tártara, salsa chipotle, mostaza americana y papas fritas.",
+        tags=["hamburguesa", "burger", "papas"],
+        matched_by="exact",
+    )
+    scenario = AgentScenario(
+        name="esa_que_trae_routes_to_get_product",
+        user_message="esa qué trae?",
+        initial_order_context={
+            "state": "ORDERING",
+            "items": [{
+                "product_id": LA_VUELTA["id"],
+                "name": "LA VUELTA",
+                "quantity": 1,
+                "price": 28000,
+                "notes": "",
+            }],
+            "total": 28000,
+        },
+        conversation_history=[
+            {"role": "user", "content": "Una a la vuelta"},
+            {"role": "assistant", "content": "Listo, agregué la LA VUELTA a tu pedido."},
+        ],
+        known_products=[LA_VUELTA],
+        stub_search_products=lambda biz, q: [LA_VUELTA],
+        reference_trajectory=expected_planner_call(
+            user_message="esa qué trae?",
+            intent="GET_PRODUCT",
+            params={"product_name": "LA VUELTA"},
+        ),
+        tool_args_match_mode="ignore",
+        must_contain_any=[
+            # Response should describe ingredients from the description.
+            r"carne",
+            r"tocineta",
+            r"chilacuan",
+        ],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
+
+
+def test_deme_esa_sin_x_still_routes_to_add_to_cart():
+    """
+    Reverse guarantee: command form with a modification ("deme esa sin
+    morcilla") must still be ADD_TO_CART. Tightening rule 82 must not
+    break the existing imperative-pronominal path.
+    """
+    PICADA = product(
+        "PICADA", 55000,
+        category="PLATOS",
+        description="Surtido de carnes, embutidos, morcilla y patacones.",
+        tags=["picada", "carne", "embutidos"],
+        matched_by="exact",
+    )
+    scenario = AgentScenario(
+        name="deme_esa_sin_morcilla_still_adds_to_cart",
+        user_message="deme esa sin morcilla",
+        initial_order_context={"state": "GREETING"},
+        conversation_history=[
+            {"role": "user", "content": "qué picada tienes?"},
+            {"role": "assistant", "content": "Tenemos la PICADA con surtido de carnes y embutidos."},
+        ],
+        known_products=[PICADA],
+        stub_search_products=lambda biz, q: [PICADA],
+        reference_trajectory=expected_planner_call(
+            user_message="deme esa sin morcilla",
+            intent="ADD_TO_CART",
+            params={"product_name": "PICADA", "quantity": 1, "notes": "sin morcilla"},
+        ),
+        tool_args_match_mode="ignore",
+        must_contain_any=[r"PICADA", r"picada"],
+    )
+    run = run_scenario(scenario)
+    assert_scenario(scenario, run)
