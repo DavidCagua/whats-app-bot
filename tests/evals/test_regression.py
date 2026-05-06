@@ -1392,14 +1392,19 @@ def test_hay_pizza_llm_judge_full_semantic_check():
 def test_esa_viene_con_papitas_routes_to_get_product():
     """
     "esa viene con papitas?" with LA VUELTA in the recent context must
-    route to GET_PRODUCT, NOT ADD_TO_CART. The response must not falsely
-    deny that the burger comes with papas.
+    route to GET_PRODUCT, NOT ADD_TO_CART, AND the response must affirm
+    that papas are included by reaching for the business rule
+    ("todas las hamburguesas vienen con papas") — NOT by reading the
+    description, which doesn't list "papas" verbatim in real prod.
+
+    The fixture description below intentionally OMITS the word "papas"
+    so the assertion below is only satisfied by the business rule path.
     """
     LA_VUELTA = product(
         "LA VUELTA", 28000,
         category="HAMBURGUESAS",
-        description="Pan artesanal, 150gr de carne, tocineta crispy de cebolla, caramelizado de chilacuan, queso quajada, salsa tártara, salsa chipotle, mostaza americana y papas fritas.",
-        tags=["hamburguesa", "burger", "papas"],
+        description="Pan artesanal, 150gr de carne, tocineta crispy de cebolla, caramelizado de chilacuan, queso quajada, salsa tártara, salsa chipotle, mostaza americana.",
+        tags=["hamburguesa", "burger"],
         matched_by="exact",
     )
     scenario = AgentScenario(
@@ -1428,21 +1433,19 @@ def test_esa_viene_con_papitas_routes_to_get_product():
             intent="GET_PRODUCT",
             params={"product_name": "LA VUELTA"},
         ),
-        # tool_args_match_mode default is "exact"; relax to ignore arg
-        # variations (the planner may emit product_name in either
-        # "LA VUELTA" or "La Vuelta" casing).
         tool_args_match_mode="ignore",
         must_not_contain=[
             # The exact failure phrase from prod — bot can't deny papas.
-            r"no\s+vienen?\s+con\s+papit?as",
-            r"no\s+incluye[ns]?\s+papit?as",
+            r"no\s+vienen?\s+con\s+pap(?:it)?as?",
+            r"no\s+incluye[ns]?\s+pap(?:it)?as?",
         ],
         must_contain_any=[
-            # The response generator should surface description content
-            # showing papas are part of the dish.
-            r"papas?\s+frit",
-            r"\bs[ií]\b.*papit?as",
-            r"\bvienen?\s+con\s+papit?as",
+            # The response must affirm papas are included. Phrasings vary
+            # ("papas", "papitas", "papas fritas"); all forms accepted.
+            r"\bs[ií]\b.*pap(?:it)?as?",
+            r"vienen?\s+con\s+pap(?:it)?as?",
+            r"incluye[ns]?\s+pap(?:it)?as?",
+            r"pap(?:it)?as?\s+(frit\w*|inclu)",
         ],
     )
     run = run_scenario(scenario)

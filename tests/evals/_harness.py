@@ -273,6 +273,17 @@ BIELA_BUSINESS_CONTEXT = {
             "phone": "+573000000000",
             "city": "Cali",
             "menu_url": "https://gixlink.com/Biela",
+            # Mirror the prod business rules so scenarios that ask
+            # about default accompaniments ("¿viene con papas?") exercise
+            # the rules-driven response path instead of relying on the
+            # description string. Keep this short — the planner system
+            # prompt and response generator both pull from settings.ai_prompt.
+            "ai_prompt": (
+                "Reglas y contexto del negocio:\n"
+                "- Todas las hamburguesas vienen con papas fritas incluidas en el precio.\n"
+                "- Las bebidas se cobran aparte.\n"
+                "- Los perros calientes y las salchipapas también incluyen papas."
+            ),
         },
     },
 }
