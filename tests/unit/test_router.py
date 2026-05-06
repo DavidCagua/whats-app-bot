@@ -253,6 +253,49 @@ class TestRouterPromptHasProductPriceRule:
         )
 
 
+class TestRouterPromptHasAvailabilityRule:
+    """Regression: ensure the router prompt has the "tiene/tienes X?"
+    availability rule so unknown / typo / descriptive product references
+    still route to order. Production 2026-05-06 (Biela / 3177000722):
+    "buenas tiene la del concurso?" and "hola tiene la vimota?" both
+    misrouted to customer_service because the LLM defaulted to CS for
+    unrecognized nouns. The rule reframes "do you have X?" as a menu
+    inquiry by default, leaving CS only for service-level questions
+    ("tienen estacionamiento?").
+    """
+
+    def test_prompt_has_availability_examples(self):
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        assert "AVAILABILITY" in prompt, (
+            "Router prompt must have an availability/existence rule for "
+            "'tiene la X?' patterns"
+        )
+        # Example phrasings — the LLM uses these to pattern-match.
+        for phrase in (
+            "tiene la barracuda",
+            "tienes la vimota",
+            "tiene la del concurso",
+            "tienen la famosa",
+        ):
+            assert phrase in prompt, f"Router prompt missing example: {phrase!r}"
+
+    def test_prompt_keeps_service_questions_on_cs(self):
+        # The new rule must not swallow service-level "tienen X?" questions
+        # like "tienen estacionamiento?" / "tienen WhatsApp?" — those are
+        # business info, not product browsing.
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        assert "estacionamiento" in prompt
+        assert "Servicios" in prompt or "servicio" in prompt.lower()
+
+    def test_prompt_explicitly_handles_typos_and_descriptive_refs(self):
+        # The rule must signal that typos and descriptive references go
+        # to order — not just exact catalog matches.
+        prompt = router._ROUTER_SYSTEM_PROMPT
+        assert "typo" in prompt.lower()
+        assert "vimota" in prompt
+        assert "fuzzy" in prompt.lower() or "semántica" in prompt.lower()
+
+
 class TestRouterPromptHasOrderingOpenerRule:
     """
     Regression: "para un domicilio" used to be misclassified as

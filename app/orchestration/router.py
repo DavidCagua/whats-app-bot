@@ -144,6 +144,17 @@ Dominios disponibles (por INTENCIÓN del cliente):
 
 - "order": el cliente quiere ORDENAR comida. Esto incluye TODO el funnel de pedido:
     * Browsing/exploración del menú dentro del bot ("qué tienen", "qué bebidas hay", "tienen coca cola", "muéstrame el menú", "qué hamburguesas tienen", "qué trae la barracuda")
+    * AVAILABILITY / EXISTENCE de un producto — preguntas sobre si el negocio TIENE un
+      producto, sea por nombre exacto, descripción imprecisa, o referencia descriptiva.
+      Frases ilustrativas (NO exhaustivas): "tiene la barracuda?", "tienes la vimota?",
+      "hay BIMOTA?", "tiene la del concurso?", "tienen la famosa?", "tienes la del lunes?",
+      "está la pegoretti?", "hay algo con pollo?". Esta regla aplica AUNQUE el sustantivo
+      NO sea un nombre exacto del catálogo — typos ("vimota" → BIMOTA), referencias
+      descriptivas ("la del concurso", "la famosa", "la del menú del lunes") y nombres
+      desconocidos pertenecen al order agent: el backend tiene búsqueda fuzzy + semántica
+      que resuelve estos casos. Discriminación clave: el sustantivo refiere a un PRODUCTO/
+      PLATO/BEBIDA, NO a un servicio del negocio. Servicios ("tienen estacionamiento?",
+      "tienen WhatsApp?", "tienen domicilio?") siguen siendo customer_service.
     * Búsqueda por atributo ("algo con queso", "algo picante")
     * Detalles de un producto específico ("qué trae la montesa")
     * PRECIO/VALOR de un producto NOMBRADO — preguntar cuánto cuesta un producto del menú

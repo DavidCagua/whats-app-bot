@@ -515,6 +515,39 @@ def _handle_select_listed_promo(
             )
 
     if promo_id is None:
+        # Safety net: when the planner emitted SELECT_LISTED_PROMO but
+        # there was no recent promo listing AND the user's query has no
+        # promo-y keywords, the message is almost certainly a PRODUCT
+        # reference the LLM mis-classified as a promo selection (Biela
+        # 2026-05-06 / 3177000722: "buenas tiene la del concurso?" →
+        # SELECT_LISTED_PROMO → "no tengo una promo activa con ese
+        # nombre", when the user meant a product). Hand off to the
+        # order agent so SEARCH_PRODUCTS runs the lookup with its
+        # fuzzy + semantic + tag matchers — it knows how to resolve
+        # descriptive references and typos.
+        promo_keywords = (
+            "promo", "promos", "promocion", "promoción", "promociones",
+            "oferta", "ofertas", "combo", "combos",
+            "descuento", "descuentos",
+            "2x1", "2 x 1",
+        )
+        q_lower = raw_query.lower()
+        has_promo_keyword = any(kw in q_lower for kw in promo_keywords)
+        if raw_query and not listed and not has_promo_keyword:
+            logger.info(
+                "[CS_FLOW] SELECT_LISTED_PROMO unresolved with no listed set "
+                "and no promo keyword in query=%r — handing off to order/SEARCH",
+                raw_query,
+            )
+            return _base_result(
+                wa_id, business_id,
+                RESULT_KIND_HANDOFF,
+                handoff={
+                    "to": "order",
+                    "segment": raw_query,
+                    "context": {"reason": "promo_query_no_match_search_fallback"},
+                },
+            )
         return _base_result(
             wa_id, business_id,
             RESULT_KIND_PROMO_NOT_RESOLVED,

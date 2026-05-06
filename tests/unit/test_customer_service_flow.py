@@ -225,6 +225,84 @@ class TestGetOrderHistory:
         assert kwargs["limit"] == 5
 
 
+class TestSelectListedPromoSearchFallback:
+    """Regression: when SELECT_LISTED_PROMO can't resolve a query, the
+    flow should hand off to order/SEARCH_PRODUCTS instead of replying
+    "no tengo una promo activa con ese nombre" — UNLESS the query has
+    an explicit promo keyword.
+
+    Production 2026-05-06 (Biela / 3177000722): "buenas tiene la del
+    concurso?" → SELECT_LISTED_PROMO with query="la del concurso" →
+    cold-ask matched 0 promos → reply "no hay promo con ese nombre",
+    when the user clearly meant a product. The handoff sends the
+    descriptive query to the order agent's catalog search (which has
+    fuzzy + semantic + tag matching).
+    """
+
+    def _run_select(self, query, listed=None):
+        session = {
+            "customer_service_context": {"last_listed_promos": listed or []},
+        }
+        return csf.execute_customer_service_intent(
+            wa_id="+573001234567",
+            business_id="biz-1",
+            business_context={"business_id": "biz-1", "business": {"name": "X", "settings": {}}},
+            intent=csf.INTENT_SELECT_LISTED_PROMO,
+            params={"query": query},
+            session=session,
+        )
+
+    def test_unresolved_query_hands_off_to_order_when_no_promo_keyword(self):
+        # No promo listing, no promo keyword in query → handoff.
+        with patch.object(csf.promotion_service, "find_promo_by_query", return_value=[]):
+            result = self._run_select("la del concurso")
+        assert result["result_kind"] == csf.RESULT_KIND_HANDOFF
+        assert result["handoff"]["to"] == "order"
+        # Order agent receives the user's exact descriptive phrase as
+        # the segment so SEARCH_PRODUCTS gets the full query.
+        assert result["handoff"]["segment"] == "la del concurso"
+        assert result["handoff"]["context"]["reason"] == "promo_query_no_match_search_fallback"
+
+    def test_unresolved_query_with_promo_keyword_returns_not_resolved(self):
+        # "promo del concurso" — explicit promo keyword. The user meant
+        # a promo; don't sneakily redirect to product search.
+        with patch.object(csf.promotion_service, "find_promo_by_query", return_value=[]):
+            result = self._run_select("promo del concurso")
+        assert result["result_kind"] == csf.RESULT_KIND_PROMO_NOT_RESOLVED
+
+    def test_unresolved_query_with_oferta_keyword_returns_not_resolved(self):
+        with patch.object(csf.promotion_service, "find_promo_by_query", return_value=[]):
+            result = self._run_select("oferta del lunes")
+        assert result["result_kind"] == csf.RESULT_KIND_PROMO_NOT_RESOLVED
+
+    def test_unresolved_with_recent_promo_listing_returns_not_resolved(self):
+        # When the bot just listed promos and the user's pick doesn't
+        # match any listed name, stay in the "not resolved" path —
+        # asking the customer to pick from the listed set is right.
+        listed = [{"id": "p1", "name": "Honey Burger Combo"}]
+        with patch.object(csf.promotion_service, "find_promo_by_query", return_value=[]):
+            result = self._run_select("la que no existe", listed=listed)
+        assert result["result_kind"] == csf.RESULT_KIND_PROMO_NOT_RESOLVED
+
+    def test_resolved_with_unique_match_still_hands_off_with_promo_id(self):
+        # Sanity check: a unique cold-ask match doesn't accidentally
+        # take the search-fallback branch — it stays as a promo handoff
+        # with the resolved promo_id.
+        with patch.object(
+            csf.promotion_service, "find_promo_by_query",
+            return_value=[{"id": "p1", "name": "Honey Burger Combo"}],
+        ):
+            result = self._run_select("honey burger")
+        assert result["result_kind"] == csf.RESULT_KIND_HANDOFF
+        assert result["handoff"]["context"].get("promo_id") == "p1"
+
+    def test_empty_query_with_no_listing_returns_not_resolved(self):
+        # No query, no listed set, nothing to resolve — stay in NOT_RESOLVED
+        # rather than handing off an empty segment to the order agent.
+        result = self._run_select("")
+        assert result["result_kind"] == csf.RESULT_KIND_PROMO_NOT_RESOLVED
+
+
 class TestChatFallback:
     def test_explicit_chat_returns_fallback(self):
         result = _run(csf.INTENT_CUSTOMER_SERVICE_CHAT)
