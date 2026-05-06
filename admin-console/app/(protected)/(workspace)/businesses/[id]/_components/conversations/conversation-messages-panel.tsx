@@ -147,6 +147,7 @@ export function ConversationMessagesPanel({
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const isAtBottomRef = useRef(true)
   const [draft, setDraft] = useState("")
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const [isSending, setIsSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [agentEnabled, setAgentEnabled] = useState(thread.agent_enabled)
@@ -514,6 +515,11 @@ export function ConversationMessagesPanel({
       setDraft(text)
     } finally {
       setIsSending(false)
+      // The textarea is `disabled` while sending, which clears focus. Restore
+      // it after the send settles so the operator can keep typing.
+      if (!composerLocked) {
+        requestAnimationFrame(() => composerRef.current?.focus())
+      }
     }
   }
 
@@ -880,6 +886,7 @@ export function ConversationMessagesPanel({
               </Tooltip>
             ) : (
               <Textarea
+                ref={composerRef}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder="Type a message..."
@@ -892,7 +899,7 @@ export function ConversationMessagesPanel({
                     void onSend()
                   }
                 }}
-                disabled={composerDisabled}
+                disabled={composerLocked || isRecording}
               />
             )}
 
