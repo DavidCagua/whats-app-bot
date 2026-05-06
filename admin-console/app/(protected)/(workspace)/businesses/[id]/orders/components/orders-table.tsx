@@ -23,9 +23,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { Bell, BellOff, BellRing } from "lucide-react"
+import { Bell, BellOff, BellRing, ChevronLeft, ChevronRight } from "lucide-react"
 import { format } from "date-fns"
 import { toast } from "sonner"
+import { useRouter } from "next/navigation"
 import { updateOrderStatus } from "@/lib/actions/orders"
 import {
   type OrderStatus,
@@ -41,6 +42,14 @@ import {
   setAlertsEnabled as persistAlertsEnabled,
   unlockAndPlayTest,
 } from "@/lib/order-alert"
+import {
+  type DateRange,
+  type RangePreset,
+  detectKind,
+  formatRangeLabel,
+  presetRange,
+  shiftRangeByDays,
+} from "@/lib/orders-date-range"
 import { cn } from "@/lib/utils"
 
 const PULSE_DURATION_MS = 5_000
@@ -100,13 +109,43 @@ export function OrdersTable({
   businessId,
   businessName,
   initialOrders,
+  initialRange,
 }: {
   businessId: string
   businessName: string
   initialOrders: OrderRow[]
+  initialRange: DateRange
 }) {
+  const router = useRouter()
   const [orders, setOrders] = useState<OrderRow[]>(initialOrders)
   const [updating, setUpdating] = useState<string | null>(null)
+  const [range, setRange] = useState<DateRange>(initialRange)
+  // Server snapshots overwrite local state, but only after a brief settle —
+  // when the user changes filter, the URL update + server-rendered initialOrders
+  // hand the new list down via props. The SSE stream then reconnects with the
+  // new from/to and replaces the snapshot. Keep both in sync.
+  useEffect(() => {
+    setRange(initialRange)
+  }, [initialRange.from, initialRange.to])
+
+  const kind = useMemo(() => detectKind(range), [range])
+
+  const updateRange = useCallback(
+    (next: DateRange) => {
+      const params = new URLSearchParams()
+      params.set("from", next.from)
+      params.set("to", next.to)
+      router.replace(`?${params.toString()}`, { scroll: false })
+    },
+    [router]
+  )
+
+  const onPreset = (preset: RangePreset) => updateRange(presetRange(preset))
+  const onShiftDay = (days: number) => updateRange(shiftRangeByDays(range, days))
+  const onPickDate = (value: string) => {
+    if (!value) return
+    updateRange({ from: value, to: value })
+  }
 
   // Per-device opt-in for the audio chime (localStorage). When false, the
   // visual alerts (pulse, toast, title flash) still fire — only sound is gated.
@@ -189,10 +228,14 @@ export function OrdersTable({
     }
   }, [])
 
-  const streamUrl = useMemo(
-    () => `/api/orders/stream?businessId=${encodeURIComponent(businessId)}`,
-    [businessId]
-  )
+  const streamUrl = useMemo(() => {
+    const params = new URLSearchParams({
+      businessId,
+      from: range.from,
+      to: range.to,
+    })
+    return `/api/orders/stream?${params.toString()}`
+  }, [businessId, range.from, range.to])
 
   const onSnapshot = useCallback(
     (next: OrderRow[]) => {
@@ -231,6 +274,13 @@ export function OrdersTable({
   useEffect(() => {
     setOrders(initialOrders)
   }, [initialOrders])
+
+  // Range change → reset the new-order detector so the next snapshot
+  // (under the new filter) seeds the seen-set instead of firing chimes
+  // for every row in the new window.
+  useEffect(() => {
+    seenIdsRef.current = null
+  }, [range.from, range.to])
 
   const handleActivateAlerts = useCallback(async () => {
     const ok = await unlockAndPlayTest()
@@ -277,9 +327,65 @@ export function OrdersTable({
   const showActivateBanner = !alertsEnabled
   const audioWillPlay = alertsEnabled && audioUnlocked
 
+  const presets: { key: RangePreset; label: string }[] = [
+    { key: "today", label: "Hoy" },
+    { key: "yesterday", label: "Ayer" },
+    { key: "week", label: "Semana" },
+    { key: "month", label: "Mes" },
+  ]
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap gap-1">
+            {presets.map((p) => (
+              <Button
+                key={p.key}
+                type="button"
+                size="sm"
+                variant={kind === p.key ? "default" : "outline"}
+                onClick={() => onPreset(p.key)}
+              >
+                {p.label}
+              </Button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              onClick={() => onShiftDay(-1)}
+              aria-label="Día anterior"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <input
+              type="date"
+              value={range.from}
+              max={range.to === range.from ? undefined : range.from}
+              onChange={(e) => onPickDate(e.target.value)}
+              aria-label="Elegir fecha"
+              className="h-9 rounded-md border border-input bg-transparent px-2 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              onClick={() => onShiftDay(1)}
+              aria-label="Día siguiente"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+
+          <span className="text-sm text-muted-foreground">
+            {formatRangeLabel(range, kind)}
+          </span>
+        </div>
+
         <TooltipProvider delayDuration={150}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -355,7 +461,7 @@ export function OrdersTable({
                 colSpan={9}
                 className="text-center text-muted-foreground py-8"
               >
-                Aún no hay pedidos.
+                No hay pedidos en este rango.
               </TableCell>
             </TableRow>
           ) : (

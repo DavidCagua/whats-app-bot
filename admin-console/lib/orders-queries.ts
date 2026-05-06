@@ -1,4 +1,5 @@
 import { prisma } from "./prisma"
+import type { Prisma } from "@prisma/client"
 
 export type OrderRow = {
   id: string
@@ -22,10 +23,20 @@ export type OrderRow = {
  * List orders for a business in newest-first order with their items.
  * Shared by the orders RSC and the SSE snapshot so both produce
  * identical row shapes.
+ *
+ * When `range` is supplied, only orders with `created_at` inside the
+ * (UTC) interval are returned. Both ends are inclusive.
  */
-export async function getOrdersForBusiness(businessId: string): Promise<OrderRow[]> {
+export async function getOrdersForBusiness(
+  businessId: string,
+  range?: { fromUtc: Date; toUtc: Date }
+): Promise<OrderRow[]> {
+  const where: Prisma.ordersWhereInput = { business_id: businessId }
+  if (range) {
+    where.created_at = { gte: range.fromUtc, lte: range.toUtc }
+  }
   const orders = await prisma.orders.findMany({
-    where: { business_id: businessId },
+    where,
     orderBy: { created_at: "desc" },
     include: {
       order_items: {

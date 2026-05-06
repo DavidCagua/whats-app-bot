@@ -2,6 +2,7 @@ import { NextRequest } from "next/server"
 import { auth } from "@/lib/auth"
 import { canAccessBusiness } from "@/lib/permissions"
 import { getOrdersForBusiness } from "@/lib/orders-queries"
+import { parseRange, rangeToUtc } from "@/lib/orders-date-range"
 import { inboxBus } from "@/lib/inbox-bus"
 
 export const runtime = "nodejs"
@@ -24,6 +25,13 @@ export async function GET(request: NextRequest) {
   if (!canAccessBusiness(session, businessId)) {
     return new Response("Access denied", { status: 403 })
   }
+
+  const range = rangeToUtc(
+    parseRange({
+      from: request.nextUrl.searchParams.get("from"),
+      to: request.nextUrl.searchParams.get("to"),
+    })
+  )
 
   const encoder = new TextEncoder()
 
@@ -68,7 +76,7 @@ export async function GET(request: NextRequest) {
 
       const sendSnapshot = async () => {
         try {
-          const orders = await getOrdersForBusiness(businessId)
+          const orders = await getOrdersForBusiness(businessId, range)
           write("snapshot", orders)
         } catch (err) {
           console.error("[orders-stream] snapshot failed", err)
