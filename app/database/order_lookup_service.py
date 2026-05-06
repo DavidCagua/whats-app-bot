@@ -114,12 +114,7 @@ def get_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _order_to_dict(order: Order) -> Dict[str, Any]:
-    """Serialize an Order + its items into a narrow dict for the customer service agent.
-
-    `order.to_dict()` already includes `order_type` ('delivery' | 'pickup'),
-    so downstream surfaces (CS responses, admin payloads) can branch
-    without re-querying the row.
-    """
+    """Serialize an Order + its items into a narrow dict for the customer service agent."""
     base = order.to_dict() if hasattr(order, "to_dict") else {}
     items = []
     for item in (order.order_items or []):
