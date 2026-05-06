@@ -94,6 +94,24 @@ class TestAgentExecuteTemplatePath:
         assert "Cra 7 #45-23" in output["message"]
         assert llm.invoke.call_count == 1  # only planner
 
+    def test_menu_url_uses_template(self):
+        # Regression: "carta" is a Colombian synonym for "menú". When the
+        # planner classifies a carta/menú request as menu_url, the template
+        # path must return the configured URL — not the chat fallback.
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        llm.invoke.return_value = _llm_response(
+            '{"intent": "GET_BUSINESS_INFO", "params": {"field": "menu_url"}}'
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body="quiero conocer la carta", wa_id="x", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+        assert "https://x.test/menu" in output["message"]
+        assert llm.invoke.call_count == 1  # only planner
+
 
 class TestAgentExecuteLLMResponsePath:
     """When result_kind isn't a clean business_info, response LLM should run."""

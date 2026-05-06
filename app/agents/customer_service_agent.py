@@ -226,7 +226,14 @@ Reglas:
                         "en cuánto tiempo llega", "qué tan rápido entregan", "cuánto se demoran",
                         "cuánto tarda un domicilio"). El backend usa per-order ETA si el cliente ya
                         tiene un pedido en curso; sin pedido, devuelve la política general del negocio.
-    "menu_url"        → link del menú
+    "menu_url"        → cualquier pedido del MENÚ o la CARTA, incluyendo el link.
+                        Cubre "menú" y "carta" (sinónimos en Colombia) con cualquier verbo
+                        de visualización/envío: "envíame la carta", "me mandas el menú",
+                        "pásame el menú", "quiero ver la carta", "quiero conocer la carta",
+                        "tienes carta", "me puedes enviar la carta", "compárteme el menú",
+                        "qué tienen para comer", "qué venden". Las frases listadas son
+                        ilustrativas, NO exhaustivas — cualquier solicitud del cliente
+                        para ver/recibir el menú o la carta cae aquí.
     "payment_methods" → medios de pago ("aceptan nequi", "qué pagos reciben", "efectivo?")
 - GET_ORDER_STATUS: el usuario pregunta por el estado de su pedido actual o reciente
   ("dónde está mi pedido", "ya salió?", "cuánto falta", "qué pasa con mi pedido"). Sin params.
@@ -645,7 +652,7 @@ class CustomerServiceAgent(BaseAgent):
             system = (
                 base_system
                 + "\nSITUACIÓN: No entendiste bien qué pregunta el cliente. "
-                "Dile brevemente con qué puedes ayudarle: horarios, dirección, domicilio, "
+                "Dile brevemente con qué puedes ayudarle: menú/carta, horarios, dirección, domicilio, "
                 "medios de pago, estado de pedido, historial."
             )
             inp = (
