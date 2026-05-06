@@ -840,3 +840,213 @@ class TestExpandStuckArticlesUnit:
         # "elote" — suffix "ote" is too short, must not split.
         out = router._expand_stuck_articles("elote", frozenset({"ote"}))
         assert out == "elote"
+
+
+class TestSingleTokenProductRouting:
+    """Regression — single-word catalog products short-circuit to order
+    even when prefixed by a greeting.
+
+    Production 2026-05-06 (Biela / 14155238886): user said "Buenas tiene
+    la barracuda?" cold (no prior turn) and the bot replied with the CS
+    chat fallback "No entendí bien tu pregunta". Root cause: BARRACUDA
+    is a single-word product, the multi-word recognizer skipped it, the
+    price-of-product short-circuit needs a price keyword, and the LLM
+    classifier biased toward customer_service because of the leading
+    "Buenas". The single-token map closes that gap deterministically.
+    """
+
+    @pytest.fixture
+    def biela_full_names(self):
+        return {
+            "la vuelta": "LA VUELTA",
+            "honey burger": "HONEY BURGER",
+        }
+
+    @pytest.fixture
+    def biela_single_tokens(self):
+        return {
+            "barracuda": "BARRACUDA",
+            "montesa": "MONTESA",
+            "bimota": "BIMOTA",
+            "beta": "BETA",
+        }
+
+    def _route(self, message, full_names, single_tokens, lookup=None):
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_single_token_map",
+            return_value=single_tokens,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=lookup or frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            return router.route(message, BIELA_CONTEXT, "David"), m
+
+    @pytest.mark.parametrize(
+        "msg,expected",
+        [
+            ("Buenas tiene la barracuda?", "BARRACUDA"),
+            ("Buenas tardes tienen montesa?", "MONTESA"),
+            ("Hola tienen bimota?", "BIMOTA"),
+            ("tiene la barracuda?", "BARRACUDA"),
+            ("tienen barracuda", "BARRACUDA"),
+            # Casing / accent shouldn't matter.
+            ("BUENAS TIENE LA BARRACUDA?", "BARRACUDA"),
+        ],
+    )
+    def test_greeting_plus_single_word_product_routes_to_order(
+        self, msg, expected, biela_full_names, biela_single_tokens,
+    ):
+        result, llm_factory = self._route(msg, biela_full_names, biela_single_tokens)
+        # LLM must NOT have been called — the deterministic short-circuit fired.
+        llm_factory.assert_not_called()
+        assert result.segments is not None and len(result.segments) == 1
+        assert result.segments[0][0] == router.DOMAIN_ORDER
+        assert result.recognized_product == expected
+
+    def test_pure_greeting_still_takes_priority(self, biela_full_names, biela_single_tokens):
+        # "hola" alone hits the greeting fast-path BEFORE any product
+        # recognizer. Single-token map exists but is irrelevant here.
+        result, llm_factory = self._route("hola", biela_full_names, biela_single_tokens)
+        llm_factory.assert_not_called()
+        assert result.direct_reply is not None
+        assert result.recognized_product is None
+
+    def test_no_product_token_falls_through_to_llm(self, biela_full_names, biela_single_tokens):
+        # "Buenas a qué hora abren?" — greeting + CS question, no
+        # catalog token. Must go to the LLM, not silently route to order.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=biela_full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_single_token_map",
+            return_value=biela_single_tokens,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("Buenas a qué hora abren?", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+        assert result.recognized_product is None
+
+    def test_two_single_tokens_in_message_punts_to_llm(
+        self, biela_full_names, biela_single_tokens,
+    ):
+        # "una barracuda y una montesa" mentions two distinct catalog
+        # products. Same disambiguation pattern as the multi-word path:
+        # if more than one matches, let the LLM split into segments.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "order", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=biela_full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_single_token_map",
+            return_value=biela_single_tokens,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route(
+                "una barracuda y una montesa", BIELA_CONTEXT, "David",
+            )
+        mock_llm.invoke.assert_called_once()
+        assert result.recognized_product is None
+
+    def test_multi_word_match_takes_priority_over_single_token(
+        self, biela_full_names, biela_single_tokens,
+    ):
+        # "una honey burger" matches the multi-word "HONEY BURGER" first;
+        # we must not also try to single-token-match "burger" or "honey".
+        # The multi-word path returns LA VUELTA / HONEY BURGER / etc.
+        result, llm_factory = self._route(
+            "una honey burger", biela_full_names, biela_single_tokens,
+        )
+        llm_factory.assert_not_called()
+        assert result.recognized_product == "HONEY BURGER"
+
+    def test_single_token_map_failure_falls_through(self, biela_full_names):
+        # Cache helper raising must not crash routing — recognizer
+        # returns None and the LLM runs as before.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=biela_full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_single_token_map",
+            side_effect=RuntimeError("boom"),
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("tiene barracuda?", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+        assert result.recognized_product is None
+
+
+class TestSingleTokenMapBuilder:
+    """Unit tests for catalog_cache._build_router_single_token_map.
+
+    Documents the exclusion rules so a future refactor of the lookup
+    rules doesn't silently re-introduce bad matches (multi-word names
+    being collapsed, ambiguous duplicates leaking through, common
+    short Spanish words showing up in the map).
+    """
+
+    @staticmethod
+    def _build(products):
+        from app.services import catalog_cache as _cc
+        with patch.object(_cc, "list_products", return_value=products):
+            return _cc._build_router_single_token_map("biz-1")
+
+    def test_includes_single_word_active_products(self):
+        products = [
+            {"name": "BARRACUDA", "is_active": True},
+            {"name": "MONTESA", "is_active": True},
+        ]
+        out = self._build(products)
+        assert out == {"barracuda": "BARRACUDA", "montesa": "MONTESA"}
+
+    def test_excludes_multi_word_products(self):
+        # Multi-word names are owned by the full-name map. Including
+        # them here would route "honey burger" via single-token match
+        # on either "honey" or "burger" alone — wrong.
+        products = [
+            {"name": "HONEY BURGER", "is_active": True},
+            {"name": "BIELA FRIES", "is_active": True},
+        ]
+        out = self._build(products)
+        assert out == {}
+
+    def test_excludes_short_tokens(self):
+        # "ron" is a real product but only 3 chars — too risky against
+        # common short Spanish words.
+        products = [{"name": "RON", "is_active": True}]
+        out = self._build(products)
+        assert out == {}
+
+    def test_drops_ambiguous_duplicate_token(self):
+        # Two products normalize to the same single token ("AGUA"
+        # bottled vs "AGUA" tap, hypothetically). The router can't
+        # tell which one the user meant — drop both.
+        products = [
+            {"name": "AGUA", "is_active": True, "id": "p1"},
+            {"name": "Agua", "is_active": True, "id": "p2"},
+        ]
+        # Two different canonical strings ("AGUA" vs "Agua") for the
+        # same token "agua" — must be dropped from the map.
+        out = self._build(products)
+        assert "agua" not in out
+
+    def test_normalizes_to_lowercase_token(self):
+        products = [{"name": "Barracuda", "is_active": True}]
+        out = self._build(products)
+        assert out == {"barracuda": "Barracuda"}

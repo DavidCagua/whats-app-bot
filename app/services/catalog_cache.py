@@ -392,3 +392,64 @@ def get_router_full_name_map(business_id: str) -> Dict[str, str]:
         (),
         lambda: _build_router_full_name_map(business_id),
     )
+
+
+# ── Single-token product-name lookup ───────────────────────────────
+# Mapping from a single normalized token → canonical catalog name for
+# products whose name is a single meaningful word (BARRACUDA, MONTESA,
+# BIMOTA, BETA, ...). Used by the router to short-circuit messages like
+# "Buenas tiene la barracuda?" / "tienen montesa?" to DOMAIN_ORDER
+# without depending on the LLM classifier — the LLM gets biased toward
+# customer_service when a greeting prefixes the question.
+#
+# Multi-word products are intentionally excluded; they're already
+# covered by ``get_router_full_name_map``. Tokens shorter than 4 chars
+# are skipped to avoid collisions on common short Spanish words.
+
+
+def _build_router_single_token_map(business_id: str) -> Dict[str, str]:
+    """
+    Return ``{token: canonical_name}`` for active products whose name
+    reduces to exactly one meaningful token (≥ 4 chars). Two products
+    sharing the same token are dropped from the map — the router punts
+    to the LLM rather than guess.
+    """
+    out: Dict[str, str] = {}
+    ambiguous: set = set()
+    products = list_products(business_id) or []
+    for p in products:
+        canonical = (p.get("name") or "").strip()
+        if not canonical:
+            continue
+        tokens = _split_tokens(canonical)
+        meaningful = [
+            t for t in tokens
+            if t not in _TOKEN_STOPWORDS and t not in _NON_PRODUCT_TOKENS
+        ]
+        if len(meaningful) != 1:
+            continue
+        token = meaningful[0]
+        if len(token) < 4:
+            continue
+        if token in out and out[token] != canonical:
+            ambiguous.add(token)
+            continue
+        out.setdefault(token, canonical)
+    for tok in ambiguous:
+        out.pop(tok, None)
+    return out
+
+
+def get_router_single_token_map(business_id: str) -> Dict[str, str]:
+    """
+    Return cached ``{token: canonical_name}`` map. Same TTL as the
+    other router caches.
+    """
+    if not business_id:
+        return {}
+    return get_or_fetch(
+        business_id,
+        "router_single_token_map",
+        (),
+        lambda: _build_router_single_token_map(business_id),
+    )

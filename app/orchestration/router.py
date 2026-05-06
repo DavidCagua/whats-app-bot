@@ -212,8 +212,14 @@ Reglas de segmentación:
 - Dos intenciones DE DOMINIOS DIFERENTES → DOS segmentos.
     "dame una barracuda y a qué hora abren" → order + customer_service.
     "envíame la carta y dame una barracuda" → customer_service + order.
-- Saludos al inicio de una pregunta → ABSORBER en el dominio principal.
-    "hola a qué hora abren" → UN segmento customer_service (no un "chat" aparte).
+- Saludos al inicio de una pregunta → ABSORBER en el dominio principal. Un saludo
+  prefijo (Hola, Buenas, Buenas tardes, Buenos días) NO cambia el dominio — son
+  contexto, NO una intención. Clasifica por la INTENCIÓN DESPUÉS del saludo:
+    "hola a qué hora abren" → UN segmento customer_service (la intención es horarios).
+    "Buenas tiene la barracuda?" → UN segmento order (la intención es preguntar por
+    un producto del menú; la regla de browsing aplica igual que "tienen coca cola").
+    "Hola tienen montesa?" → UN segmento order (mismo patrón).
+    "Buenos días me regalan una hamburguesa" → UN segmento order.
 - Máximo 3 segmentos.
 - El texto de cada segmento puede ser un extracto o una reformulación breve; debe conservar todos los datos relevantes.
 
@@ -548,9 +554,33 @@ def _recognize_full_product_name(
         needle = f" {normalized} "
         if needle in padded:
             matches.append(canonical)
-    if len(matches) != 1:
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) >= 2:
+        # Multiple multi-word matches → ambiguous, punt to LLM.
         return None
-    return matches[0]
+
+    # No multi-word match. Fall back to single-token catalog lookup so
+    # messages like "Buenas tiene la barracuda?" (single-word product
+    # name + greeting prefix) still short-circuit to order. The LLM
+    # classifier biases toward customer_service when a greeting precedes
+    # the question — production 2026-05-06 (Biela / 14155238886): user
+    # said "Buenas tiene la barracuda?" cold and the bot replied with
+    # the CS chat fallback "No entendí bien tu pregunta".
+    try:
+        single_map = catalog_cache.get_router_single_token_map(business_id)
+    except Exception as exc:
+        logger.warning("[ROUTER] router_single_token_map failed: %s", exc)
+        return None
+    if not single_map:
+        return None
+    msg_tokens = set(norm_msg.split())
+    single_matches = {
+        single_map[t] for t in msg_tokens if t in single_map
+    }
+    if len(single_matches) == 1:
+        return next(iter(single_matches))
+    return None
 
 
 # ── Public entry point ──────────────────────────────────────────────
