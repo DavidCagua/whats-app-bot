@@ -94,6 +94,13 @@ class TurnContext:
     recent_order_id: Optional[str] = None
     latest_order_status: Optional[str] = None
     latest_order_id: Optional[str] = None
+    # Set by the router when it detects a multi-word catalog product
+    # name as a contiguous substring of the user's message. The
+    # order planner reads this so it doesn't redirect to a
+    # previously-listed option (Biela / 3147554464, 2026-05-06: user
+    # said "Tienes la a la Vuelta?", planner picked HONEY BURGER from
+    # a recent listing and stuffed "a la vuelta" into notes).
+    recognized_product: Optional[str] = None
 
 
 def build_turn_context(
@@ -259,6 +266,11 @@ def render_for_prompt(ctx: TurnContext, include_last_assistant: bool = True) -> 
         # on whether the user just completed an order, has one in
         # flight, or is talking after a cancellation.
         lines.append(f"Último pedido (estado): {ctx.latest_order_status}")
+    if ctx.recognized_product:
+        # Surfaced by the router when a multi-word catalog product
+        # name appears in the message. The order planner MUST honor
+        # this and not redirect to a previously-listed option.
+        lines.append(f"Producto reconocido en el mensaje: {ctx.recognized_product}")
     if ctx.recent_history:
         # Render the rolling window so every layer sees the same
         # stateful view (router was previously starved of user-turn

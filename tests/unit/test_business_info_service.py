@@ -134,6 +134,30 @@ class TestGetBusinessInfo:
         )
         assert result == "Nequi o efectivo"
 
+    def test_payment_details_returns_configured_value(self):
+        result = bis.get_business_info(
+            _ctx({"payment_details": "El pago es directo con el domiciliario, contra entrega."}),
+            "payment_details",
+        )
+        assert result == "El pago es directo con el domiciliario, contra entrega."
+
+    def test_payment_details_falls_back_to_contra_entrega_default(self):
+        # Operators don't always configure this. The safe default is the
+        # contra-entrega text — never the business contact phone, which
+        # is what the CS agent used to return when misclassifying these
+        # questions as `phone` (Biela 2026-05-06 incident).
+        assert bis.get_business_info(_ctx({}), "payment_details") == (
+            "El pago es contra entrega, directo con el domiciliario."
+        )
+
+    def test_payment_details_falls_back_when_explicitly_none(self):
+        assert bis.get_business_info(_ctx({"payment_details": None}), "payment_details") == (
+            "El pago es contra entrega, directo con el domiciliario."
+        )
+        assert bis.get_business_info(_ctx({"payment_details": ""}), "payment_details") == (
+            "El pago es contra entrega, directo con el domiciliario."
+        )
+
     def test_unknown_field_returns_none(self):
         result = bis.get_business_info(_ctx({"hours_text": "x"}), "floor_plan")
         assert result is None
@@ -150,6 +174,7 @@ class TestGetBusinessInfo:
             bis.FIELD_HOURS, bis.FIELD_ADDRESS, bis.FIELD_PHONE,
             bis.FIELD_DELIVERY_FEE, bis.FIELD_DELIVERY_TIME,
             bis.FIELD_MENU_URL, bis.FIELD_PAYMENT_METHODS,
+            bis.FIELD_PAYMENT_DETAILS,
         }
 
 

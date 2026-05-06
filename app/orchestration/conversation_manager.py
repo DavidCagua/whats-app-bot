@@ -256,6 +256,15 @@ class ConversationManager:
             full_message=message_body,
         )
 
+        # If the router detected a multi-word catalog product name in
+        # the message, surface it on the per-turn snapshot so the
+        # order planner sees ``Producto reconocido en el mensaje:``
+        # in its prompt context and won't redirect to a previously-
+        # listed option.
+        if router_result.recognized_product:
+            from dataclasses import replace as _dc_replace
+            turn_ctx = _dc_replace(turn_ctx, recognized_product=router_result.recognized_product)
+
         agents_summary = ", ".join(f"{a['agent_type']}:{a.get('priority')}" for a in enabled_agents) \
             if enabled_agents else "(none, default booking)"
         logging.warning(

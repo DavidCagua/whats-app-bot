@@ -82,6 +82,13 @@ class RouterResult:
 
     direct_reply: Optional[str] = None
     segments: Optional[List[Tuple[str, str]]] = None
+    # When the router detects a multi-word catalog product name as a
+    # contiguous substring of the user message, it surfaces the
+    # canonical catalog name here. Downstream agents read this to
+    # avoid mis-resolving abbreviated/listed-option names. See
+    # ``_recognize_full_product_name`` and the order planner's
+    # ``Producto reconocido en el mensaje:`` rule.
+    recognized_product: Optional[str] = None
 
     @property
     def domain(self) -> Optional[str]:
@@ -502,6 +509,50 @@ def _deterministic_price_of_product(
     return False
 
 
+def _recognize_full_product_name(
+    message_body: str,
+    business_context: Optional[dict],
+) -> Optional[str]:
+    """
+    Detect a multi-word catalog product name appearing as a contiguous
+    substring of the (normalized) user message. Returns the canonical
+    catalog name (e.g. ``"LA VUELTA"``) when exactly one product
+    matches, else ``None``.
+
+    The "exactly one" guard prevents false positives when the message
+    contains a longer phrase that itself contains a shorter product
+    name (e.g. ``"honey burger la vuelta"`` matches both, so we punt
+    to the LLM rather than guess).
+    """
+    business_id = str((business_context or {}).get("business_id") or "")
+    if not business_id or not (message_body or "").strip():
+        return None
+    try:
+        full_names = catalog_cache.get_router_full_name_map(business_id)
+    except Exception as exc:
+        logger.warning("[ROUTER] router_full_name_map failed: %s", exc)
+        return None
+    if not full_names:
+        return None
+    norm_msg = _strip_accents_lower(message_body)
+    norm_msg = re.sub(r"[^\w\s]", " ", norm_msg)
+    norm_msg = re.sub(r"\s+", " ", norm_msg).strip()
+    if not norm_msg:
+        return None
+    # Pad with spaces so we can check for token-aligned substring
+    # ("la vuelta" must match " la vuelta " in " hamburguesa la vuelta ",
+    #  not collide with "ela vueltaa" or any partial alphabetic blob).
+    padded = f" {norm_msg} "
+    matches: List[str] = []
+    for normalized, canonical in full_names.items():
+        needle = f" {normalized} "
+        if needle in padded:
+            matches.append(canonical)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 # ── Public entry point ──────────────────────────────────────────────
 
 def route(
@@ -531,13 +582,26 @@ def route(
     if not (message_body or "").strip():
         return RouterResult()
 
+    # Pre-compute the multi-word catalog product detection — it's
+    # used both to short-circuit routing (when present, the user
+    # named a specific product) AND to surface a hint to the order
+    # planner so it doesn't redirect to a previously-listed option.
+    # Same shape as the stuck-article splitter, for the multi-word
+    # product-name case (Biela / 3147554464, 2026-05-06: LA VUELTA
+    # was misrouted to HONEY BURGER + notes='a la vuelta' because
+    # the planner picked from a partial listed-options block).
+    recognized_product = _recognize_full_product_name(message_body, business_context)
+
     # 2. Deterministic pre-classifier — price-of-product short-circuit.
     # Skips the LLM when the catalog itself confirms the user named a
     # product. Independent of conversation state (price questions are
     # valid in any state).
     if _deterministic_price_of_product(message_body, business_context):
         logger.info("[ROUTER] deterministic price-of-product hit → order")
-        return RouterResult(segments=[(DOMAIN_ORDER, message_body)])
+        return RouterResult(
+            segments=[(DOMAIN_ORDER, message_body)],
+            recognized_product=recognized_product,
+        )
 
     # 3. Stuck-article splitter — "unabimota" / "elpegoretti" /
     # "lapicada" with a catalog match → force order with the
@@ -559,9 +623,26 @@ def route(
                     "[ROUTER] stuck-article splitter rewrote message → order: %r → %r",
                     message_body, expanded,
                 )
-                return RouterResult(segments=[(DOMAIN_ORDER, expanded)])
+                return RouterResult(
+                    segments=[(DOMAIN_ORDER, expanded)],
+                    recognized_product=recognized_product,
+                )
 
-    # 4. LLM classification
+    # 4. Multi-word product-name short-circuit. The catalog confirms
+    # the user named a specific product (≥ 2 tokens, ≥ 5 chars
+    # normalized). Force order routing — the order planner picks it
+    # up via ``recognized_product``.
+    if recognized_product is not None:
+        logger.info(
+            "[ROUTER] full-name product short-circuit → order: recognized=%r",
+            recognized_product,
+        )
+        return RouterResult(
+            segments=[(DOMAIN_ORDER, message_body)],
+            recognized_product=recognized_product,
+        )
+
+    # 5. LLM classification
     segments = _classify_with_llm(message_body, business_context, ctx=ctx)
     if not segments:
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")
@@ -575,4 +656,7 @@ def route(
         (ctx or TurnContext()).has_active_cart,
         (ctx or TurnContext()).has_recent_cancellable_order,
     )
-    return RouterResult(segments=segments)
+    return RouterResult(
+        segments=segments,
+        recognized_product=recognized_product,
+    )

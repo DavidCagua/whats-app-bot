@@ -634,6 +634,171 @@ class TestRouterStuckArticleSplitter:
         mock_llm.invoke.assert_called_once()
 
 
+class TestRouterMultiWordProductNameShortCircuit:
+    """
+    Regression: 2026-05-06 (Biela / 3147554464). User said "Regálame una
+    hamburguesa a la vuelta" (turn 1) and "Tienes la a la Vuelta?"
+    (turn 3). LA VUELTA exists in the catalog, but the bot replied
+    "Se ha agregado la HONEY BURGER (a la vuelta)" — planner picked
+    HONEY BURGER from a recently-listed options block and dumped the
+    real product name into notes.
+
+    The router must detect multi-word catalog product names as
+    contiguous substrings of the message, force ``order`` routing,
+    AND surface a ``recognized_product`` hint that the order planner
+    honors over its abbreviated-name rule.
+    """
+
+    @pytest.fixture
+    def biela_full_names(self):
+        return {
+            "la vuelta": "LA VUELTA",
+            "honey burger": "HONEY BURGER",
+            "al pastor": "AL PASTOR",
+            "mexican burger": "MEXICAN BURGER",
+            "biela fries": "BIELA FRIES",
+            "papas pergretti": "PAPAS PERGRETTI",
+            "jugos en agua": "Jugos en agua",
+            "jugos en leche": "Jugos en leche",
+        }
+
+    def _route(self, message, full_names):
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset({"vuelta", "honey", "burger", "pastor"}),
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            return router.route(message, BIELA_CONTEXT, "David"), m
+
+    @pytest.mark.parametrize(
+        "msg,expected",
+        [
+            ("Regálame una hamburguesa a la vuelta", "LA VUELTA"),
+            ("Tienes la a la Vuelta?", "LA VUELTA"),
+            ("Quiero una honey burger", "HONEY BURGER"),
+            ("una al pastor por favor", "AL PASTOR"),
+            ("dame unas biela fries", "BIELA FRIES"),
+            ("un jugos en leche de mora", "Jugos en leche"),
+        ],
+    )
+    def test_multi_word_product_routes_to_order_with_recognized(self, msg, expected, biela_full_names):
+        result, llm_factory = self._route(msg, biela_full_names)
+        # LLM must NOT have been called.
+        llm_factory.assert_not_called()
+        assert result.segments is not None and len(result.segments) == 1
+        assert result.segments[0][0] == router.DOMAIN_ORDER
+        assert result.recognized_product == expected
+
+    def test_no_multi_word_match_falls_through_to_llm(self, biela_full_names):
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=biela_full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("a qué hora abren?", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+        assert result.recognized_product is None
+
+    def test_multiple_matches_punt_to_llm(self, biela_full_names):
+        # When the message contains MULTIPLE multi-word product names,
+        # we don't know which one the user meant — let the LLM decide.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "order", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=biela_full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route(
+                "una honey burger y un al pastor", BIELA_CONTEXT, "David",
+            )
+        mock_llm.invoke.assert_called_once()
+        assert result.recognized_product is None
+
+    def test_punctuation_does_not_block_match(self, biela_full_names):
+        # Trailing "?" / leading "¿" must not prevent the match.
+        result, llm_factory = self._route("¿Tienes la vuelta?", biela_full_names)
+        llm_factory.assert_not_called()
+        assert result.recognized_product == "LA VUELTA"
+
+    def test_substring_must_be_token_aligned(self, biela_full_names):
+        # "xxxla vueltayyy" — "la vuelta" appears inside but not as a
+        # full token-aligned substring (no space before "la" — it's
+        # preceded by "xxx"). The padding-space trick must reject this.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "chat", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=biela_full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("xxxla vueltayyy", BIELA_CONTEXT, "David")
+        # No spurious recognition; the LLM ran (no short-circuit fired).
+        assert result.recognized_product is None
+        mock_llm.invoke.assert_called_once()
+
+    def test_empty_full_name_map_falls_through(self):
+        # Brand-new business with no products yet → empty map → no
+        # recognition → LLM runs as today.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value={},
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("una hamburguesa a la vuelta", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+        assert result.recognized_product is None
+
+    def test_full_name_map_failure_falls_through(self):
+        # If the full-name-map helper raises, the recognition must
+        # not crash the router.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            side_effect=RuntimeError("boom"),
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("una hamburguesa a la vuelta", BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+        assert result.recognized_product is None
+
+    def test_greeting_still_takes_priority(self, biela_full_names):
+        # Greeting fast-path must still win over the full-name short-circuit.
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_full_name_map",
+            return_value=biela_full_names,
+        ), patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=frozenset(),
+        ), patch("app.orchestration.router._get_llm_classifier") as m:
+            result = router.route("hola", BIELA_CONTEXT, "David")
+            m.assert_not_called()
+        assert result.direct_reply is not None
+        assert result.recognized_product is None
+
+
 class TestExpandStuckArticlesUnit:
     """Unit tests for the pure rewrite helper."""
 

@@ -94,6 +94,97 @@ class TestAgentExecuteTemplatePath:
         assert "Cra 7 #45-23" in output["message"]
         assert llm.invoke.call_count == 1  # only planner
 
+    def test_payment_details_field_name_as_intent_remap(self):
+        # Production 2026-05-06 (Biela / 3177000722): planner emitted
+        # {"intent": "PAYMENT_DETAILS", "params": {}} for "gracias Donde
+        # transfiero?" instead of the canonical GET_BUSINESS_INFO with
+        # field=payment_details. The CS flow logged "unknown intent —
+        # falling back to chat" and the customer got "no entendí". The
+        # agent now defensively remaps any field-name-as-intent to the
+        # canonical shape so the lookup still resolves.
+        agent = CustomerServiceAgent()
+        ctx = {
+            "business_id": "biela",
+            "business": {
+                "name": "Biela",
+                "settings": {
+                    "payment_details": "El pago es directo con el domiciliario, contra entrega.",
+                },
+            },
+        }
+        llm = MagicMock()
+        # Field name as intent — wrong shape, must be remapped.
+        llm.invoke.return_value = _llm_response(
+            '{"intent": "PAYMENT_DETAILS", "params": {}}'
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body="donde transfiero?",
+                wa_id="x", name="X",
+                business_context=ctx, conversation_history=[],
+            )
+        assert output["message"] == "El pago es directo con el domiciliario, contra entrega."
+        assert llm.invoke.call_count == 1  # template path, no response LLM
+
+    def test_payment_details_default_when_business_has_no_setting(self):
+        # No settings.payment_details → fall back to the contra-entrega
+        # default. Never return the business contact phone.
+        agent = CustomerServiceAgent()
+        ctx_no_payment = {
+            "business_id": "biela",
+            "business": {
+                "name": "Biela",
+                "settings": {"phone": "+573177000722"},  # phone present, payment_details absent
+            },
+        }
+        llm = MagicMock()
+        llm.invoke.return_value = _llm_response(
+            '{"intent": "GET_BUSINESS_INFO", "params": {"field": "payment_details"}}'
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body="a qué número pago?",
+                wa_id="x", name="X",
+                business_context=ctx_no_payment, conversation_history=[],
+            )
+        assert output["message"] == "El pago es contra entrega, directo con el domiciliario."
+        # Critical: contact phone must NOT leak into a payment answer.
+        assert "+573177000722" not in output["message"]
+
+    def test_payment_details_uses_template(self):
+        # Regression: production 2026-05-06 (Biela). Customer asked
+        # "A qué número se realiza el pago?" / "Donde transfiero?" after
+        # placing the order, and CS either returned the business contact
+        # phone (misclassified as `phone`) or fell through to chat
+        # ("¿puedes aclararme...?"). The fix routes payment-account
+        # questions to the new `payment_details` field, which renders
+        # the configured value verbatim.
+        agent = CustomerServiceAgent()
+        ctx = {
+            "business_id": "biela",
+            "business": {
+                "name": "Biela",
+                "settings": {
+                    "payment_details": "El pago es directo con el domiciliario, contra entrega.",
+                },
+            },
+        }
+        llm = MagicMock()
+        llm.invoke.return_value = _llm_response(
+            '{"intent": "GET_BUSINESS_INFO", "params": {"field": "payment_details"}}'
+        )
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"):
+            output = agent.execute(
+                message_body="a qué número se realiza el pago?",
+                wa_id="x", name="X",
+                business_context=ctx, conversation_history=[],
+            )
+        assert output["message"] == "El pago es directo con el domiciliario, contra entrega."
+        assert llm.invoke.call_count == 1  # only planner — template path
+
     def test_menu_url_uses_template(self):
         # Regression: "carta" is a Colombian synonym for "menú". When the
         # planner classifies a carta/menú request as menu_url, the template

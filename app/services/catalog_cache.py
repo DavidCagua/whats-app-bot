@@ -301,3 +301,94 @@ def get_router_lookup_set(business_id: str) -> FrozenSet[str]:
         (),
         lambda: _build_router_lookup_set(business_id),
     )
+
+
+# ── Multi-word product-name lookup ─────────────────────────────────
+# Mapping from normalized multi-word product names → canonical
+# (uppercase) catalog name. Used by the router's substring short-
+# circuit so messages like "una hamburguesa a la vuelta" can be
+# anchored to the actual catalog product LA VUELTA before the LLM
+# planner sees them — same shape as the stuck-article splitter, for
+# the multi-word case.
+#
+# Single-word product names (BARRACUDA, BIMOTA, ...) are NOT here —
+# they're already covered by ``get_router_lookup_set`` and the
+# stuck-article splitter. Including them would over-fire on single
+# tokens that show up inside common phrases.
+#
+# Minimum length 5 to skip generics like "soda", "agua", "leche".
+
+
+def _build_router_full_name_map(business_id: str) -> Dict[str, str]:
+    """
+    Return ``{normalized_name: canonical_catalog_name}`` for every
+    multi-word active product (≥ 2 tokens after stopword filtering and
+    ≥ 5 chars overall). Synonyms with multi-word values are included
+    too so admin-defined aliases work.
+    """
+    out: Dict[str, str] = {}
+    products = list_products(business_id) or []
+    for p in products:
+        canonical = (p.get("name") or "").strip()
+        if not canonical:
+            continue
+        tokens = _split_tokens(canonical)
+        if not tokens:
+            continue
+        # Skip names whose only words are stopwords or denied tokens.
+        meaningful = [
+            t for t in tokens
+            if t not in _TOKEN_STOPWORDS and t not in _NON_PRODUCT_TOKENS
+        ]
+        if len(meaningful) < 1:
+            continue
+        normalized = " ".join(tokens)
+        if len(normalized) < 5:
+            continue
+        if " " not in normalized:
+            # Single-token product — handled by the existing token
+            # lookup-set, skip here.
+            continue
+        out[normalized] = canonical
+
+    # Multi-word synonym values map back to whichever product the key
+    # implies. Without a key→product link we can't be precise, so we
+    # only treat synonym VALUES as aliases when they themselves are
+    # multi-word. The synonym KEY is then the canonical name we'll
+    # surface (best-effort — matches the synonyms file convention).
+    try:
+        synonyms = get_or_fetch(
+            business_id,
+            "router_synonyms",
+            (),
+            lambda: _load_synonyms_for_router(business_id),
+        )
+    except Exception as exc:
+        logger.warning("[CATALOG_CACHE] router synonyms load (full-name) failed: %s", exc)
+        synonyms = {}
+
+    for key, vals in (synonyms or {}).items():
+        for v in vals or []:
+            if not isinstance(v, str):
+                continue
+            normalized = " ".join(_split_tokens(v))
+            if " " not in normalized or len(normalized) < 5:
+                continue
+            # Don't overwrite a real product name with a synonym alias.
+            out.setdefault(normalized, str(key))
+    return out
+
+
+def get_router_full_name_map(business_id: str) -> Dict[str, str]:
+    """
+    Return cached ``{normalized_multi_word_name: canonical_name}``.
+    Cached with the same TTL as ``get_router_lookup_set``.
+    """
+    if not business_id:
+        return {}
+    return get_or_fetch(
+        business_id,
+        "router_full_name_map",
+        (),
+        lambda: _build_router_full_name_map(business_id),
+    )

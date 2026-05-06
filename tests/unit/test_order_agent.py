@@ -585,6 +585,40 @@ class TestPlannerPromptRules:
         from app.agents.order_agent import PLANNER_SYSTEM_TEMPLATE as T
         assert "{latest_order_block}" in T
 
+    def test_planner_prompt_honors_recognized_product_hint(self):
+        """
+        Regression: 2026-05-06 (Biela / 3147554464). User said
+        "Tienes la a la Vuelta?" right after the bot listed
+        "HONEY BURGER, MEXICAN BURGER, AL PASTOR, AMERICANA, ARRABBIATA"
+        (LA VUELTA wasn't in the listed slice). The planner's
+        RESOLUCIÓN DE NOMBRES ABREVIADOS rule kicked in and emitted
+        ADD_TO_CART {product_name: "HONEY BURGER", notes: "a la vuelta"}
+        because the LLM didn't recognize "la Vuelta" as a separate
+        real product.
+
+        After the router's multi-word product-name short-circuit,
+        the turn context now carries
+        ``Producto reconocido en el mensaje: LA VUELTA``. The planner
+        must have a max-priority rule that uses that hint and
+        explicitly OVERRIDES the abbreviated-name rule.
+        """
+        prompt = PLANNER_SYSTEM_TEMPLATE
+        lower = prompt.lower()
+        # The new max-priority rule heading.
+        assert "producto reconocido" in lower
+        # Must reference the exact context line emitted by
+        # render_for_prompt so the LLM can pattern-match against it.
+        assert "producto reconocido en el mensaje:" in lower
+        # Must explicitly forbid redirecting to a listed option.
+        assert "nunca lo reemplaces" in lower
+        # Must explicitly carve out the abbreviated-name rule —
+        # state that it does NOT apply when the hint is present.
+        assert "resolución de nombres abreviados" in lower
+        # Must scope notes correctly so the product name doesn't
+        # end up in notes (the production failure mode).
+        assert "nunca pongas el nombre del producto en `notes`" in lower or \
+               "nunca pongas el nombre del producto en notes" in lower
+
     def test_planner_prompt_does_not_split_default_side_into_separate_item(self):
         """
         Regression: production observation 2026-05-04 (Biela / 3145798093)

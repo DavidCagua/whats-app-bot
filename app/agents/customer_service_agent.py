@@ -43,6 +43,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .base_agent import BaseAgent, AgentOutput
 from ..orchestration.customer_service_flow import (
     execute_customer_service_intent,
+    VALID_INTENTS,
     INTENT_GET_BUSINESS_INFO,
     INTENT_GET_ORDER_STATUS,
     INTENT_GET_ORDER_HISTORY,
@@ -220,7 +221,10 @@ Reglas:
 - GET_BUSINESS_INFO con params.field: pregunta sobre el negocio. Valores de field:
     "hours"           → cualquier pregunta sobre HORARIOS, DISPONIBILIDAD, o si el local está OPERANDO ahora. Cubre tanto preguntas explícitas de hora ("a qué hora abren", "cuándo cierran", "abren los domingos", "qué horario tienen") como preguntas de disponibilidad/atención/servicio ("hay atención", "hay atención hoy", "hay servicio", "tienen servicio", "están atendiendo", "siguen atendiendo", "ya atienden", "todavía atienden", "están abiertos", "siguen abiertos", "ya están abiertos", "ya abrieron", "están operando", "ya cerraron"). Son la misma intención: saber si el negocio está operando. Las frases listadas son ilustrativas, NO exhaustivas — interpreta contextualmente cualquier pregunta del cliente sobre si la tienda está atendiendo, ofreciendo servicio, abierta, o disponible AHORA, incluso si usa palabras distintas a las listadas.
     "address"         → ubicación ("dónde quedan", "cuál es la dirección")
-    "phone"           → teléfono de contacto
+    "phone"           → teléfono DE CONTACTO general del negocio para llamarlos o escribirles
+                        ("cuál es su número", "a qué teléfono los llamo", "número de contacto",
+                        "tienen WhatsApp"). NO uses esto para preguntas de PAGO — esas van a
+                        "payment_details", aunque mencionen un "número".
     "delivery_fee"    → costo del domicilio ("cuánto cobran domicilio", "cuánto vale el envío")
     "delivery_time"   → tiempo de entrega ("cuánto se demora la entrega", "cuánto tardan en entregar",
                         "en cuánto tiempo llega", "qué tan rápido entregan", "cuánto se demoran",
@@ -234,7 +238,18 @@ Reglas:
                         "qué tienen para comer", "qué venden". Las frases listadas son
                         ilustrativas, NO exhaustivas — cualquier solicitud del cliente
                         para ver/recibir el menú o la carta cae aquí.
-    "payment_methods" → medios de pago ("aceptan nequi", "qué pagos reciben", "efectivo?")
+    "payment_methods" → MEDIOS DE PAGO que el negocio acepta — la LISTA de opciones
+                        ("aceptan nequi?", "qué pagos reciben", "puedo pagar con tarjeta?",
+                        "aceptan efectivo?"). Responde si tal o cual medio se acepta.
+    "payment_details" → CÓMO o DÓNDE PAGAR — instrucciones de pago: número de Nequi,
+                        cuenta bancaria, datos de transferencia, o si el pago es CONTRA
+                        ENTREGA al domiciliario. Frases típicas (NO exhaustivas):
+                        "donde pago", "donde transfiero", "a qué número se realiza el pago",
+                        "a qué número pago", "cuál es el Nequi", "número de Nequi para
+                        transferir", "ese es el Nequi?", "cuenta para depositar",
+                        "datos para transferir", "pásame el Nequi", "cómo te pago",
+                        "dónde consigno". CRÍTICO: aunque la pregunta mencione "número",
+                        si el contexto es PAGO usa "payment_details", NUNCA "phone".
 - GET_ORDER_STATUS: el usuario pregunta por el estado de su pedido actual o reciente
   ("dónde está mi pedido", "ya salió?", "cuánto falta", "qué pasa con mi pedido"). Sin params.
 - GET_ORDER_HISTORY: el usuario pide ver pedidos anteriores
@@ -266,6 +281,14 @@ Reglas:
 
 Si el mensaje pregunta por varias cosas a la vez, elige la más específica. Si un dato no aparece arriba (ej. "¿hacen eventos?"), usa CUSTOMER_SERVICE_CHAT.
 
+CRÍTICO sobre la forma del JSON: el "intent" SIEMPRE es uno de los siete listados arriba (GET_BUSINESS_INFO, GET_ORDER_STATUS, GET_ORDER_HISTORY, CANCEL_ORDER, GET_PROMOS, SELECT_LISTED_PROMO, CUSTOMER_SERVICE_CHAT). Los nombres de field ("hours", "phone", "payment_details", etc.) NUNCA van como intent — siempre como params.field dentro de GET_BUSINESS_INFO.
+
+Ejemplos correctos:
+  Cliente: "donde transfiero?" → {"intent": "GET_BUSINESS_INFO", "params": {"field": "payment_details"}}
+  Cliente: "a qué número pago?" → {"intent": "GET_BUSINESS_INFO", "params": {"field": "payment_details"}}
+  Cliente: "aceptan nequi?"     → {"intent": "GET_BUSINESS_INFO", "params": {"field": "payment_methods"}}
+  Cliente: "cuál es el teléfono del local?" → {"intent": "GET_BUSINESS_INFO", "params": {"field": "phone"}}
+
 Responde SOLO con JSON:
 {"intent": "<INTENT>", "params": {}}
 """
@@ -277,10 +300,11 @@ _BUSINESS_INFO_TEMPLATES = {
     "hours": "{value}",
     "address": "Estamos ubicados en {value}.",
     "phone": "Puedes contactarnos al {value}.",
-    "delivery_fee": "El domicilio tiene un costo de {value}.",
+    "delivery_fee": "El domicilio tiene un costo base de {value}, puede variar según la distancia.",
     "delivery_time": "Nuestros pedidos llegan en {value}.",
     "menu_url": "Acá tienes nuestro menú: {value}",
     "payment_methods": "Aceptamos {value}.",
+    "payment_details": "{value}",
 }
 
 
@@ -746,6 +770,24 @@ class CustomerServiceAgent(BaseAgent):
         parsed = _parse_planner_response(planner_text)
         intent = (parsed.get("intent") or INTENT_CUSTOMER_SERVICE_CHAT).upper().replace(" ", "_")
         params = parsed.get("params") or {}
+
+        # Field-name-as-intent remap. The planner is supposed to emit
+        # GET_BUSINESS_INFO with params.field=<key>, but in production we
+        # observed it sometimes emits the field name itself as the
+        # intent (e.g. {"intent": "PAYMENT_DETAILS", "params": {}} for
+        # "gracias Donde transfiero?", 2026-05-06 Biela / 3177000722).
+        # That bounced to chat fallback. Remap so the executor still
+        # serves the lookup.
+        if intent not in VALID_INTENTS:
+            field_key = intent.lower()
+            if field_key in business_info_service.ALL_FIELDS:
+                logging.warning(
+                    "[CS_AGENT] field-name-as-intent remap: %r → "
+                    "GET_BUSINESS_INFO(field=%s)",
+                    intent, field_key,
+                )
+                intent = INTENT_GET_BUSINESS_INFO
+                params = {"field": field_key}
 
         # Deterministic guard: refuse CANCEL_ORDER unless the customer
         # actually has a placed cancellable order. The router should keep

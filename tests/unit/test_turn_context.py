@@ -70,6 +70,20 @@ class TestLatestOrderRelevance:
         assert tc._latest_order_is_relevant(order) is True
 
 
+class TestRecognizedProductRendering:
+    """``recognized_product`` should produce a planner-readable hint line."""
+
+    def test_renders_recognized_product_line(self):
+        ctx = TurnContext(recognized_product="LA VUELTA")
+        out = render_for_prompt(ctx)
+        assert "Producto reconocido en el mensaje: LA VUELTA" in out
+
+    def test_omits_when_none(self):
+        ctx = TurnContext()
+        out = render_for_prompt(ctx)
+        assert "Producto reconocido" not in out
+
+
 class TestRecentHistoryRendering:
     """``recent_history`` should produce a uniform multi-turn block visible to every layer."""
 

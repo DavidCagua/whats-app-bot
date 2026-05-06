@@ -85,6 +85,13 @@ BIELA_CATALOG = {
     # Chicken burgers — used by the typo-tolerance tests (vitoria → VITTORIA).
     "VITTORIA":    _product("p-19", "VITTORIA", description="Filete de pollo apanado, albahaca, mozzarella.", tags=["hamburguesa", "burger", "pollo"], price=28000),
     "ARIZONA":     _product("p-20", "ARIZONA", description="Filete de pollo apanado, tocineta, pepinillos.", tags=["hamburguesa", "burger", "pollo"], price=28000),
+    # Multi-word product whose name is also a common Colombian phrase
+    # ("a la vuelta" = "around the corner"). Used by the regression
+    # test below for Biela / 3147554464 (2026-05-06): the planner +
+    # search disambiguator picked HONEY BURGER and stuffed "a la vuelta"
+    # into notes instead of returning LA VUELTA outright.
+    "LA_VUELTA":   _product("p-21", "LA VUELTA", description="Pan artesanal, 150gr de carne, tocineta crispy de cebolla, caramelizado de chilacuan, queso quajada, salsa tártara.", tags=["hamburguesa", "burger", "carne", "res", "chilacuan", "cuajada"], price=28000),
+    "HONEY_BURGER":_product("p-22", "HONEY BURGER", description="Carne, cheddar, tocineta, miel mostaza, cebolla caramelizada, papas.", tags=["hamburguesa", "burger"], price=28000),
     # Campaign-tagged burger used by the dominance-trim regression: when
     # the user types "la del burguer master" RAMONA must win decisively
     # (not be listed alongside the rest of the burgers).
@@ -1038,6 +1045,131 @@ class TestTypoTolerance:
 
 
 # ---------------------------------------------------------------------------
+# Regression: 2026-05-06 (Biela / 3147554464). User said "Regálame una
+# hamburguesa a la vuelta" and "Tienes la a la Vuelta?". LA VUELTA exists
+# in the catalog, but the bot replied "Se ha agregado la HONEY BURGER
+# (a la vuelta)" — picked the wrong product and stuffed the real product
+# name into notes.
+#
+# These tests document what search_products currently returns for this
+# class of query so we can target the broken decisive rule. The expected
+# outcome (after the fix) is LA VUELTA as the unique winner with
+# "hamburguesa" as derived notes (mirrors the existing
+# "jugo de mora en leche" → "Jugos en leche" behavior).
+# ---------------------------------------------------------------------------
+
+
+class TestLaVueltaSubsetMatch:
+    """Repro for the LA VUELTA mis-resolution bug."""
+
+    def _all_burgers_lexical(self):
+        # What the lexical search would plausibly return: every burger
+        # whose name or tags overlap the query. Includes LA VUELTA.
+        keys = ("LA_VUELTA", "HONEY_BURGER", "BARRACUDA", "BIELA", "BETA",
+                "PEGORETTI", "ARRABBIATA", "MANHATTAN")
+        return {k: BIELA_CATALOG[k] for k in keys}
+
+    def _all_burgers_semantic(self):
+        keys = ("LA_VUELTA", "HONEY_BURGER", "BARRACUDA", "BIELA", "BETA")
+        # Plausible cosine similarities — LA VUELTA gets a respectable
+        # score (it's in the candidate set) but isn't necessarily highest.
+        sims = {"LA_VUELTA": 0.78, "HONEY_BURGER": 0.82, "BARRACUDA": 0.74,
+                "BIELA": 0.71, "BETA": 0.70}
+        return {k: (BIELA_CATALOG[k], sims[k]) for k in keys}
+
+    def test_full_phrase_query_picks_la_vuelta(self):
+        """
+        Query: "una hamburguesa a la vuelta"
+        Stems (rough): {hamburgu, vuelt}
+        LA VUELTA stems: {vuelt} — strict subset → unique subset_match
+            → rule 1b should fire → LA VUELTA wins, notes="hamburguesa".
+        HONEY BURGER stems: {honey, burger} — NOT a subset.
+
+        Currently expected to FAIL (production picked HONEY BURGER).
+        After the targeted fix, this passes.
+        """
+        with _PatchStack(_stub_search(
+            lexical=self._all_burgers_lexical(),
+            semantic=self._all_burgers_semantic(),
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "una hamburguesa a la vuelta", unique=True,
+            )
+        assert len(results) == 1, [r["name"] for r in results]
+        assert results[0]["name"] == "LA VUELTA"
+
+    def test_short_query_la_vuelta_picks_la_vuelta(self):
+        """
+        Query: "la vuelta" (the bare product name).
+        Should be an exact-name match (rule 1a) — no ambiguity.
+        """
+        with _PatchStack(_stub_search(
+            lexical=self._all_burgers_lexical(),
+            semantic=self._all_burgers_semantic(),
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "la vuelta", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "LA VUELTA"
+
+    def test_user_phrasing_tienes_la_a_la_vuelta(self):
+        """
+        Query: "tienes la a la Vuelta?" — the actual production message.
+        Stems (rough): {tien, vuelt}
+        LA VUELTA {vuelt} is a strict subset → unique winner via rule 1b.
+        """
+        with _PatchStack(_stub_search(
+            lexical=self._all_burgers_lexical(),
+            semantic=self._all_burgers_semantic(),
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "tienes la a la Vuelta?", unique=True,
+            )
+        assert len(results) == 1, [r["name"] for r in results]
+        assert results[0]["name"] == "LA VUELTA"
+
+    def test_planner_dropped_vuelta_query_is_ambiguous(self):
+        """
+        When the planner emits the wrong product_name (e.g. just
+        "hamburguesa" or "HONEY BURGER" because it picked from the
+        previously-listed options and didn't recognize "la Vuelta" as
+        a real product), search_products has nothing to anchor on. We
+        document that behavior here — it's NOT a search bug, it's a
+        planner bug. The fix has to live upstream (router or order
+        planner), not in product_search.
+        """
+        # Planner emits just "hamburguesa" — no "vuelta" token.
+        with _PatchStack(_stub_search(
+            lexical=self._all_burgers_lexical(),
+            semantic=self._all_burgers_semantic(),
+        )):
+            with pytest.raises(product_search.AmbiguousProductError):
+                product_search.search_products(
+                    BUSINESS_ID, "hamburguesa", unique=True,
+                )
+
+    def test_planner_emitted_honey_burger_returns_honey_burger(self):
+        """
+        Confirms the production failure path: if the planner emits
+        product_name="HONEY BURGER" (because it picked the first item
+        from a recently-listed options block), search_products faithfully
+        returns HONEY BURGER — never sees the user's original "la vuelta"
+        intent. The fix must keep the planner from emitting the wrong
+        product_name in the first place.
+        """
+        with _PatchStack(_stub_search(
+            lexical=self._all_burgers_lexical(),
+            semantic=self._all_burgers_semantic(),
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "HONEY BURGER", unique=True,
+            )
+        assert len(results) == 1
+        assert results[0]["name"] == "HONEY BURGER"
+
+
+# ---------------------------------------------------------------------------
 # Dominance trim — SEARCH_PRODUCTS (unique=False) must not enumerate
 # alternatives when the top result has a decisive score lead.
 # ---------------------------------------------------------------------------
@@ -1057,7 +1189,7 @@ class TestDominanceTrim:
         # Mirrors what _lexical_candidates returns in prod for any burger
         # query: every burger whose tags include "hamburguesa" / "burger".
         keys = ("RAMONA", "BARRACUDA", "BIELA", "BETA", "PEGORETTI",
-                "ARRABBIATA", "MANHATTAN")
+                "ARRABBIATA", "MANHATTAN", "HONEY_BURGER")
         return {k: BIELA_CATALOG[k] for k in keys}
 
     def _burger_semantic(self):
@@ -1088,7 +1220,7 @@ class TestDominanceTrim:
     def test_concurso_phrase_returns_only_ramona(self):
         """
         Synonym variant: "la hamburguesa del concurso" — RAMONA's
-        description mentions the campaign. Same outcome: RAMONA leads.
+        description contains 'concurso' (campaign mention). Same outcome.
         """
         with _PatchStack(_stub_search(
             lexical=self._burger_lexical(),
@@ -1097,6 +1229,10 @@ class TestDominanceTrim:
             results = product_search.search_products(
                 BUSINESS_ID, "la hamburguesa del concurso",
             )
+        # RAMONA's description doesn't literally contain "concurso" in the
+        # fixture, but with the embedding sim and phrase boost it should
+        # still dominate. We assert RAMONA is the *first* result and not
+        # buried among alternatives.
         assert results, "expected at least one result"
         assert results[0]["name"] == "RAMONA"
 
