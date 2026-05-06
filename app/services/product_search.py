@@ -1262,6 +1262,21 @@ def search_products(
 
             raise AmbiguousProductError(query=query, matches=close)
 
+        # Dominance trim (unique=False): when the top-1 has a decisive lead
+        # over top-2, return only the winner. Same threshold as the
+        # unique=True decisive rule (>= 2x AND absolute >= 60). Keeps
+        # SEARCH_PRODUCTS focused on what the user asked about — without
+        # this, the response generator gets the full ranked list and
+        # enumerates alternatives even when the search has a clear answer
+        # (e.g. campaign tags like "burguer master" lose to single-word
+        # tags like "hamburguesa" because the latter inflates every burger
+        # in the catalog into the runner-up slot).
+        if len(scored_filtered) >= 2:
+            top_score = scored_filtered[0][0]
+            second_score = scored_filtered[1][0]
+            if top_score >= max(60.0, 2.0 * second_score):
+                return [scored_filtered[0][3]]
+
         return ranked
     finally:
         db_session.close()

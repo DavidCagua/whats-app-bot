@@ -85,6 +85,13 @@ BIELA_CATALOG = {
     # Chicken burgers — used by the typo-tolerance tests (vitoria → VITTORIA).
     "VITTORIA":    _product("p-19", "VITTORIA", description="Filete de pollo apanado, albahaca, mozzarella.", tags=["hamburguesa", "burger", "pollo"], price=28000),
     "ARIZONA":     _product("p-20", "ARIZONA", description="Filete de pollo apanado, tocineta, pepinillos.", tags=["hamburguesa", "burger", "pollo"], price=28000),
+    # Campaign-tagged burger used by the dominance-trim regression: when
+    # the user types "la del burguer master" RAMONA must win decisively
+    # (not be listed alongside the rest of the burgers).
+    "RAMONA":      _product("p-23", "RAMONA",
+                            description="Participante burguer master. Carne Angus, queso americano, mostaneza golf, pepinos encurtidos, tocineta y pan pretzel.",
+                            tags=["hamburguesa", "carne", "queso", "burguer master", "tocineta"],
+                            price=30000),
 }
 
 
@@ -1028,3 +1035,85 @@ class TestTypoTolerance:
         # Should return VITTORIA from lexical, not ARIZONA from trigram
         assert len(results) == 1
         assert results[0]["name"] == "VITTORIA"
+
+
+# ---------------------------------------------------------------------------
+# Dominance trim — SEARCH_PRODUCTS (unique=False) must not enumerate
+# alternatives when the top result has a decisive score lead.
+# ---------------------------------------------------------------------------
+
+
+class TestDominanceTrim:
+    """
+    Regression for the Biela 'la del Burguer master?' incident: even after
+    the phrase-aware tag/description boost, search returned the full ranked
+    list, the response generator enumerated 5 burgers, and the user had to
+    pick — defeating the point of the boost. With the dominance trim,
+    a SEARCH whose top score has a 2x lead over the runner-up returns
+    only the winner.
+    """
+
+    def _burger_lexical(self):
+        # Mirrors what _lexical_candidates returns in prod for any burger
+        # query: every burger whose tags include "hamburguesa" / "burger".
+        keys = ("RAMONA", "BARRACUDA", "BIELA", "BETA", "PEGORETTI",
+                "ARRABBIATA", "MANHATTAN")
+        return {k: BIELA_CATALOG[k] for k in keys}
+
+    def _burger_semantic(self):
+        keys = ("RAMONA", "BARRACUDA", "BIELA", "ARRABBIATA")
+        sims = {"RAMONA": 0.82, "BARRACUDA": 0.72, "BIELA": 0.70, "ARRABBIATA": 0.69}
+        return {k: (BIELA_CATALOG[k], sims[k]) for k in keys}
+
+    def test_burguer_master_phrase_returns_only_ramona(self):
+        """
+        Query: "Está la del Burguer master?" (the prod failure phrase).
+        RAMONA has the multi-word tag "burguer master" AND the literal
+        phrase in its description. The phrase boost gives it a 2x+ lead;
+        the dominance trim returns only RAMONA so the response generator
+        speaks about that one product.
+        """
+        with _PatchStack(_stub_search(
+            lexical=self._burger_lexical(),
+            semantic=self._burger_semantic(),
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "Está la del Burguer master?",
+            )
+        names = [r["name"] for r in results]
+        assert names == ["RAMONA"], (
+            f"expected only RAMONA after dominance trim, got {names}"
+        )
+
+    def test_concurso_phrase_returns_only_ramona(self):
+        """
+        Synonym variant: "la hamburguesa del concurso" — RAMONA's
+        description mentions the campaign. Same outcome: RAMONA leads.
+        """
+        with _PatchStack(_stub_search(
+            lexical=self._burger_lexical(),
+            semantic=self._burger_semantic(),
+        )):
+            results = product_search.search_products(
+                BUSINESS_ID, "la hamburguesa del concurso",
+            )
+        assert results, "expected at least one result"
+        assert results[0]["name"] == "RAMONA"
+
+    def test_no_dominance_keeps_broad_list(self):
+        """
+        Reverse guarantee: when the score gap is narrow, the dominance
+        trim must NOT fire. 'limonada' matches both LIM_NATURAL and
+        LIM_CEREZA equally — both must come back.
+        """
+        lexical = {
+            "LIM_NATURAL": BIELA_CATALOG["LIM_NATURAL"],
+            "LIM_CEREZA":  BIELA_CATALOG["LIM_CEREZA"],
+        }
+        with _PatchStack(_stub_search(lexical=lexical, semantic={})):
+            results = product_search.search_products(BUSINESS_ID, "limonada")
+        names = {r["name"] for r in results}
+        assert "Limonada natural" in names
+        assert "Limonada de cereza" in names, (
+            f"dominance trim must not fire for non-decisive queries; got {names}"
+        )
