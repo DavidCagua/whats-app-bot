@@ -9,8 +9,35 @@ jobs:
   # via `./scripts/test.sh [unit|integration|evals|e2e|all]`. Re-add a
   # `test` job here when a second contributor joins.
 
+  # Centralised path filter. Downstream jobs always run (so branch
+  # protection's "required status checks" stay green) but gate their
+  # real work on the matching output flag — a no-op job still reports
+  # success.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      admin_console: ${{ steps.filter.outputs.admin_console }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'migrations/**'
+              - 'alembic.ini'
+              - 'app/database/**'
+              - 'requirements.txt'
+              - '.github/workflows/ci.yml'
+            admin_console:
+              - 'admin-console/**'
+              - '.github/workflows/ci.yml'
+
   migrations-smoke:
     name: Alembic upgrade dry-run
+    needs: changes
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -27,26 +54,34 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - if: needs.changes.outputs.backend != 'true'
+        run: echo "No backend changes — skipping."
 
-      - name: Set up Python
+      - if: needs.changes.outputs.backend == 'true'
+        uses: actions/checkout@v4
+
+      - if: needs.changes.outputs.backend == 'true'
+        name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies
+      - if: needs.changes.outputs.backend == 'true'
+        name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Bootstrap Supabase-specific roles
+      - if: needs.changes.outputs.backend == 'true'
+        name: Bootstrap Supabase-specific roles
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           psql "$DATABASE_URL" -q -c "CREATE ROLE service_role NOLOGIN;"
 
-      - name: Apply raw SQL baseline + stamp + upgrade head
+      - if: needs.changes.outputs.backend == 'true'
+        name: Apply raw SQL baseline + stamp + upgrade head
         env:
           PGHOST: localhost
           PGPORT: 5432
@@ -65,7 +100,8 @@ jobs:
           alembic upgrade head
           alembic current
 
-      - name: Drift check (models vs DB schema)
+      - if: needs.changes.outputs.backend == 'true'
+        name: Drift check (models vs DB schema)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
@@ -75,25 +111,34 @@ jobs:
 
   admin-console-lint:
     name: TypeScript & lint check
+    needs: changes
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: admin-console
     steps:
-      - uses: actions/checkout@v4
+      - if: needs.changes.outputs.admin_console != 'true'
+        run: echo "No admin-console changes — skipping."
 
-      - name: Set up Node
+      - if: needs.changes.outputs.admin_console == 'true'
+        uses: actions/checkout@v4
+
+      - if: needs.changes.outputs.admin_console == 'true'
+        name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version-file: ".nvmrc"
           cache: npm
           cache-dependency-path: admin-console/package-lock.json
 
-      - name: Install dependencies
+      - if: needs.changes.outputs.admin_console == 'true'
+        name: Install dependencies
         run: npm ci
 
-      - name: TypeScript type check
+      - if: needs.changes.outputs.admin_console == 'true'
+        name: TypeScript type check
         run: npx tsc --noEmit
 
-      - name: Lint
+      - if: needs.changes.outputs.admin_console == 'true'
+        name: Lint
         run: npm run lint
