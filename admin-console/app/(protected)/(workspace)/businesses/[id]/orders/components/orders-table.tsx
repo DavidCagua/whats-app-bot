@@ -492,27 +492,45 @@ export function OrdersTable({
                         : "—")}
                   </TableCell>
                   <TableCell>{capitalize(order.customer_name)}</TableCell>
-                  <TableCell className="max-w-[220px] truncate" title={order.delivery_address || undefined}>
+                  <TableCell className="max-w-[220px] whitespace-normal break-words align-top">
                     {capitalize(order.delivery_address)}
                   </TableCell>
                   <TableCell>{capitalize(order.payment_method)}</TableCell>
-                  <TableCell className="text-sm">
+                  <TableCell className="text-sm align-top">
                     {order.items.length > 0
                       ? order.items.map((item) => (
                           <div key={item.id}>
-                            {item.quantity}× {item.productName}
+                            <span>
+                              {item.quantity}× {item.productName}
+                            </span>
+                            <span className="text-muted-foreground">
+                              {" "}
+                              — {formatAmount(item.lineTotal)}
+                              {item.quantity > 1 ? (
+                                <span className="ml-1 text-xs">
+                                  ({formatAmount(item.unitPrice)} c/u)
+                                </span>
+                              ) : null}
+                            </span>
                             {item.notes ? (
-                              <span className="text-muted-foreground italic">
-                                {" "}
-                                — {item.notes}
-                              </span>
+                              <div className="text-muted-foreground italic">
+                                {item.notes}
+                              </div>
                             ) : null}
                           </div>
                         ))
                       : "—"}
                   </TableCell>
-                  <TableCell className="font-medium">
-                    {formatAmount(order.total_amount)}
+                  <TableCell className="align-top">
+                    <div className="text-xs text-muted-foreground">
+                      Subtotal: {formatAmount(order.subtotal)}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Domicilio: {formatAmount(order.delivery_fee)}
+                    </div>
+                    <div className="font-medium">
+                      Total: {formatAmount(order.total_amount)}
+                    </div>
                   </TableCell>
                   <TableCell>
                     {isTerminal ? (
