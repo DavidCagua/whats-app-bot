@@ -542,6 +542,11 @@ class Order(Base):
     customer_id = Column(Integer, ForeignKey('customers.id', ondelete='SET NULL'), nullable=True, index=True)
     whatsapp_id = Column(String(50), nullable=True)
     status = Column(order_status_enum, nullable=False, default='pending', server_default='pending', index=True)
+    # Pickup-vs-delivery flag. 'delivery' is the historical behavior and
+    # the default for every code path that doesn't explicitly opt in. The
+    # status machine already tolerates both shapes (confirmed → completed
+    # for pickup, confirmed → out_for_delivery → completed for delivery).
+    order_type = Column(Text, nullable=False, default='delivery', server_default='delivery', index=True)
     total_amount = Column(Numeric(12, 2), nullable=False, default=0)
     notes = Column(Text, nullable=True)
     delivery_address = Column(Text, nullable=True)
@@ -565,6 +570,7 @@ class Order(Base):
             'customer_id': self.customer_id,
             'whatsapp_id': self.whatsapp_id,
             'status': self.status,
+            'order_type': self.order_type or 'delivery',
             'total_amount': float(self.total_amount) if self.total_amount else 0,
             'notes': self.notes,
             'delivery_address': self.delivery_address,

@@ -21,6 +21,28 @@ from ..services.product_search import (
 
 logger = logging.getLogger(__name__)
 
+
+# Order type — pickup vs delivery. Single source of truth for callers
+# that need to reference the values without hardcoding strings.
+ORDER_TYPE_DELIVERY = "delivery"
+ORDER_TYPE_PICKUP = "pickup"
+VALID_ORDER_TYPES = frozenset({ORDER_TYPE_DELIVERY, ORDER_TYPE_PICKUP})
+
+
+def normalize_order_type(value: Optional[str]) -> Optional[str]:
+    """
+    Return ``'delivery'`` / ``'pickup'`` when the input maps cleanly to
+    one of the supported types, else ``None``. Empty / missing input
+    coerces to the default ``'delivery'`` (current behavior).
+    """
+    if value is None:
+        return ORDER_TYPE_DELIVERY
+    cleaned = str(value).strip().lower()
+    if not cleaned:
+        return ORDER_TYPE_DELIVERY
+    return cleaned if cleaned in VALID_ORDER_TYPES else None
+
+
 # Map natural-language category terms to canonical DB category values
 CATEGORY_MAP = {
     # Multi-word phrases first (full-phrase lookup runs before word-by-word)
@@ -321,6 +343,7 @@ class ProductOrderService:
         payment_method: Optional[str] = None,
         customer_name: Optional[str] = None,
         delivery_fee: float = 0.0,
+        order_type: str = "delivery",
     ) -> Dict[str, Any]:
         """
         Create an order with line items and delivery info.
@@ -336,6 +359,10 @@ class ProductOrderService:
             payment_method: Payment method for this order
             customer_name: Customer name for order; used when creating/updating customer
             delivery_fee: Delivery fee to add to the order total (default 0)
+            order_type: 'delivery' (default, current behavior) or 'pickup'.
+                Persisted on the order so admin and CS can branch on it.
+                Phase 0: callers still pass the default; the planner /
+                executor learn to set 'pickup' in a later phase.
 
         Returns:
             {"success": True, "order_id": "uuid", "subtotal": float, "total": float} or {"success": False, "error": str}
@@ -417,11 +444,20 @@ class ProductOrderService:
 
             grand_total = subtotal + float(delivery_fee)
 
+            # Defensive normalize: an unknown value would be rejected by
+            # the DB CHECK constraint anyway, but failing fast with a
+            # clear error is better than a 500 from psycopg.
+            normalized_order_type = normalize_order_type(order_type)
+            if normalized_order_type is None:
+                db_session.close()
+                return {"success": False, "error": f"order_type inválido: {order_type!r}"}
+
             order = Order(
                 business_id=uuid.UUID(business_id),
                 customer_id=customer_id,
                 whatsapp_id=whatsapp_id,
                 status=STATUS_PENDING,
+                order_type=normalized_order_type,
                 total_amount=grand_total,
                 promo_discount_amount=promo_discount,
                 notes=notes,
@@ -460,6 +496,7 @@ class ProductOrderService:
 
             logger.info(
                 f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, "
+                f"order_type={normalized_order_type}, "
                 f"subtotal={subtotal}, promo_discount={promo_discount}, "
                 f"delivery_fee={delivery_fee}, total={grand_total}, "
                 f"applied_promos={len(applications)}, address={bool(delivery_address)}"
