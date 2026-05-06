@@ -403,14 +403,29 @@ class CustomerServiceAgent(BaseAgent):
         when templating isn't applicable.
         """
         business_name = "el restaurante"
+        ai_prompt_rules = ""
         if business_context and business_context.get("business"):
             business_name = business_context["business"].get("name") or business_name
+            settings = (business_context["business"].get("settings") or {})
+            ai_prompt_rules = (settings.get("ai_prompt") or "").strip()
 
         base_system = (
             f"Eres el agente de servicio al cliente de {business_name}. "
             "Respondes en español colombiano, natural y breve (1-3 oraciones). "
             "Nunca inventas información que no esté en los datos proporcionados."
         )
+        # Surface business-declared rules (combos, default accompaniments,
+        # policies) so CS responses can answer questions like "vienen en
+        # combo?" / "las hamburguesas traen papas?" without falling back
+        # to "no entendí". Mirrors what order_agent.py does.
+        if ai_prompt_rules:
+            base_system += (
+                "\n\nIMPORTANTE: Reglas y contexto del negocio "
+                "(úsalas SIEMPRE para preguntas sobre combos, acompañamientos "
+                "incluidos por default como papas, bebidas, y cualquier política "
+                "del negocio):\n"
+                + ai_prompt_rules
+            )
 
         if result_kind == RESULT_KIND_BUSINESS_INFO:
             field = exec_result.get("field")
@@ -704,9 +719,14 @@ class CustomerServiceAgent(BaseAgent):
             fields = exec_result.get("available_fields") or []
             system = (
                 base_system
-                + "\nSITUACIÓN: No entendiste bien qué pregunta el cliente. "
-                "Dile brevemente con qué puedes ayudarle: menú/carta, horarios, dirección, domicilio, "
-                "medios de pago, estado de pedido, historial."
+                + "\nSITUACIÓN: La pregunta del cliente no encajó en una intención específica. "
+                "PRIMERO revisa la sección 'Reglas y contexto del negocio' (si existe arriba) — "
+                "muchas preguntas sobre combos, acompañamientos incluidos (papas, bebida), políticas "
+                "o lo que trae cada plato se responden DIRECTAMENTE desde esas reglas. Si las reglas "
+                "responden la pregunta, contesta usando esa información (NO digas 'no entendí'). "
+                "Solo si las reglas no aplican Y no tienes datos para responder, dile brevemente "
+                "con qué puedes ayudar: menú/carta, horarios, dirección, domicilio, medios de pago, "
+                "estado de pedido, historial."
             )
             inp = (
                 f"Pregunta del cliente: {message_body}\n"
