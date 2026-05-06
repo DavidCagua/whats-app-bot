@@ -118,8 +118,18 @@ def _order_to_dict(order: Order) -> Dict[str, Any]:
     base = order.to_dict() if hasattr(order, "to_dict") else {}
     items = []
     for item in (order.order_items or []):
+        # Surface the product name so CS replies can render
+        # "1x BARRACUDA — $28.000" when the customer asks for the
+        # per-item breakdown of a placed order. Lazy-loaded from
+        # the OrderItem.product relationship; on rare detached-session
+        # paths fall back to product_id-only.
+        try:
+            product_name = item.product.name if item.product else None
+        except Exception:
+            product_name = None
         items.append({
             "product_id": str(item.product_id) if item.product_id else None,
+            "name": product_name,
             "quantity": int(item.quantity or 0),
             "unit_price": float(item.unit_price or 0),
             "line_total": float(item.line_total or 0),

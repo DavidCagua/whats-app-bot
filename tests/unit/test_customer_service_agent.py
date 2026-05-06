@@ -268,6 +268,70 @@ class TestAgentExecuteLLMResponsePath:
         assert output["message"] == "Puedo ayudarte con horarios, dirección..."
 
 
+class TestOrderStatusBreakdownPrompt:
+    """RESULT_KIND_ORDER_STATUS response prompt — per-item breakdown rendering.
+
+    Production 2026-05-06 (Biela / +573159280840): customer asked
+    "Cuanto vale cada producto porfa?" right after order placement and
+    got "no tengo esa información". Two regressions to prevent:
+      1. items_lines must include the product NAME (not just qty + price).
+      2. The system prompt must instruct the LLM to surface the breakdown
+         when the customer explicitly asked for it.
+    """
+
+    def _exec_result(self):
+        return {
+            "result_kind": csf.RESULT_KIND_ORDER_STATUS,
+            "order": {
+                "id": "o1",
+                "status": "confirmed",
+                "total_amount": 62500,
+                "items": [
+                    {"name": "BARRACUDA", "quantity": 1, "unit_price": 28000, "line_total": 28000, "notes": None},
+                    {"name": "Coca-Cola", "quantity": 2, "unit_price": 5500, "line_total": 11000, "notes": None},
+                    {"name": "LA VUELTA", "quantity": 1, "unit_price": 29000, "line_total": 29000, "notes": "sin cebolla"},
+                ],
+                "eta_minutes": None,
+                "cancellation_reason": None,
+            },
+        }
+
+    def test_items_lines_include_product_name_and_price(self):
+        agent = CustomerServiceAgent()
+        system, inp = agent._build_response_prompt(
+            result_kind=csf.RESULT_KIND_ORDER_STATUS,
+            exec_result=self._exec_result(),
+            message_body="cuanto vale cada producto?",
+            business_context=BIELA_CTX,
+        )
+        # Each product name is rendered (not dropped from items_lines).
+        assert "BARRACUDA" in inp
+        assert "Coca-Cola" in inp
+        assert "LA VUELTA" in inp
+        # Per-line price, formatted in COP.
+        assert "$28.000" in inp
+        assert "$5.500" in inp
+        assert "$29.000" in inp
+        # Quantity > 1 surfaces line total.
+        assert "$11.000" in inp
+        # Notes flow through.
+        assert "sin cebolla" in inp
+
+    def test_breakdown_rules_present_in_system_prompt(self):
+        agent = CustomerServiceAgent()
+        system, _ = agent._build_response_prompt(
+            result_kind=csf.RESULT_KIND_ORDER_STATUS,
+            exec_result=self._exec_result(),
+            message_body="cuanto vale cada producto?",
+            business_context=BIELA_CTX,
+        )
+        # The LLM must know that an explicit breakdown question forces
+        # the items list into the reply, otherwise it'll keep summarizing
+        # to a one-liner status.
+        assert "DESGLOSE" in system or "desglose" in system
+        assert "cuánto vale cada producto" in system or "detalle del pedido" in system
+
+
 class TestAgentHandoffPropagation:
     """When flow returns RESULT_KIND_HANDOFF, agent must surface it as output.handoff."""
 

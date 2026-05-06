@@ -301,6 +301,97 @@ class TestCartChangeResponsePromptDoesNotCrash:
         assert "ABC12345" in inp
 
 
+class TestProductDetailsCartAware:
+    """RESULT_KIND_PRODUCT_DETAILS — response prompt branches on whether
+    the product is already in the customer's cart.
+
+    Production 2026-05-06 (Biela / +573159280840): customer asked for
+    ingredients of LA VUELTA which was already in cart, bot closed with
+    "¿Te gustaría agregarla al pedido?", customer said "Si", and the
+    order agent ADD_TO_CARTed a duplicate line. The fix: when in_cart_quantity
+    > 0, the prompt MUST NOT close with "¿agregarla?" — it must surface
+    that the product is already there and ask about another unit instead.
+    """
+
+    def _exec_result(self, in_cart_quantity: int):
+        return {
+            "product": {
+                "id": "p1",
+                "name": "LA VUELTA",
+                "price": 29000,
+                "description": "Pan, carne, tocineta crispy, papas.",
+            },
+            "in_cart_quantity": in_cart_quantity,
+        }
+
+    def test_already_in_cart_avoids_agregarla_upsell(self):
+        from app.orchestration.order_flow import RESULT_KIND_PRODUCT_DETAILS
+        agent = OrderAgent()
+        system, inp = agent._build_response_prompt(
+            result_kind=RESULT_KIND_PRODUCT_DETAILS,
+            exec_result=self._exec_result(in_cart_quantity=1),
+            message_body="qué trae la vuelta?",
+            business_context=None,
+            cart_summary_after="(unused)",
+        )
+        # The system prompt must explicitly forbid the "¿agregarla?" upsell.
+        assert "NUNCA" in system
+        assert "agregarla" in system.lower()
+        # And it must instruct the LLM to mention the existing quantity.
+        assert "ya tiene" in system.lower() or "YA tiene" in system
+        # The input must include the in-cart quantity so the LLM can
+        # phrase the reply correctly.
+        assert "Ya tiene en el pedido: 1" in inp
+
+    def test_not_in_cart_keeps_agregarla_upsell(self):
+        from app.orchestration.order_flow import RESULT_KIND_PRODUCT_DETAILS
+        agent = OrderAgent()
+        system, inp = agent._build_response_prompt(
+            result_kind=RESULT_KIND_PRODUCT_DETAILS,
+            exec_result=self._exec_result(in_cart_quantity=0),
+            message_body="qué trae la vuelta?",
+            business_context=None,
+            cart_summary_after="(unused)",
+        )
+        # Original upsell wording stays for the not-in-cart path.
+        assert "agregar al pedido" in system
+        # And the in-cart hint MUST NOT be in the input — the LLM should
+        # not invent a quantity that isn't there.
+        assert "Ya tiene en el pedido" not in inp
+
+
+class TestOrderPlannerCartTotalTriggers:
+    """The order planner must route cart-total questions to VIEW_CART.
+
+    Production 2026-05-06 (Biela / +573108069647): customer said
+    "Cuánto es ??" mid-cart and the bot replied "no entendí". The fix
+    extends the VIEW_CART rule with explicit cart-total phrasings so
+    the planner LLM has the right examples in its prompt.
+    """
+
+    def test_planner_prompt_lists_total_phrasings(self):
+        # Direct check on the prompt template — these example phrasings
+        # MUST be present so the planner can disambiguate "cuánto es?"
+        # (cart total → VIEW_CART) from "cuánto vale la X?" (single
+        # product → GET_PRODUCT).
+        for phrase in [
+            "cuánto es",
+            "cuánto va",
+            "cuánto llevo",
+            "a cómo me sale",
+        ]:
+            assert phrase in PLANNER_SYSTEM_TEMPLATE, (
+                f"VIEW_CART rule must include the cart-total phrasing {phrase!r} "
+                "so the planner does not punt 'cuánto es?' to CHAT."
+            )
+
+    def test_planner_prompt_distinguishes_view_cart_from_get_product(self):
+        # Make sure the rule explicitly tells the LLM that a price
+        # question NOT naming a product is VIEW_CART, not GET_PRODUCT.
+        assert "VIEW_CART" in PLANNER_SYSTEM_TEMPLATE
+        assert "NO confundas con GET_PRODUCT" in PLANNER_SYSTEM_TEMPLATE
+
+
 class TestPhoneFormatFromWaId:
     """Unit tests for wa_id → phone normalization used by <SENDER> substitution."""
 

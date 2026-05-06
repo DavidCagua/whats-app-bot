@@ -26,6 +26,8 @@ from app.orchestration.order_flow import (
     INTENT_GET_MENU_CATEGORIES,
     INTENT_LIST_PRODUCTS,
     INTENT_SEARCH_PRODUCTS,
+    INTENT_GET_PRODUCT,
+    RESULT_KIND_PRODUCT_DETAILS,
     ALLOWED_INTENTS_BY_STATE,
     _normalize_product_name,
     _resolve_from_pending_disambiguation,
@@ -985,3 +987,74 @@ class TestMultiItemNotesAndDuplicates:
         assert "BARRACUDA" in invoked_names
         assert not any("Jugos en leche" in (n or "") for n in invoked_names), \
             f"Duplicate was not skipped: {invoked_names}"
+
+
+# ---------------------------------------------------------------------------
+# GET_PRODUCT — in_cart_quantity surfacing
+# ---------------------------------------------------------------------------
+
+class TestGetProductInCartQuantity:
+    """Regression — GET_PRODUCT executor surfaces how many of THIS product
+    the user already has in cart.
+
+    Production 2026-05-06 (Biela / +573159280840): customer asked
+    ingredients of LA VUELTA which was already in the cart, bot closed
+    with "¿agregarla al pedido?", customer said "Si", and the order
+    agent ADD_TO_CARTed a duplicate line. The fix passes in_cart_quantity
+    in the result so the response prompt can branch on it.
+    """
+
+    def _run(self, fake_session, wa_id, business_context, cart_items):
+        business_id = business_context["business_id"]
+        fake_session.save(
+            wa_id, business_id,
+            {"order_context": {
+                "items": cart_items,
+                "total": sum(i.get("price", 0) * i.get("quantity", 0) for i in cart_items),
+                "state": ORDER_STATE_ORDERING,
+            }},
+        )
+        session = fake_session.load(wa_id, business_id)["session"]
+
+        with patch("app.orchestration.order_flow.session_state_service", fake_session), \
+             patch("app.orchestration.order_flow.catalog_service.get_product",
+                   return_value={"id": "vuelta-id", "name": "LA VUELTA", "price": 29000,
+                                 "description": "Pan, carne, papas."}), \
+             patch("app.orchestration.order_flow.order_tools._cart_from_session",
+                   return_value={"items": cart_items}):
+            return execute_order_intent(
+                wa_id=wa_id,
+                business_id=business_id,
+                business_context=business_context,
+                session=session,
+                intent=INTENT_GET_PRODUCT,
+                params={"product_name": "LA VUELTA"},
+            )
+
+    def test_in_cart_quantity_set_when_product_already_in_cart(
+        self, fake_session, wa_id, business_context,
+    ):
+        cart = [{"product_id": "vuelta-id", "name": "LA VUELTA", "quantity": 1, "price": 29000}]
+        result = self._run(fake_session, wa_id, business_context, cart)
+        assert result["result_kind"] == RESULT_KIND_PRODUCT_DETAILS
+        assert result.get("in_cart_quantity") == 1
+
+    def test_in_cart_quantity_sums_multiple_lines_of_same_product(
+        self, fake_session, wa_id, business_context,
+    ):
+        # Two separate cart lines for the same product (e.g. one with
+        # notes, one without). Their quantities must sum so the bot's
+        # "ya tienes N" message reflects reality.
+        cart = [
+            {"product_id": "vuelta-id", "name": "LA VUELTA", "quantity": 1, "price": 29000, "notes": "sin cebolla"},
+            {"product_id": "vuelta-id", "name": "LA VUELTA", "quantity": 2, "price": 29000},
+        ]
+        result = self._run(fake_session, wa_id, business_context, cart)
+        assert result.get("in_cart_quantity") == 3
+
+    def test_in_cart_quantity_zero_when_product_not_in_cart(
+        self, fake_session, wa_id, business_context,
+    ):
+        cart = [{"product_id": "other-id", "name": "BARRACUDA", "quantity": 1, "price": 28000}]
+        result = self._run(fake_session, wa_id, business_context, cart)
+        assert result.get("in_cart_quantity") == 0

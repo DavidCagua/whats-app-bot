@@ -96,7 +96,10 @@ Otras reglas:
 - PROMOCIONES (ADD_PROMO_TO_CART): si el usuario pide explícitamente una promoción / combo / oferta del negocio (ej. "dame la promo de honey burger", "quiero la promo del lunes", "agregame esa promo", "me das la oferta de 2x1", "dame ese combo"), usa ADD_PROMO_TO_CART. Pasa params.promo_query con la frase descriptiva del usuario (ej. "honey burger", "promo del lunes"). Si la conversación previa identificó una promo específica con ID (ej. el agente de servicio al cliente listó promos y el usuario dijo "la primera"), pasa params.promo_id en lugar de promo_query. NO uses ADD_TO_CART para una promo — el matcher de promociones se ejecuta en backend y necesita conocer el binding explícito. NO inventes promos: si no estás seguro si existe, igual usa ADD_PROMO_TO_CART con el query del usuario y el backend responderá si no existe.
 - Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Usa SOLO el nombre BASE del producto, SIN las notas entre paréntesis. Ejemplo: el pedido tiene "Jugos en leche (mango)" → product_name="Jugos en leche" (NO "Jugos en leche (mango)"). Otro ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
 - ABANDONAR EL PEDIDO COMPLETO: cuando el usuario quiere CANCELAR / DESCARTAR el pedido en curso (ANTES de confirmarlo), sin nombrar un producto específico. Frases típicas: "cancela el pedido", "anula", "ya no quiero pedir", "déjalo así, mejor no", "olvídalo", "mejor nada", "borrar todo", "cancelar todo". Usa `{{"intent": "ABANDON_CART", "params": {{}}}}`. Distinción clave: si el mensaje NOMBRA un producto del pedido ("quita la coca", "elimina la malteada"), eso es REMOVE_FROM_CART (un solo item). ABANDON_CART aplica SOLO cuando NO se nombra producto y la intención es vaciar todo. NUNCA uses ABANDON_CART como respuesta a "¿algo más?" / "¿procedemos?" — esos negativos son CONFIRM (ver regla de CONFIRMACIÓN).
-- Si pregunta por el ESTADO DE SU PEDIDO — no por el menú — usa VIEW_CART sin params. Frases típicas: "¿qué tengo en mi pedido?", "¿qué hay en mi pedido?", "cómo va mi pedido", "mi orden", "qué llevo", "qué he pedido", "muéstrame mi pedido", "ver mi pedido", "mi carrito", "cómo quedó mi pedido". NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar qué tiene el restaurante, VIEW_CART es para revisar lo que el cliente ya agregó al pedido.
+- Si pregunta por el ESTADO DE SU PEDIDO — no por el menú — usa VIEW_CART sin params. Cubre dos sub-casos:
+  (a) ¿Qué tengo / qué llevo? — frases típicas: "¿qué tengo en mi pedido?", "¿qué hay en mi pedido?", "cómo va mi pedido", "mi orden", "qué llevo", "qué he pedido", "muéstrame mi pedido", "ver mi pedido", "mi carrito", "cómo quedó mi pedido".
+  (b) ¿Cuánto es el TOTAL del carrito? — preguntas de monto SIN nombrar un producto, mientras hay items en el pedido. Frases típicas: "cuánto es?", "cuánto va?", "cuánto llevo?", "cuánto da?", "cuánto sale todo?", "a cómo me sale?", "cómo va el total?", "cuánto es el total?", "cuánto te debo?". El response generator muestra ya el desglose por ítem + subtotal + domicilio + total, así que VIEW_CART cubre estas preguntas sin distinción. NO confundas con GET_PRODUCT — esa regla aplica SOLO cuando la pregunta NOMBRA un producto específico ("cuánto vale la barracuda"); aquí no hay producto, solo el total del carrito.
+NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar qué tiene el restaurante, VIEW_CART es para revisar lo que el cliente ya agregó al pedido.
 - DESPEDIDA / AGRADECIMIENTO TRAS UN PEDIDO RECIÉN PLACEADO: si el contexto del turno indica `Último pedido (estado): pending|confirmed|out_for_delivery|completed|cancelled` Y el carrito actual está VACÍO Y `Estado del pedido: GREETING`, los agradecimientos cortos y afirmaciones cortas son una DESPEDIDA, NO una nueva confirmación. Frases típicas: "gracias", "si gracias", "ok gracias", "listo gracias", "muchas gracias", "perfecto gracias", "bueno gracias", "vale gracias", "dale gracias", e incluso "si" / "ok" / "listo" SOLO cuando el carrito está vacío y hay un `Último pedido` reciente. En todos esos casos clasifica como `{{"intent": "CHAT", "params": {{}}}}`. NUNCA uses CONFIRM en este escenario — el pedido ya fue colocado, no hay nada que confirmar. Esta regla TIENE PRIORIDAD sobre la regla de CONFIRMACIÓN cuando el carrito está vacío + hay un pedido reciente. NO la apliques a REMOVE_FROM_CART (esos requieren mencionar un producto: "quita la coca") ni a ABANDON_CART (esos requieren un verbo de cancelar: "cancela el pedido", "anula"). Si el mensaje sí menciona un producto del pedido o un verbo de cancelar, esas reglas siguen aplicando como antes — esta regla cubre solo despedidas/agradecimientos cortos.
 - CONFIRMACIÓN (regla principal, muy importante): el principio es CONTEXTUAL, no léxico — usa el `Historial reciente` para entenderlo. Si el último mensaje del bot terminó con una pregunta de continuación del flujo de pedido (ejemplos: `¿procedemos?`, `¿procedemos con el pedido?`, `¿algo más?`, `¿quieres agregar algo más?`, `¿te gustaría agregar alguna bebida o procedemos?`, `¿confirmas?`, `¿gustas proceder?`) Y el usuario responde con CUALQUIERA de las siguientes — SIN hacer una pregunta nueva, SIN nombrar producto, dirección, teléfono ni medio de pago — clasifica como `{{"intent": "CONFIRM", "params": {{}}}}`:
   • Afirmaciones: "sí", "si", "claro", "obvio", "exacto", "correcto", "así es".
@@ -662,6 +665,28 @@ class OrderAgent(BaseAgent):
         if result_kind == RESULT_KIND_PRODUCT_DETAILS:
             product = exec_result.get("product") or {}
             desc = product.get("description") or "(sin descripción)"
+            in_cart_qty = int(exec_result.get("in_cart_quantity") or 0)
+            if in_cart_qty > 0:
+                # Already in cart — DO NOT close with "¿agregarla?". Production
+                # 2026-05-06 (Biela / +573159280840): user asked ingredients of a
+                # product already in cart, bot closed with "¿te gustaría agregarla?",
+                # user said "Si", and the order agent ADD_TO_CARTed a duplicate line.
+                system = base_system + (
+                    "\n\nSITUACIÓN: El cliente preguntó por los detalles de un producto que YA tiene en su pedido. "
+                    "REGLAS:\n"
+                    "- Di el nombre, precio y describe qué trae en 1-2 líneas.\n"
+                    "- Aclara que YA tiene N en el pedido y pregunta si quiere otra unidad o algo más.\n"
+                    "- NUNCA digas '¿te gustaría agregarla al pedido?' / '¿quieres añadirla?' — ya está agregada.\n"
+                    "- NO inventes ingredientes fuera de la descripción dada."
+                )
+                inp = (
+                    f"Cliente dijo: {message_body}\n"
+                    f"Producto: {product.get('name')}\n"
+                    f"Precio: {money(product.get('price'))}\n"
+                    f"Descripción: {desc}\n"
+                    f"Ya tiene en el pedido: {in_cart_qty}"
+                )
+                return system, inp
             system = base_system + (
                 "\n\nSITUACIÓN: El cliente preguntó por los detalles de un producto. "
                 "REGLAS:\n"

@@ -250,8 +250,10 @@ Reglas:
                         "datos para transferir", "pásame el Nequi", "cómo te pago",
                         "dónde consigno". CRÍTICO: aunque la pregunta mencione "número",
                         si el contexto es PAGO usa "payment_details", NUNCA "phone".
-- GET_ORDER_STATUS: el usuario pregunta por el estado de su pedido actual o reciente
-  ("dónde está mi pedido", "ya salió?", "cuánto falta", "qué pasa con mi pedido"). Sin params.
+- GET_ORDER_STATUS: el usuario pregunta por el estado o el DESGLOSE de su pedido actual o reciente. Cubre:
+  (a) Estado / tiempo de entrega: "dónde está mi pedido", "ya salió?", "cuánto falta", "qué pasa con mi pedido".
+  (b) DESGLOSE DE PRECIOS POR ÍTEM de un pedido YA COLOCADO: "cuánto vale cada producto", "cuánto me cobraron por cada uno", "el desglose del pedido", "el total de cada uno", "cómo me lo cobraron", "el detalle del pedido", "cuánto valió cada cosa". Frases ilustrativas, NO exhaustivas — cualquier pregunta del cliente sobre los precios de los items específicos del pedido que ya hizo cae aquí. El response generator ya tiene `unit_price` + `line_total` por item; usa GET_ORDER_STATUS y la respuesta los muestra. NO confundas con `payment_methods` (qué medios acepta el negocio) ni con `delivery_fee` (cuánto cuesta el domicilio).
+  Sin params.
 - GET_ORDER_HISTORY: el usuario pide ver pedidos anteriores
   ("qué he pedido antes", "muéstrame mis pedidos", "último pedido"). Sin params.
 - CANCEL_ORDER: el usuario quiere CANCELAR/anular un pedido YA CONFIRMADO en el sistema
@@ -438,10 +440,26 @@ class CustomerServiceAgent(BaseAgent):
             status = order.get("status") or "desconocido"
             total = order.get("total_amount")
             items = order.get("items") or []
-            items_lines = "\n".join(
-                f"- {it.get('quantity')}x (${int(float(it.get('unit_price') or 0)):,})".replace(",", ".")
-                for it in items
-            ) or "(sin items)"
+            # Render `1x BARRACUDA — $28.000` (with notes when present)
+            # so customers asking "cuánto vale cada producto?" / "cómo
+            # me cobraron?" after order placement get the actual
+            # per-item breakdown. Production 2026-05-06 (Biela /
+            # +573159280840): the prior format dropped the product
+            # name and the bot replied "no tengo esa información".
+            def _fmt_item(it):
+                qty = int(it.get("quantity") or 0)
+                name = it.get("name") or "(sin nombre)"
+                price = int(float(it.get("unit_price") or 0))
+                line_total = int(float(it.get("line_total") or (price * qty)))
+                notes = (it.get("notes") or "").strip()
+                notes_part = f" ({notes})" if notes else ""
+                price_str = f"${price:,}".replace(",", ".")
+                line_total_str = f"${line_total:,}".replace(",", ".")
+                # When qty > 1, surface the line total alongside the unit price.
+                if qty > 1:
+                    return f"- {qty}x {name}{notes_part} — {price_str} c/u (total {line_total_str})"
+                return f"- {qty}x {name}{notes_part} — {price_str}"
+            items_lines = "\n".join(_fmt_item(it) for it in items) or "(sin items)"
             cancellation_reason = (order.get("cancellation_reason") or "").strip() or None
             eta_minutes = order.get("eta_minutes")
 
@@ -473,14 +491,25 @@ class CustomerServiceAgent(BaseAgent):
             )
             tone_rules = (
                 "TONO: profesional pero cálido (como mesero atento). "
-                "Máximo 2 oraciones. Sin emojis salvo que el cliente los use. "
+                "Máximo 2 oraciones (hasta 4 si el cliente pidió el desglose por ítem). "
+                "Sin emojis salvo que el cliente los use. "
                 "Sin frases relleno tipo 'si quieres saber', 'por si acaso', 'cualquier cosa'."
+            )
+            breakdown_rules = (
+                "REGLAS DE DESGLOSE (CRÍTICO):\n"
+                "- Si el cliente pidió EXPLÍCITAMENTE el desglose por ítem ('cuánto vale cada producto', "
+                "'cómo me cobraron', 'el detalle del pedido', 'cuánto valió cada cosa', 'el total "
+                "de cada uno'): muestra LITERALMENTE las líneas de Items (con nombre + precio) tal "
+                "como vienen en el bloque de datos, después del estado. Termina con el Total. NO "
+                "inventes precios; usa los del bloque.\n"
+                "- Si el cliente NO pidió desglose, NO listes los items — solo el estado."
             )
             system = (
                 base_system
                 + "\nSITUACIÓN: El cliente pregunta por el estado de su pedido. "
-                "Responde con el estado actual. Tiempos SOLO si los pide explícitamente.\n"
-                + status_rules + "\n" + timing_rules + "\n" + tone_rules
+                "Responde con el estado actual. Tiempos SOLO si los pide explícitamente. "
+                "Desglose por ítem SOLO si lo pide explícitamente.\n"
+                + status_rules + "\n" + timing_rules + "\n" + breakdown_rules + "\n" + tone_rules
             )
             eta_str = f"{eta_minutes} min" if eta_minutes is not None else "—"
             total_str = f"${int(float(total or 0)):,}".replace(",", ".")

@@ -1017,10 +1017,26 @@ def execute_order_intent(
                     current_state, wa_id, business_id,
                     f"No encontré {product_name or 'ese producto'} en el menú.",
                 )
+            # Surface how many of THIS product the user already has in
+            # their active cart. The response generator uses this to
+            # avoid the "¿agregarla al pedido?" upsell when the product
+            # is already there — that prompt drove "Si" → duplicate
+            # cart line in production (Biela 2026-05-06 +573159280840).
+            try:
+                cart = order_tools._cart_from_session(wa_id, business_id)
+                pid = str(product.get("id") or "")
+                in_cart_qty = sum(
+                    int(it.get("quantity") or 0)
+                    for it in (cart.get("items") or [])
+                    if str(it.get("product_id") or "") == pid
+                )
+            except Exception:
+                in_cart_qty = 0
             return _base_result(
                 current_state, wa_id, business_id,
                 RESULT_KIND_PRODUCT_DETAILS,
                 product=_clean_product_dict(product),
+                in_cart_quantity=in_cart_qty,
             )
 
         if intent == INTENT_VIEW_CART:
