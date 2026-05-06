@@ -66,9 +66,13 @@ class TestGetGreeting:
         assert reply.startswith("Hola David.")
 
     @pytest.mark.parametrize("name", ["Usuario", "Cliente", "User", "usuario", "CLIENTE", "", None])
-    def test_skips_opener_for_placeholder_names(self, name):
+    def test_uses_anonymous_hola_for_placeholder_names(self, name):
         ctx = {"business": {"name": "Biela", "settings": {}}}
         reply = business_greeting.get_greeting(ctx, name)
+        # Always greet with "Hola." even when the name is unknown — only
+        # the named variant ("Hola David.") gets dropped to avoid
+        # echoing the placeholder ("Hola Cliente.").
+        assert reply.startswith("Hola.\n\n")
         assert not reply.startswith("Hola ")
 
     def test_uses_custom_hours_text_when_present(self):
@@ -96,3 +100,49 @@ class TestGetGreeting:
     def test_empty_business_context_uses_all_defaults(self):
         reply = business_greeting.get_greeting({}, None)
         assert "BIELA FAST FOOD" in reply
+
+
+class TestCtaWelcomePayload:
+    """The Twilio CTA path: button-card welcome via Content Template."""
+
+    BIELA_TWILIO_CTX = {
+        "provider": "twilio",
+        "business": {
+            "name": "Biela",
+            "settings": {"welcome_content_sid": "HXabc123"},
+        },
+    }
+
+    def test_returns_none_when_provider_not_twilio(self):
+        ctx = {
+            "provider": "meta",
+            "business": {
+                "name": "Biela",
+                "settings": {"welcome_content_sid": "HXabc123"},
+            },
+        }
+        assert business_greeting.cta_welcome_payload(ctx, "David") is None
+
+    def test_returns_none_when_no_content_sid(self):
+        ctx = {
+            "provider": "twilio",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        assert business_greeting.cta_welcome_payload(ctx, "David") is None
+
+    def test_known_name_emits_named_opener(self):
+        out = business_greeting.cta_welcome_payload(self.BIELA_TWILIO_CTX, "David")
+        assert out["content_sid"] == "HXabc123"
+        assert out["variables"] == {"1": "Biela", "2": "Hola David "}
+        assert out["rendered_body"].startswith("Hola David 👋 Bienvenido a Biela")
+        # Schedule and menu URL are intentionally absent from the new body.
+        assert "5:30 PM" not in out["rendered_body"]
+        assert "gixlink" not in out["rendered_body"]
+
+    @pytest.mark.parametrize("name", ["Cliente", "usuario", "User", "", None])
+    def test_unknown_name_emits_anonymous_opener(self, name):
+        out = business_greeting.cta_welcome_payload(self.BIELA_TWILIO_CTX, name)
+        assert out["variables"] == {"1": "Biela", "2": "Hola "}
+        # Body still says "Hola" — never echoes the placeholder.
+        assert out["rendered_body"].startswith("Hola 👋 Bienvenido a Biela")
+        assert "Cliente" not in out["rendered_body"]

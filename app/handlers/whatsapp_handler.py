@@ -226,6 +226,13 @@ def _run_agent_and_send(
         logging.warning("[ABORT] %s: aborted after planner, skipping send", wa_id)
         return False
 
+    # Conversation manager already dispatched a rich message (e.g. Twilio
+    # CTA Content Template for the welcome). Skip the normal text send so
+    # we don't double-send the greeting.
+    if response == "__SUPPRESS_SEND__":
+        logging.warning("[SEND] %s: suppress-send sentinel, rich message already dispatched", wa_id)
+        return True
+
     # Pre-send abort gate: covers paths that don't go through the agent
     # (greeting fast-path) and paths where the dispatcher's abort fallback
     # produces a generic "Lo siento, no pude procesar..." string. By the

@@ -184,11 +184,57 @@ class ConversationManager:
         )
         if router_result.direct_reply is not None:
             logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")
+            whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
+
+            # POC: send welcome as a Twilio CTA Content Template (button card)
+            # when the business has settings.welcome_content_sid configured.
+            # Falls back to the plain-text path on any failure.
+            cta = None
+            try:
+                from ..services import business_greeting as _bg
+                cta = _bg.cta_welcome_payload(business_context, name)
+                logging.warning(
+                    "[CONVERSATION_MANAGER] cta_welcome_payload resolved: provider=%s sid=%s cta=%s",
+                    (business_context or {}).get("provider"),
+                    (((business_context or {}).get("business") or {}).get("settings") or {}).get("welcome_content_sid"),
+                    "yes" if cta else "no",
+                )
+            except Exception as exc:
+                logging.warning(f"[CONVERSATION_MANAGER] cta_welcome_payload failed: {exc}")
+
+            if cta is not None:
+                try:
+                    from ..utils.whatsapp_utils import send_twilio_cta
+                    sent = send_twilio_cta(
+                        content_sid=cta["content_sid"],
+                        variables=cta["variables"],
+                        to=wa_id,
+                        business_context=business_context,
+                    )
+                except Exception as exc:
+                    logging.error(f"[CONVERSATION_MANAGER] CTA send raised: {exc}")
+                    sent = None
+                if sent is not None:
+                    try:
+                        conversation_service.store_conversation_message(
+                            wa_id=wa_id,
+                            message=cta["rendered_body"],
+                            role="assistant",
+                            business_id=business_id,
+                            whatsapp_number_id=whatsapp_number_id,
+                        )
+                    except Exception as e:
+                        logging.error(f"[CONVERSATION_MANAGER] CTA persist failed: {e}")
+                    logging.warning("[CONVERSATION_MANAGER] greeting sent via CTA Content Template")
+                    return "__SUPPRESS_SEND__"
+                logging.warning(
+                    "[CONVERSATION_MANAGER] CTA send failed — falling back to plain-text greeting"
+                )
+
             # Agent paths persist their own assistant turns inline; the fast-path
             # bypasses dispatch entirely, so persist here. Without this, greetings
             # show no bot turn in the inbox UI and never fire the inbox_event NOTIFY.
             try:
-                whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
                 conversation_service.store_conversation_message(
                     wa_id=wa_id,
                     message=router_result.direct_reply,

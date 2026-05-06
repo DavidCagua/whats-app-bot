@@ -88,7 +88,7 @@ def get_greeting(
         customer_name
         and customer_name.lower() not in ("usuario", "cliente", "user")
     )
-    opener = f"Hola {customer_name}.\n\n" if has_real_name else ""
+    opener = f"Hola {customer_name}.\n\n" if has_real_name else "Hola.\n\n"
 
     return (
         f"{opener}"
@@ -97,3 +97,51 @@ def get_greeting(
         f"{hours_line}\n\n"
         f"{menu_url}"
     )
+
+
+def cta_welcome_payload(
+    business_context: Optional[dict],
+    customer_name: Optional[str],
+) -> Optional[dict]:
+    """
+    Return CTA Content Template payload when this business should send the
+    welcome via a button-styled card; None otherwise (caller falls back to
+    the plain-text greeting).
+
+    Activation: business.settings.welcome_content_sid set + provider=twilio.
+    The Content Template at that SID must define exactly:
+      {{1}} = business name
+      {{2}} = name fragment of the opener — either "Hola <Name> " (with
+              trailing space) or "Hola " when the contact's name is
+              unknown. Carrying it as a variable lets us cleanly drop
+              the name without breaking the rest of the sentence.
+    The CTA URL is hardcoded inside the template (Twilio rejects a pure
+    variable in the action.url field — URL is per-business anyway, so
+    bake it into the template at creation time).
+
+    Returns: {"content_sid", "variables", "rendered_body"}.
+    rendered_body is the plain-text version we persist to conversation
+    history; it must match what the customer sees on WhatsApp so the
+    inbox UI is consistent.
+    """
+    if not business_context or business_context.get("provider") != "twilio":
+        return None
+    biz = business_context.get("business") or {}
+    settings = biz.get("settings") or {}
+    content_sid = (settings.get("welcome_content_sid") or "").strip()
+    if not content_sid:
+        return None
+    business_name = (biz.get("name") or _LEGACY_DEFAULT_BUSINESS_NAME).strip()
+    first = _first_name(customer_name)
+    has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
+    opener = f"Hola {first} " if has_real_name else "Hola "
+    variables = {"1": business_name, "2": opener}
+    rendered_body = (
+        f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+        "¿Qué se te antoja hoy? Estamos listos para ayudarte"
+    )
+    return {
+        "content_sid": content_sid,
+        "variables": variables,
+        "rendered_body": rendered_body,
+    }

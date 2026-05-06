@@ -229,6 +229,58 @@ def send_message(data, business_context=None):
         return None
 
 
+def send_twilio_cta(
+    content_sid,
+    variables,
+    to,
+    business_context=None,
+):
+    """
+    Send a Twilio WhatsApp Content Template (e.g. twilio/call-to-action)
+    by ContentSid. Used for the welcome message so customers see a
+    button-styled CTA instead of a raw URL. Inside the 24h customer-care
+    window no Meta template approval is required.
+
+    Returns the Twilio Message object on success, None on failure.
+    """
+    if is_mock_mode():
+        return mock_send_message(
+            json.dumps({"to": to, "content_sid": content_sid, "content_variables": variables}),
+            business_context,
+        )
+    try:
+        import os
+        account_sid = current_app.config.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
+        auth_token = current_app.config.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
+        from_number = (business_context or {}).get("twilio_phone_number") or (
+            current_app.config.get("TWILIO_WHATSAPP_NUMBER") or os.getenv("TWILIO_WHATSAPP_NUMBER")
+        )
+        if from_number and not str(from_number).startswith("whatsapp:"):
+            from_number = f"whatsapp:{from_number}"
+        if not all([account_sid, auth_token, from_number, content_sid]):
+            logging.error("[CTA_SEND] Missing credentials or content_sid")
+            return None
+        to_whatsapp = f"whatsapp:{to}" if to and not str(to).startswith("whatsapp:") else to
+
+        from twilio.rest import Client
+        client = Client(account_sid, auth_token)
+        msg = client.messages.create(
+            from_=from_number,
+            to=to_whatsapp,
+            content_sid=content_sid,
+            content_variables=json.dumps(variables or {}),
+        )
+        logging.warning(
+            f"[CTA_SEND] ✅ sent content_sid={content_sid} to={to_whatsapp} msg_sid={msg.sid}"
+        )
+        return msg
+    except Exception as e:
+        logging.error(f"[CTA_SEND] ❌ send failed: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        return None
+
+
 def process_text_for_whatsapp(text):
     logging.info(f"Processing text for WhatsApp: '{text}'")
 
