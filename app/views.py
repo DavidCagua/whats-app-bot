@@ -367,6 +367,60 @@ def admin_send_message():
     return jsonify({"ok": True}), 200
 
 
+@webhook_blueprint.route("/admin/products/<product_id>/regenerate-metadata", methods=["POST"])
+@admin_api_key_required
+def admin_regenerate_product_metadata(product_id):
+    """
+    Regenerate tags + embedding for a single product. Called by the admin
+    console after a create/update so search stays in sync with the catalog.
+
+    Request body (optional):
+        { "force": bool, "tags_only": bool, "embeddings_only": bool }
+    """
+    import uuid as _uuid
+
+    from .database.models import Product, get_db_session
+    from .services.product_metadata import regenerate_for_product
+
+    if not os.getenv("OPENAI_API_KEY"):
+        return jsonify({"status": "error", "message": "OPENAI_API_KEY not configured"}), 503
+
+    body = request.get_json(silent=True) or {}
+    force = bool(body.get("force", True))
+    tags_only = bool(body.get("tags_only", False))
+    embeddings_only = bool(body.get("embeddings_only", False))
+
+    try:
+        pid = _uuid.UUID(product_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid product_id"}), 400
+
+    db_session = get_db_session()
+    try:
+        product = db_session.query(Product).filter(Product.id == pid).first()
+        if not product:
+            return jsonify({"status": "error", "message": "Product not found"}), 404
+
+        result = regenerate_for_product(
+            db_session,
+            product,
+            force=force,
+            tags_only=tags_only,
+            embeddings_only=embeddings_only,
+        )
+        db_session.commit()
+        return jsonify({"ok": True, "result": result}), 200
+    except Exception as e:
+        logging.exception("[ADMIN REGEN] failed for product %s: %s", product_id, e)
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": "Regeneration failed"}), 500
+    finally:
+        db_session.close()
+
+
 @webhook_blueprint.route("/admin/upload-media", methods=["POST"])
 @admin_api_key_required
 def admin_upload_media():

@@ -339,13 +339,19 @@ export function ProductsManager({
               />
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditor({ mode: "closed" })}>
-              Cancelar
-            </Button>
-            <Button onClick={() => void handleSave()} disabled={saving}>
-              {saving ? "Guardando..." : "Guardar"}
-            </Button>
+          <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-muted-foreground sm:mr-auto">
+              Al guardar regeneramos las etiquetas de búsqueda para que el bot
+              encuentre el producto. Puede tardar unos segundos.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setEditor({ mode: "closed" })}>
+                Cancelar
+              </Button>
+              <Button onClick={() => void handleSave()} disabled={saving}>
+                {saving ? "Guardando y regenerando búsqueda..." : "Guardar"}
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

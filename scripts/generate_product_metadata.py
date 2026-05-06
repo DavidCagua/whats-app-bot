@@ -34,32 +34,11 @@ logger = logging.getLogger("generate_product_metadata")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from app.database.models import Product, get_db_session, Business  # noqa: E402
-from app.services.tag_generator import (  # noqa: E402
-    generate_tags_for_product,
-    build_embedding_text,
+from app.database.models import Product, get_db_session  # noqa: E402
+from app.services.product_metadata import (  # noqa: E402
+    business_context_for,
+    regenerate_for_product,
 )
-from app.services.embeddings import embed_text, format_vector_literal  # noqa: E402
-from sqlalchemy import text as sql_text  # noqa: E402
-
-
-def _business_context(db_session, business_id: str) -> str:
-    try:
-        business = (
-            db_session.query(Business)
-            .filter(Business.id == uuid.UUID(business_id))
-            .first()
-        )
-        if not business:
-            return "restaurante"
-        settings = business.settings or {}
-        name = business.name or "restaurante"
-        hint = settings.get("business_description") or settings.get("ai_prompt") or ""
-        if hint:
-            return f"{name} — {hint[:200]}"
-        return name
-    except Exception:
-        return "restaurante"
 
 
 def run(
@@ -76,7 +55,7 @@ def run(
 
     db_session = get_db_session()
     try:
-        business_ctx = _business_context(db_session, business_id)
+        business_ctx = business_context_for(db_session, business_id)
         products = (
             db_session.query(Product)
             .filter(
@@ -96,60 +75,18 @@ def run(
         embed_updates = 0
 
         for product in products:
-            pid = str(product.id)
-            existing_tags = list(product.tags or [])
-            needs_tags = not embeddings_only and (force or not existing_tags)
-
-            new_tags = existing_tags
-            if needs_tags:
-                generated = generate_tags_for_product(
-                    name=product.name,
-                    description=product.description,
-                    category=product.category,
-                    business_context=business_ctx,
-                )
-                if generated:
-                    new_tags = generated
-                    tag_updates += 1
-                    logger.info("  tags  %-35s → %s", product.name[:35], generated)
-                    if not dry_run:
-                        product.tags = new_tags
-                        db_session.flush()
-                else:
-                    logger.warning("  tags  %-35s → (none generated)", product.name[:35])
-
-            if not tags_only:
-                has_embedding = False
-                try:
-                    row = db_session.execute(
-                        sql_text("SELECT embedding IS NOT NULL AS has FROM products WHERE id = :id"),
-                        {"id": pid},
-                    ).first()
-                    has_embedding = bool(row and row[0])
-                except Exception as e:
-                    logger.debug("embedding presence check failed: %s", e)
-
-                if force or not has_embedding:
-                    prod_dict = {
-                        "name": product.name,
-                        "description": product.description,
-                        "category": product.category,
-                        "tags": new_tags,
-                    }
-                    text = build_embedding_text(prod_dict)
-                    vec = embed_text(text)
-                    if vec:
-                        embed_updates += 1
-                        logger.info("  embed %-35s → dim=%d", product.name[:35], len(vec))
-                        if not dry_run:
-                            db_session.execute(
-                                sql_text(
-                                    "UPDATE products SET embedding = CAST(:vec AS vector) WHERE id = :id"
-                                ),
-                                {"vec": format_vector_literal(vec), "id": pid},
-                            )
-                    else:
-                        logger.warning("  embed %-35s → (failed)", product.name[:35])
+            result = regenerate_for_product(
+                db_session,
+                product,
+                business_context=business_ctx,
+                force=force,
+                tags_only=tags_only,
+                embeddings_only=embeddings_only,
+            )
+            if result["tags_updated"]:
+                tag_updates += 1
+            if result["embedding_updated"]:
+                embed_updates += 1
 
         if dry_run:
             logger.info("DRY RUN — no changes committed")
