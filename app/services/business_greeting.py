@@ -50,13 +50,9 @@ def _first_name(full_name: Optional[str]) -> str:
 
 # Hardcoded Biela defaults preserved from the prior order-agent GREET
 # branch so migrating this logic out doesn't change Biela's behavior.
-# Remove once every business has settings.hours_text + settings.menu_url.
+# Remove once every business has settings.menu_url.
 _LEGACY_DEFAULT_BUSINESS_NAME = "BIELA FAST FOOD"
 _LEGACY_DEFAULT_MENU_URL = "https://gixlink.com/Biela"
-_LEGACY_DEFAULT_HOURS_LINE = (
-    "Recuerda que nuestro horario de atención al público es "
-    "de 5:30 PM a 10:00 PM de lunes a viernes."
-)
 
 
 def get_greeting(
@@ -64,39 +60,35 @@ def get_greeting(
     customer_name: Optional[str],
 ) -> str:
     """
-    Build the business greeting reply.
+    Build the plain-text greeting reply — body matches the Twilio CTA
+    template's `rendered_body`, with the menu URL appended on its own
+    line as the button replacement (plain text has no clickable card).
 
-    Reads name + menu_url + hours from business_context.business.settings.
-    Falls back to the legacy Biela defaults so existing traffic sees no
-    change until settings are populated per-business.
+    Used when the business has no Twilio CTA configured (Meta path or
+    a Twilio business without `welcome_content_sid`). Reads name +
+    menu_url from business_context.business.settings; falls back to the
+    legacy Biela defaults.
     """
     business_name = _LEGACY_DEFAULT_BUSINESS_NAME
     menu_url = _LEGACY_DEFAULT_MENU_URL
-    hours_line = _LEGACY_DEFAULT_HOURS_LINE
 
     if business_context and business_context.get("business"):
         biz = business_context["business"]
         business_name = (biz.get("name") or business_name).strip()
         settings = biz.get("settings") or {}
         menu_url = (settings.get("menu_url") or menu_url).strip()
-        custom_hours = (settings.get("hours_text") or "").strip()
-        if custom_hours:
-            hours_line = custom_hours
 
-    customer_name = _first_name(customer_name)
-    has_real_name = (
-        customer_name
-        and customer_name.lower() not in ("usuario", "cliente", "user")
-    )
-    opener = f"Hola {customer_name}.\n\n" if has_real_name else "Hola.\n\n"
+    first = _first_name(customer_name)
+    has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
+    opener = f"Hola {first} " if has_real_name else "Hola "
 
-    return (
-        f"{opener}"
-        f"Gracias por comunicarte con {business_name}. ¿Cómo podemos ayudarte?\n\n"
-        "🍔🍟🔥😁\n\n"
-        f"{hours_line}\n\n"
-        f"{menu_url}"
+    body = (
+        f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+        "¿Qué se te antoja hoy? Estamos listos para ayudarte"
     )
+    if menu_url:
+        body += f"\n\n{menu_url}"
+    return body
 
 
 def cta_welcome_payload(

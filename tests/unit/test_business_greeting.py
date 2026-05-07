@@ -54,43 +54,58 @@ class TestIsPureGreeting:
 
 
 class TestGetGreeting:
+    """
+    Plain-text greeting — used when the business has no Twilio CTA
+    template configured. Body must mirror the CTA `rendered_body` so the
+    customer sees consistent copy across both paths; the menu URL is
+    appended on its own line because plain text has no button.
+    """
+
     def test_uses_business_name_from_context(self):
         ctx = {"business": {"name": "Mi Restaurante", "settings": {"menu_url": "https://x.test/menu"}}}
         reply = business_greeting.get_greeting(ctx, "Juan")
         assert "Mi Restaurante" in reply
         assert "https://x.test/menu" in reply
 
+    def test_body_matches_cta_format(self):
+        # Same headline as CTA `rendered_body`, plus URL appended.
+        ctx = {"business": {"name": "Biela", "settings": {"menu_url": "https://x.test/menu"}}}
+        reply = business_greeting.get_greeting(ctx, "David")
+        assert reply == (
+            "Hola David 👋 Bienvenido a Biela 🍔🔥\n"
+            "¿Qué se te antoja hoy? Estamos listos para ayudarte\n\n"
+            "https://x.test/menu"
+        )
+
     def test_prepends_real_customer_name(self):
         ctx = {"business": {"name": "Biela", "settings": {}}}
         reply = business_greeting.get_greeting(ctx, "David")
-        assert reply.startswith("Hola David.")
+        assert reply.startswith("Hola David 👋 Bienvenido a Biela")
 
     @pytest.mark.parametrize("name", ["Usuario", "Cliente", "User", "usuario", "CLIENTE", "", None])
     def test_uses_anonymous_hola_for_placeholder_names(self, name):
         ctx = {"business": {"name": "Biela", "settings": {}}}
         reply = business_greeting.get_greeting(ctx, name)
-        # Always greet with "Hola." even when the name is unknown — only
-        # the named variant ("Hola David.") gets dropped to avoid
-        # echoing the placeholder ("Hola Cliente.").
-        assert reply.startswith("Hola.\n\n")
-        assert not reply.startswith("Hola ")
+        # Anonymous opener mirrors CTA: "Hola 👋 Bienvenido..." — never
+        # echoes the placeholder name ("Cliente", "Usuario", etc.).
+        assert reply.startswith("Hola 👋 Bienvenido a Biela")
+        for placeholder in ("Cliente", "Usuario", "User"):
+            assert placeholder not in reply.split("\n", 1)[0]
 
-    def test_uses_custom_hours_text_when_present(self):
+    def test_no_hours_line_in_greeting(self):
+        # Hours moved out of the greeting to match the CTA body. They
+        # remain available via business_info_service for explicit
+        # "a qué hora abren" CS questions.
         ctx = {
             "business": {
                 "name": "Biela",
-                "settings": {"hours_text": "Abierto de 10 AM a 10 PM todos los días."},
+                "settings": {"hours_text": "Abierto 10 AM a 10 PM."},
             }
         }
         reply = business_greeting.get_greeting(ctx, None)
-        assert "Abierto de 10 AM a 10 PM todos los días." in reply
-        # Default Biela hours must NOT appear when custom hours are set.
-        assert "5:30 PM a 10:00 PM" not in reply
-
-    def test_falls_back_to_legacy_hours_when_missing(self):
-        ctx = {"business": {"name": "Biela", "settings": {}}}
-        reply = business_greeting.get_greeting(ctx, None)
-        assert "5:30 PM a 10:00 PM" in reply
+        assert "Abierto 10 AM" not in reply
+        assert "5:30 PM" not in reply
+        assert "horario" not in reply.lower()
 
     def test_no_business_context_uses_all_defaults(self):
         reply = business_greeting.get_greeting(None, None)

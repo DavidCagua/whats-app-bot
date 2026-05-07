@@ -38,7 +38,7 @@ class TestRouterGreetingFastPath:
 
     def test_greeting_includes_customer_name(self):
         result = router.route("hola", BIELA_CONTEXT, "David")
-        assert result.direct_reply.startswith("Hola David.")
+        assert result.direct_reply.startswith("Hola David 👋 Bienvenido a Biela")
 
 
 class TestRouterLLMGreetingDomain:
