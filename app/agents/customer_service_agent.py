@@ -756,6 +756,7 @@ class CustomerServiceAgent(BaseAgent):
                     "metadata": {
                         "wa_id": wa_id,
                         "business_id": str(business_id),
+                        "turn_id": message_id or "",
                         "stale_turn": stale_turn,
                         "run_id": run_id,
                     },
@@ -981,6 +982,7 @@ class CustomerServiceAgent(BaseAgent):
                         "metadata": {
                             "wa_id": wa_id,
                             "business_id": str(business_id),
+                            "turn_id": message_id or "",
                             "intent": intent,
                             "result_kind": result_kind,
                             "run_id": run_id,

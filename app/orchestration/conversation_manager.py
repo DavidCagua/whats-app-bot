@@ -176,11 +176,18 @@ class ConversationManager:
         turn_ctx = build_turn_context(wa_id=wa_id, business_id=business_id)
 
         # 1. Router fast-path: pure greetings reply directly.
+        # Pass wa_id + message_id (used as turn_id) into the router so its
+        # LangSmith spans are filterable by user and so all LLM spans
+        # within this turn share a correlation id — debug-conversation
+        # depends on this to reconstruct router → planner → response as
+        # one tree per inbound message.
         router_result = router_route(
             message_body=message_body,
             business_context=business_context,
             customer_name=name,
             ctx=turn_ctx,
+            wa_id=wa_id,
+            turn_id=message_id,
         )
         if router_result.direct_reply is not None:
             logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")

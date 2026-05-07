@@ -1636,6 +1636,7 @@ class OrderAgent(BaseAgent):
                         "metadata": {
                             "wa_id": wa_id,
                             "business_id": str(business_id),
+                            "turn_id": message_id or "",
                             "order_state": order_state,
                             "stale_turn": stale_turn,
                             "run_id": run_id,
@@ -1965,6 +1966,7 @@ class OrderAgent(BaseAgent):
                     "metadata": {
                         "wa_id": wa_id,
                         "business_id": str(business_id),
+                        "turn_id": message_id or "",
                         "intent": intent,
                         "result_kind": result_kind,
                         "run_id": run_id,

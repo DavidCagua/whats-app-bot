@@ -333,10 +333,17 @@ def _classify_with_llm(
     message_body: str,
     business_context: Optional[dict],
     ctx: Optional[TurnContext] = None,
+    wa_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
 ) -> Optional[List[Tuple[str, str]]]:
     """
     Call the classifier and return a list of (domain, text) segments,
     or None on failure.
+
+    ``wa_id`` and ``turn_id`` go into the LangSmith metadata so router
+    runs are filterable per user (debug-conversation skill) and so all
+    LLM spans from the same inbound message share a correlation id
+    (turn_id = Twilio MessageSid). Both are optional for legacy callers.
     """
     llm = _get_llm_classifier()
     if llm is None:
@@ -361,7 +368,9 @@ def _classify_with_llm(
             config={
                 "run_name": "router_classifier",
                 "metadata": {
+                    "wa_id": wa_id or "",
                     "business_id": business_id,
+                    "turn_id": turn_id or "",
                     "message_length": len(message_body),
                     "order_state": ctx.order_state,
                     "has_active_cart": ctx.has_active_cart,
@@ -615,6 +624,8 @@ def route(
     business_context: Optional[dict],
     customer_name: Optional[str],
     ctx: Optional[TurnContext] = None,
+    wa_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
 ) -> RouterResult:
     """
     Classify the message and decide how to respond.
@@ -698,7 +709,10 @@ def route(
         )
 
     # 5. LLM classification
-    segments = _classify_with_llm(message_body, business_context, ctx=ctx)
+    segments = _classify_with_llm(
+        message_body, business_context, ctx=ctx,
+        wa_id=wa_id, turn_id=turn_id,
+    )
     if not segments:
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")
         return RouterResult()
