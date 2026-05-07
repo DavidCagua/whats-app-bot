@@ -143,3 +143,49 @@ def test_router_classifies_phrase_to_expected_domain(phrase, expected_domain, wh
         f"got={actual_domain!r} (reason: {why}). "
         f"all_segments={result.segments}"
     )
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Compound-greeting cases.
+#
+# Pure single-token greetings ("hola") hit the regex fast-path before
+# the LLM. Compound greetings ("hola buenas noches", "buenas qué más")
+# miss the regex on purpose — the LLM router classifies them as the
+# `greeting` domain and converts to `direct_reply`, matching the
+# fast-path's output shape so conversation_manager dispatches the same
+# welcome CTA. These cases assert that round-trip end-to-end.
+# ───────────────────────────────────────────────────────────────────────
+
+
+COMPOUND_GREETING_CASES = [
+    ("hola buenas noches", "stacked greetings — common WhatsApp opener"),
+    ("buenas qué más", "Colombian greeting + colloquialism"),
+    ("hola qué tal", "greeting + small-talk filler"),
+]
+
+
+@pytest.mark.parametrize(
+    "phrase, why",
+    [pytest.param(p, w, id=p) for (p, w) in COMPOUND_GREETING_CASES],
+)
+def test_router_compound_greeting_returns_direct_reply(phrase, why):
+    # Sanity: these MUST miss the regex so we're actually exercising
+    # the LLM path. If a phrase here starts hitting the fast-path,
+    # this assertion catches the regression and you can promote the
+    # case to the regex test instead.
+    from app.services import business_greeting
+    assert not business_greeting.is_pure_greeting(phrase), (
+        f"{phrase!r} now hits the regex fast-path — move this case to the "
+        f"unit-level greeting tests"
+    )
+
+    result = router.route(
+        message_body=phrase,
+        business_context=BIELA_CONTEXT,
+        customer_name="David",
+    )
+    assert result.direct_reply is not None, (
+        f"phrase={phrase!r} ({why}) — expected LLM-classified greeting → "
+        f"direct_reply, got segments={result.segments}"
+    )
+    assert "Biela" in result.direct_reply

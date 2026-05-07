@@ -497,7 +497,7 @@ class TestExplicitCancelKeywordHelper:
         ],
     )
     def test_explicit_cancel_phrases_match(self, msg):
-        from app.agents.customer_service_agent import _has_explicit_cancel_keyword
+        from app.services.cancel_keywords import has_explicit_cancel_keyword as _has_explicit_cancel_keyword
         assert _has_explicit_cancel_keyword(msg) is True, msg
 
     @pytest.mark.parametrize(
@@ -524,7 +524,7 @@ class TestExplicitCancelKeywordHelper:
         ],
     )
     def test_polite_closes_do_not_match(self, msg):
-        from app.agents.customer_service_agent import _has_explicit_cancel_keyword
+        from app.services.cancel_keywords import has_explicit_cancel_keyword as _has_explicit_cancel_keyword
         assert _has_explicit_cancel_keyword(msg) is False, msg
 
 

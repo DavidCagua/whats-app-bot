@@ -52,11 +52,13 @@ logger = logging.getLogger(__name__)
 DOMAIN_ORDER = "order"
 DOMAIN_CUSTOMER_SERVICE = "customer_service"
 DOMAIN_CHAT = "chat"
+DOMAIN_GREETING = "greeting"
 
 _VALID_DOMAINS = {
     DOMAIN_ORDER,
     DOMAIN_CUSTOMER_SERVICE,
     DOMAIN_CHAT,
+    DOMAIN_GREETING,
 }
 
 
@@ -183,6 +185,18 @@ Dominios disponibles (por INTENCIÓN del cliente):
       Razón: el cliente pregunta SI hay promos disponibles, no está pidiendo
       una específica para agregar al carrito.
 
+- "greeting": el mensaje es ÚNICAMENTE un saludo, sin nombrar producto, sin pregunta,
+    sin pedir información del negocio. Cubre saludos simples y compuestos:
+    "hola", "buenas", "buenos días", "buen día", "buenas tardes", "buenas noches",
+    "hey", "ey", "saludos", "qué más", "qué tal", "qué hubo", o combinaciones de
+    estos ("hola buenas noches", "buenas qué más", "hola qué tal", "buenos días qué hubo"),
+    con o sin signos / muletillas / emojis. Las frases listadas son ilustrativas, NO
+    exhaustivas — cualquier mensaje cuya ÚNICA intención sea saludar cae aquí.
+    Razón: el sistema responde con una bienvenida estándar (con link al menú) sin
+    despachar a ningún agente. IMPORTANTE: si el mensaje añade CUALQUIER otra cosa
+    además del saludo (un producto, una pregunta, una solicitud), NO uses "greeting"
+    — clasifica por la intención sustantiva (ver regla "Saludos al inicio" abajo).
+
 - "chat": pequeña conversación, agradecimientos, despedidas, sin intención clara en otro dominio.
 
 Reglas de desambiguación (claves):
@@ -235,7 +249,7 @@ Reglas de segmentación:
 - El texto de cada segmento puede ser un extracto o una reformulación breve; debe conservar todos los datos relevantes.
 
 Responde SOLO con JSON en esta forma exacta, sin markdown, sin explicación:
-{"segments": [{"domain": "order" | "customer_service" | "chat", "text": "..."}]}
+{"segments": [{"domain": "order" | "customer_service" | "chat" | "greeting", "text": "..."}]}
 """
 
 
@@ -688,6 +702,22 @@ def route(
     if not segments:
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")
         return RouterResult()
+
+    # Greeting domain → render canonical welcome and converge with the
+    # regex fast-path (downstream conversation_manager will upgrade to
+    # the Twilio CTA template when settings.welcome_content_sid is set).
+    # Only fires when greeting is the SOLE segment; if the LLM emits
+    # greeting alongside other intents (shouldn't, per prompt rules) we
+    # drop the greeting and let the substantive segments dispatch.
+    if len(segments) == 1 and segments[0][0] == DOMAIN_GREETING:
+        logger.info("[ROUTER] LLM classified as greeting → direct reply")
+        return RouterResult(
+            direct_reply=business_greeting.get_greeting(business_context, customer_name),
+        )
+    if any(d == DOMAIN_GREETING for d, _ in segments):
+        segments = [(d, t) for d, t in segments if d != DOMAIN_GREETING]
+        if not segments:
+            return RouterResult()
 
     logger.info(
         "[ROUTER] classified n_segments=%d domains=%s state=%s cart=%s placed=%s",

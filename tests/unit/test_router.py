@@ -41,6 +41,43 @@ class TestRouterGreetingFastPath:
         assert result.direct_reply.startswith("Hola David.")
 
 
+class TestRouterLLMGreetingDomain:
+    """
+    Compound greetings ("hola buenas noches", "buenas qué más") miss the
+    regex fast-path on purpose — the LLM router catches them and returns
+    the same `direct_reply` shape so conversation_manager dispatches the
+    Twilio CTA welcome card via the same code path as the regex hit.
+    """
+
+    def test_lone_greeting_segment_converts_to_direct_reply(self):
+        # Compound greeting that would miss the regex; LLM tags it as greeting.
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "greeting", "text": "hola buenas noches"}]}'
+        )
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("hola buenas noches", BIELA_CONTEXT, "David")
+        # Same shape as the regex fast-path: direct_reply set, no segments.
+        assert result.direct_reply is not None
+        assert "Biela" in result.direct_reply
+        assert result.segments is None
+        assert result.domain is None
+
+    def test_greeting_segment_dropped_when_mixed_with_substantive_segment(self):
+        # Defense-in-depth: if the LLM ever emits greeting alongside another
+        # domain (it shouldn't per prompt rules), drop greeting and let the
+        # substantive segment dispatch.
+        mock_llm = _mock_llm_returning(
+            '{"segments": ['
+            '{"domain": "greeting", "text": "hola"},'
+            '{"domain": "order", "text": "una barracuda"}'
+            ']}'
+        )
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route("hola dame una barracuda", BIELA_CONTEXT, "David")
+        assert result.direct_reply is None
+        assert result.segments == [(router.DOMAIN_ORDER, "una barracuda")]
+
+
 class TestRouterSingleSegmentClassification:
     @pytest.mark.parametrize(
         "raw,expected_domain",
