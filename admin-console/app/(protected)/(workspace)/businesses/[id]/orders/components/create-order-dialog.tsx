@@ -214,7 +214,7 @@ export function CreateOrderDialog({
                   <Input
                     id="newWa"
                     inputMode="tel"
-                    placeholder="573001234567"
+                    placeholder="+573001234567"
                     value={newWhatsappId}
                     onChange={(e) => setNewWhatsappId(e.target.value)}
                   />

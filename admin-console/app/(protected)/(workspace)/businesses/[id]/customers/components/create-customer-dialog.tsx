@@ -90,7 +90,7 @@ export function CreateCustomerDialog({ businessId }: { businessId: string }) {
             <Input
               id="whatsappId"
               inputMode="tel"
-              placeholder="573001234567"
+              placeholder="+573001234567"
               value={whatsappId}
               onChange={(e) => setWhatsappId(e.target.value)}
               required
