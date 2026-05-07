@@ -46,6 +46,7 @@ from ..orchestration.order_flow import (
 )
 from ..database.conversation_service import conversation_service
 from ..database.booking_service import booking_service
+from ..database.session_state_service import session_state_service
 from ..services.tracing import tracer
 
 
@@ -115,13 +116,90 @@ NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar
   - Esta regla SOLO aplica cuando el último mensaje del bot terminó con una pregunta de continuación del pedido. Si el bot hizo otra pregunta de sí/no (ej. "¿quieres la hamburguesa?", "¿te la cambio?", "¿prefieres roja o azul?"), una afirmación corta NO es CONFIRM — clasifícala según el contexto específico (ADD_TO_CART, UPDATE_CART_ITEM, etc.).
   - No decidas tú si significa "proceder al checkout" o "colocar el pedido"; el backend lo resuelve según el estado actual. NUNCA uses PROCEED_TO_CHECKOUT ni PLACE_ORDER directamente para palabras de confirmación.
   - Si además de confirmar el usuario provee datos de entrega (ej. "listo, mi dirección es calle 1"), usa SUBMIT_DELIVERY_INFO con los datos, no CONFIRM.
+  - ANTI-PATRONES (NO son CONFIRM aunque suenen "definitivos"):
+    Cambios y correcciones del pedido NUNCA son CONFIRM. El cliente está
+    MUTANDO el carrito (agregar / cambiar cantidad / quitar / reemplazar)
+    o proveyendo un dato — el siguiente turno del bot debe ser el recap
+    "¿algo más o procedemos?", NO el cierre del flujo. Emite SOLO la
+    intención de mutación, sin CONFIRM:
+      • "mejor una no más"          → UPDATE_CART_ITEM (cambiar cantidad), NO CONFIRM
+      • "mejor solo la barracuda"   → REMOVE_FROM_CART de los demás, NO CONFIRM
+      • "cambia la coca por sprite" → UPDATE_CART_ITEM, NO CONFIRM
+      • "quita la malteada"         → REMOVE_FROM_CART, NO CONFIRM
+      • "dos barracudas"            → ADD_TO_CART, NO CONFIRM
+      • "una hamburguesa por favor" → ADD_TO_CART, NO CONFIRM ("por favor" es cortesía, no cierre)
+      • "transferencia"             → SUBMIT_DELIVERY_INFO, NO CONFIRM
+      • "Luis, calle 5, 3001234567" → SUBMIT_DELIVERY_INFO, NO CONFIRM
+    Solo emite CONFIRM cuando el cliente cierra el flujo con una
+    afirmación EXPLÍCITA, no acompañada de mutaciones:
+      • "listo, eso es todo"        → CONFIRM
+      • "así está bien"             → CONFIRM
+      • "sí, procedamos"            → CONFIRM
+      • "dale" (en respuesta a "¿procedemos?") → CONFIRM
+    Regla mental: "¿el cliente acaba de cambiar el carrito o proveer un
+    dato?" Si la respuesta es sí, NO emitas CONFIRM en el mismo turno —
+    el bot debe mostrar el resultado primero. Cuando dudes, NO emitas
+    CONFIRM.
 - Si ya están en recolección de datos (COLLECTING_DELIVERY) y el usuario PROVEE datos: usa SUBMIT_DELIVERY_INFO con uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}. Si solo necesitas saber qué falta (sin que el usuario haya dado nada nuevo), usa GET_CUSTOMER_INFO.
 - Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
 - Si el usuario indica que su teléfono es el MISMO desde el que está escribiendo (ej. "este número", "este mismo", "el mismo", "mi whatsapp", "con este mismo", "el de whatsapp", "al que te estoy escribiendo"): usa SUBMIT_DELIVERY_INFO con `phone` igual al marcador literal `<SENDER>`. Ejemplo: {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"phone": "<SENDER>"}}}}. El backend sustituirá el marcador por el número real del remitente. NUNCA inventes un número.
 - RESOLUCIÓN DE NOMBRES ABREVIADOS: si el historial reciente muestra que el bot acaba de listar productos (ej. "Tenemos: DENVER, NAIROBI, PEGORETTI, SPECIAL DOG") y el usuario responde con un nombre corto o abreviado que coincide con UNO de esos productos (ej. "un special"), usa el nombre COMPLETO del catálogo tal como apareció en la lista (ej. "SPECIAL DOG"). NO envíes solo la parte que el usuario dijo — la búsqueda del backend puede encontrar múltiples productos con nombres similares (ej. "SPECIAL DOG" y "SPECIAL FRIES") y desambiguar innecesariamente. Ejemplos: bot listó "SPECIAL DOG, PEGORETTI, NAIROBI, DENVER" → usuario dice "un special" → product_name="SPECIAL DOG". Bot listó "BIELA FRIES, CHEESE FRIES" → usuario dice "las biela" → product_name="BIELA FRIES".
 - Si solo conversa: CHAT.
 
-Responde ÚNICAMENTE con un JSON válido, sin markdown ni texto extra: {{"intent": "NOMBRE", "params": {{}}}}
+FORMATO DE SALIDA (importante):
+Responde ÚNICAMENTE con un JSON válido, sin markdown ni texto extra. Formato preferido:
+
+  {{"intents": [{{"intent": "NOMBRE", "params": {{...}}}}]}}
+
+La lista puede tener 1, 2 o máximo 3 entradas — emite varias SOLO cuando el mensaje del cliente combina acciones independientes que se ejecutan razonablemente en el mismo turno. El caso típico es un mensaje que mezcla un pedido de producto con datos de entrega (nombre, dirección, teléfono, medio de pago) — captura ambas. Si el mensaje tiene una sola acción, emite una lista de UN elemento. Para retro-compatibilidad también se acepta el formato legacy de una sola intención: {{"intent": "NOMBRE", "params": {{}}}}.
+
+Reglas de combinación (DURAS):
+- ABANDON_CART debe ir SOLO en una lista de un elemento — nunca con otros intents.
+- No emitas el mismo intent dos veces. Para varios productos, usa params.items dentro de un único ADD_TO_CART.
+- No fuerces multi-intent: si el mensaje sólo tiene una acción obvia, devuélvela como singleton.
+- Cada entrada debe ser un intent válido de la lista permitida más arriba.
+- CONFIRM solo se emite cuando el mensaje del cliente contiene una AFIRMACIÓN EXPLÍCITA — palabras como: sí, listo, dale, ok, okay, vale, perfecto, así está bien, eso es todo, todo bien, no más, nada más, ya, claro, procedamos, confirmar, confirmo. Proveer datos (nombre, dirección, teléfono, medio de pago) NO es CONFIRM. Nombrar un producto nuevo NO es CONFIRM. Si el mensaje contiene SOLO datos o SOLO un producto sin una afirmación explícita, emite UNA intent (SUBMIT_DELIVERY_INFO o ADD_TO_CART) — NUNCA agregues CONFIRM "por si acaso" o "para ahorrar un turno". Cuando dudes, NO emitas CONFIRM.
+
+Ejemplos multi-intent:
+
+1) Cliente envía producto + nombre + dirección + teléfono en el mismo mensaje:
+   "Una hamburguesa BARRACUDA por favor
+   Yisela Calle
+   Cl 20 #42-105 Edificio Reserva
+   3015349690"
+   →
+   {{"intents": [
+     {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1}}}},
+     {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"name": "Yisela Calle", "address": "Cl 20 #42-105 Edificio Reserva", "phone": "3015349690"}}}}
+   ]}}
+   (Nota: NO añadas CONFIRM aunque el mensaje termine con "por favor". "por favor" es cortesía, no afirmación de cierre.)
+
+2) Cliente provee SOLO un dato (sin afirmación explícita) — emite UNA intent, NUNCA añadas CONFIRM:
+   "transferencia"   (en COLLECTING_DELIVERY, completando el pago)
+   →
+   {{"intents": [{{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"payment_method": "transferencia"}}}}]}}
+
+   "Luis, Cl 5 #1-2, 3001234567"
+   →
+   {{"intents": [{{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"name": "Luis", "address": "Cl 5 #1-2", "phone": "3001234567"}}}}]}}
+
+3) Cliente combina afirmación EXPLÍCITA con datos — solo aquí se justifica SUBMIT + CONFIRM:
+   "Así está bien, pago por transferencia"   (la frase "así está bien" es la afirmación explícita)
+   →
+   {{"intents": [
+     {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"payment_method": "transferencia"}}}},
+     {{"intent": "CONFIRM", "params": {{}}}}
+   ]}}
+
+4) Mensaje simple — singleton:
+   "Una BARRACUDA"
+   →
+   {{"intents": [{{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1}}}}]}}
+
+5) Pedir un producto NUEVO no es CONFIRM aunque el bot acabe de preguntar "¿procedemos?":
+   "una gaseosa cuatro"   (estado ORDERING, bot acaba de listar fries y preguntó "¿algo más o procedemos?")
+   →
+   {{"intents": [{{"intent": "ADD_TO_CART", "params": {{"product_name": "gaseosa cuatro", "quantity": 1}}}}]}}
 """
 
 RESPONSE_GENERATOR_SYSTEM = """Generas la respuesta del asistente en español colombiano, amigable y breve.
@@ -404,6 +482,193 @@ def _parse_planner_response(text: str) -> Dict[str, Any]:
     return {"intent": INTENT_CHAT, "params": {}}
 
 
+# Maximum intents the planner is allowed to emit per turn. Cap exists so a
+# misbehaving model can't blow up latency by chaining a long sequence; 3
+# covers the realistic pack-everything-into-one-message cases (e.g. add
+# product + provide delivery info + provide payment) without unbounded fan-out.
+MAX_INTENTS_PER_TURN = 3
+
+
+def _extract_intents(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Normalize planner output to a list of ``{"intent": ..., "params": ...}``
+    dicts. Accepts both the new multi-intent shape::
+
+        {"intents": [{"intent": "ADD_TO_CART", "params": {...}}, ...]}
+
+    and the legacy singleton::
+
+        {"intent": "ADD_TO_CART", "params": {...}}
+
+    The list is capped at ``MAX_INTENTS_PER_TURN``. Empty / malformed input
+    falls back to a single CHAT intent so the agent never dead-ends.
+    """
+    if not isinstance(parsed, dict):
+        return [{"intent": INTENT_CHAT, "params": {}}]
+
+    raw: List[Any]
+    if isinstance(parsed.get("intents"), list):
+        raw = parsed["intents"]
+    elif "intent" in parsed:
+        raw = [parsed]
+    else:
+        raw = []
+
+    out: List[Dict[str, Any]] = []
+    for entry in raw[:MAX_INTENTS_PER_TURN]:
+        if not isinstance(entry, dict):
+            continue
+        intent_name = (entry.get("intent") or "").strip().upper().replace(" ", "_")
+        if not intent_name:
+            continue
+        params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+        out.append({"intent": intent_name, "params": params})
+
+    if not out:
+        return [{"intent": INTENT_CHAT, "params": {}}]
+    return out
+
+
+# Canonical execution order for multi-intent dispatch. Lower number = earlier.
+# - SUBMIT_DELIVERY_INFO first so the customer profile is captured before any
+#   downstream intent reads it.
+# - Cart mutations next; ordering inside the group doesn't matter much, but we
+#   put REMOVE/UPDATE before ADD so the cart is "clean" before adding new items
+#   in the rare case a planner emits both.
+# - Read-only / browse intents are essentially free, slot them mid-list.
+# - State-advancing intents (CHECKOUT/CONFIRM/PLACE_ORDER) last, so prior
+#   side effects have already landed in state.
+# - ABANDON_CART is destructive and MUST run alone; the dispatcher drops
+#   any sibling intents when ABANDON_CART is present.
+_CANONICAL_INTENT_ORDER: Dict[str, int] = {
+    "SUBMIT_DELIVERY_INFO": 10,
+    "REMOVE_FROM_CART": 20,
+    "UPDATE_CART_ITEM": 21,
+    "ADD_TO_CART": 22,
+    "ADD_PROMO_TO_CART": 23,
+    "VIEW_CART": 30,
+    "GET_CUSTOMER_INFO": 31,
+    "GET_MENU_CATEGORIES": 32,
+    "LIST_PRODUCTS": 33,
+    "SEARCH_PRODUCTS": 34,
+    "GET_PRODUCT": 35,
+    "CHAT": 50,
+    "PROCEED_TO_CHECKOUT": 60,
+    "CONFIRM": 61,
+    "PLACE_ORDER": 62,
+    "ABANDON_CART": 99,
+}
+
+
+# CTA button titles (Twilio Content Template quick replies). When the
+# inbound message body matches one of these exactly, we skip the planner
+# LLM entirely and emit a deterministic intent. Production 2026-05-07
+# (Luis / 3159280840): planner saw the CTA card's recap in recent history
+# (Nombre/Dirección/Teléfono/Pago) and re-emitted those fields as
+# SUBMIT_DELIVERY_INFO when the customer tapped "Confirmar pedido" — the
+# order was never placed and the CTA card looped. The titles below MUST
+# match the Twilio template at confirm_order_content_sid; if you change
+# the template labels, update these strings too (or add the alternate
+# spellings to _CTA_BUTTON_INTENTS).
+_CTA_BUTTON_INTENTS: Dict[str, Dict[str, Any]] = {
+    "confirmar pedido": {"intent": "CONFIRM", "params": {}},
+    # "Cambiar algo" routes to CHAT — the response composer asks the
+    # customer what they'd like to change, then their next reply runs
+    # through the normal planner.
+    "cambiar algo": {"intent": "CHAT", "params": {}},
+}
+
+
+def _match_cta_button(message_body: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Detect when the inbound message body is the title of a CTA quick-reply
+    button. Match is case-insensitive on a trimmed copy. Returns a parsed
+    planner-shape dict (legacy singleton) so the dispatcher can route it
+    through the existing multi-intent normalizer without a special path.
+    """
+    if not message_body:
+        return None
+    normalized = message_body.strip().lower()
+    return _CTA_BUTTON_INTENTS.get(normalized)
+
+
+def _sort_intents_canonical(intents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Sort intents by canonical execution order. Stable on ties so the
+    planner's emit order is the secondary key — useful when the planner
+    emits two ADD_TO_CARTs (it shouldn't, but the cap is the safety net).
+
+    Two pre-sort filters:
+
+    1. ABANDON_CART runs alone — drops any siblings (destructive intent
+       must not be paired with cart mutations).
+    2. CONFIRM resolves to whatever state-action fits (PROCEED_TO_CHECKOUT
+       in ORDERING, PLACE_ORDER in READY_TO_PLACE — see CONFIRM_RESOLUTION
+       in order_flow). Emitting CONFIRM alongside PROCEED_TO_CHECKOUT or
+       PLACE_ORDER is redundant: the second intent typically lands in a
+       state where the allowlist rejects it, producing a recovery CHAT
+       that overwrites the meaningful CONFIRM result. We saw this in
+       production 2026-05-07 (David / 3177000722): planner emitted
+       [CONFIRM, PLACE_ORDER] for "asi esta bien", PLACE_ORDER got
+       rejected after CONFIRM transitioned state, and the customer
+       received the recovery prose ("¡Con gusto, que disfrutes!") instead
+       of the delivery-info prompt.
+    """
+    if any(i.get("intent") == "ABANDON_CART" for i in intents):
+        return [i for i in intents if i.get("intent") == "ABANDON_CART"][:1]
+
+    intent_names = {i.get("intent") for i in intents}
+    if "CONFIRM" in intent_names:
+        intents = [
+            i for i in intents
+            if i.get("intent") not in ("PROCEED_TO_CHECKOUT", "PLACE_ORDER")
+        ]
+    elif "PROCEED_TO_CHECKOUT" in intent_names:
+        # PROCEED + PLACE alongside is also redundant; PROCEED moves to
+        # COLLECTING_DELIVERY where PLACE isn't allowed yet.
+        intents = [i for i in intents if i.get("intent") != "PLACE_ORDER"]
+
+    # Suppress CONFIRM when paired with any state-mutating action — data
+    # submission OR cart change. The mutation result is what the customer
+    # should see next (recap card, cart change, etc.); CONFIRM piggybacked
+    # on the same turn would resolve through the just-advanced state and
+    # skip the recap. This is structural — we don't inspect user text;
+    # we just observe that the planner emitted "do X AND close" and the
+    # close should always come from a fresh, explicit turn.
+    #
+    # Production incidents that motivated this:
+    #   - 2026-05-07 (David / 3177000722): "transferencia" →
+    #     [SUBMIT_DELIVERY_INFO, CONFIRM] — order placed without the
+    #     "Confirmar pedido" button card ever appearing.
+    #   - 2026-05-07 (David / 3177000722): "dos barracudas" →
+    #     [ADD_TO_CART, CONFIRM] — CTA fired before the customer saw the
+    #     cart recap to add a drink.
+    #   - 2026-05-07 (David / 3177000722): "mejor una no más" →
+    #     [UPDATE_CART_ITEM, CONFIRM] — same shape, customer's correction
+    #     bypassed the recap.
+    #
+    # The customer's explicit confirmation comes from tapping the CTA
+    # button or sending an affirmation token in the next turn — single
+    # CONFIRM intents are unaffected by this dedup.
+    _MUTATING_INTENTS = (
+        "SUBMIT_DELIVERY_INFO",
+        "ADD_TO_CART",
+        "ADD_PROMO_TO_CART",
+        "UPDATE_CART_ITEM",
+        "REMOVE_FROM_CART",
+    )
+    if (
+        "CONFIRM" in intent_names
+        and any(name in intent_names for name in _MUTATING_INTENTS)
+    ):
+        intents = [i for i in intents if i.get("intent") != "CONFIRM"]
+
+    return sorted(
+        intents,
+        key=lambda i: _CANONICAL_INTENT_ORDER.get(i.get("intent", ""), 50),
+    )
+
+
 class OrderAgent(BaseAgent):
     """Order agent: planner (intent) -> executor (one tool) -> response from real state."""
 
@@ -411,10 +676,12 @@ class OrderAgent(BaseAgent):
 
     def __init__(self):
         self._llm = None
+        self._planner_llm = None
         logging.info("[ORDER_AGENT] Initialized with planner + executor + response generator (LLM lazy)")
 
     @property
     def llm(self) -> ChatOpenAI:
+        """Response-generator LLM. Slight temperature for natural prose."""
         if self._llm is None:
             self._llm = ChatOpenAI(
                 model="gpt-4o-mini",
@@ -422,6 +689,32 @@ class OrderAgent(BaseAgent):
                 api_key=os.getenv("OPENAI_API_KEY"),
             )
         return self._llm
+
+    @property
+    def planner_llm(self) -> ChatOpenAI:
+        """
+        Planner LLM. Temperature 0 on gpt-4o-mini.
+
+        Brief experiment with gpt-4o (full) regressed: the model interpreted
+        the anti-patterns section more literally than mini did and silently
+        dropped clear multi-item orders to CHAT (Biela / 3177000722:
+        "una barracuda y una vittoria" → CHAT). gpt-4o-mini emits the cart
+        actions correctly; its remaining failure mode is over-eager CONFIRM
+        bolting, which is caught by the structural dedup in
+        ``_sort_intents_canonical`` (CONFIRM dropped when paired with any
+        cart-mutating intent). That dedup gives us a known UX outcome and a
+        working safety net, while gpt-4o's silent-drop mode had no
+        structural signal to catch on.
+
+        Temp=0 stays — structured-output classifier wants determinism.
+        """
+        if self._planner_llm is None:
+            self._planner_llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0,
+                api_key=os.getenv("OPENAI_API_KEY"),
+            )
+        return self._planner_llm
 
     def get_tools(self):
         return order_tools
@@ -462,7 +755,11 @@ class OrderAgent(BaseAgent):
             "Eres el asistente de pedidos de un restaurante colombiano. Hablas en español colombiano, "
             "cálido, breve y natural — como un mesero profesional que conoce su menú. "
             "Usa SOLO los datos que te doy; no inventes productos, precios, ni confirmes acciones que no ocurrieron. "
-            "Respuestas breves (1-4 líneas típicamente). Evita frases robóticas.\n\n"
+            "Respuestas breves (1-4 líneas típicamente). Evita frases robóticas.\n"
+            "NUNCA inicies la respuesta con un saludo (Hola, Buenas, Buen día/tardes/noches, "
+            "Hey) NI con el nombre del cliente como saludo (ej. 'Hola Yisela', 'Yisela,'). "
+            "La conversación ya está en curso — empieza directo con el contenido. El saludo "
+            "de bienvenida lo maneja el router en el primer turno; tú nunca lo emites.\n\n"
             + biz_info
         )
 
@@ -1181,7 +1478,10 @@ class OrderAgent(BaseAgent):
         # the same load result.
         if session is None:
             from ..orchestration import turn_cache
-            from ..database.session_state_service import session_state_service
+            # session_state_service imported at module level — keeping a
+            # local re-import here would force Python to treat the name as
+            # local across the whole function, leaving it unbound on the
+            # multi-intent refresh path when callers pass a non-None session.
             load_result = turn_cache.current().get_session(
                 wa_id, str(business_id),
                 loader=lambda: session_state_service.load(wa_id, str(business_id)),
@@ -1301,6 +1601,7 @@ class OrderAgent(BaseAgent):
                     role = "operator (human)"
                 content = (msg.get("content") or msg.get("message", ""))[:400]
                 history_text += f"{role}: {content}\n"
+            cta_intent = _match_cta_button(message_body)
             if handoff_promo_id:
                 # Skip the planner LLM call entirely — the handoff already
                 # told us exactly what to do.
@@ -1312,12 +1613,23 @@ class OrderAgent(BaseAgent):
                     "[ORDER_AGENT] handoff fast-path: promo_id=%s — skipping planner",
                     handoff_promo_id,
                 )
+            elif cta_intent is not None:
+                # CTA quick-reply tap. Skip the planner — the button is a
+                # deterministic UI affordance, not free text. Emitting a
+                # canned intent prevents the planner from misreading the
+                # CTA's data recap (Nombre/Dirección/...) as fields the
+                # customer just typed (Luis / 3159280840 incident).
+                parsed = dict(cta_intent)
+                logging.warning(
+                    "[ORDER_AGENT] CTA button fast-path: %r → %s — skipping planner",
+                    message_body, cta_intent.get("intent"),
+                )
             else:
                 planner_messages = [
                     SystemMessage(content=planner_system),
-                    HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON: intent y params."),
+                    HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON usando el formato {{\"intents\": [...]}} (1 a 3 entradas). Usa multi-intent SOLO cuando el mensaje combina varias acciones independientes."),
                 ]
-                planner_response = self.llm.invoke(
+                planner_response = self.planner_llm.invoke(
                     planner_messages,
                     config={
                         "run_name": "order_planner",
@@ -1332,15 +1644,26 @@ class OrderAgent(BaseAgent):
                 )
                 planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
                 parsed = _parse_planner_response(planner_text)
-            # Deterministic safety net: if the planner stripped a
-            # qualifier token (e.g. "mora") from a disamb reply that
-            # mapped to an exact option name, re-attach it as notes.
-            # See apply_disamb_reply_flavor_fallback for the full
-            # contract.
-            parsed = apply_disamb_reply_flavor_fallback(parsed, message_body, pending)
-            intent = (parsed.get("intent") or INTENT_CHAT).upper().replace(" ", "_")
-            params = parsed.get("params") or {}
-            logging.warning("[ORDER_AGENT] Planner intent=%s params=%s", intent, params)
+            # Multi-intent dispatch. Extract zero-or-more intents from the
+            # planner output (accepts legacy singleton and new {"intents":[...]}
+            # shape), apply per-intent fallbacks, then sort by canonical order
+            # so capture-style intents (SUBMIT_DELIVERY_INFO) run before
+            # cart mutations run before state-advancing intents (CONFIRM,
+            # PLACE_ORDER). See _CANONICAL_INTENT_ORDER for the priority table.
+            raw_intents = _extract_intents(parsed)
+            # apply_disamb_reply_flavor_fallback expects the legacy
+            # {"intent","params"} shape — apply it per-entry so the safety
+            # net still kicks in on the relevant ADD_TO_CART intent within
+            # a multi-intent list.
+            for entry in raw_intents:
+                apply_disamb_reply_flavor_fallback(entry, message_body, pending)
+            sorted_intents = _sort_intents_canonical(raw_intents)
+            primary_intent = sorted_intents[0]["intent"] if sorted_intents else INTENT_CHAT
+            logging.warning(
+                "[ORDER_AGENT] Planner emitted %d intent(s): %s",
+                len(sorted_intents),
+                [(e["intent"], e.get("params") or {}) for e in sorted_intents],
+            )
 
             # Defensive promo-discovery handoff: when the router misclassifies
             # a "qué promos hay" question as `order` and our planner picks
@@ -1348,8 +1671,11 @@ class OrderAgent(BaseAgent):
             # it to customer_service which owns promo listings. Empty cart
             # only — once a cart exists, an order-side CHAT is more likely
             # to be a real conversational reply than a promo question.
+            # Single-intent only — multi-intent compound messages aren't
+            # status-query shaped.
             if (
-                intent == INTENT_CHAT
+                len(sorted_intents) == 1
+                and primary_intent == INTENT_CHAT
                 and not items
                 and _looks_like_promo_discovery(message_body)
             ):
@@ -1382,7 +1708,7 @@ class OrderAgent(BaseAgent):
                     requeue_aborted_text(abort_key, message_body)
                     logging.warning(
                         "[ABORT] %s: aborting after planner (intent=%s) — requeued for next flush",
-                        wa_id, intent,
+                        wa_id, primary_intent,
                     )
                     tracer.end_run(run_id, success=False, latency_ms=(time.time() - start_time) * 1000)
                     return {
@@ -1391,17 +1717,117 @@ class OrderAgent(BaseAgent):
                         "state_update": {},
                     }
 
-            # 2) Executor: validate state, run one tool, update state
-            exec_result = execute_order_intent(
-                wa_id=wa_id,
-                business_id=str(business_id),
-                business_context=business_context,
-                session=session,
-                intent=intent,
-                params=params,
-                conversation_history=conversation_history,
-                message_body=message_body,
-            )
+            # 2) Executor: run each intent in canonical order. Best-effort on
+            # partial failure — earlier side effects stay applied so a botched
+            # CONFIRM doesn't roll back a successful ADD_TO_CART. Refresh
+            # session between calls so step N+1 sees step N's state changes.
+            #
+            # A step that returns a "blocking" result_kind halts the loop:
+            # the user has to act before further intents make sense. Without
+            # this, a needs_clarification (disambiguation question) emitted
+            # by step 1 gets overwritten by a state-advancing step 2.
+            # Production 2026-05-07 (David / 3177000722): "una gaseosa cuatro"
+            # → planner emitted [ADD_TO_CART(cuatro), CONFIRM]. ADD hit
+            # needs_clarification (2 Cuatro variants); CONFIRM still ran,
+            # advanced state to READY_TO_PLACE, the CTA card overwrote the
+            # disambiguation question, and the customer never saw the
+            # variant choice.
+            _BLOCKING_RESULT_KINDS = frozenset({
+                RESULT_KIND_NEEDS_CLARIFICATION,
+                RESULT_KIND_USER_ERROR,
+                RESULT_KIND_INTERNAL_ERROR,
+            })
+            current_session = session
+            last_result: Dict[str, Any] = {}
+            last_real_result: Dict[str, Any] = {}
+            last_real_intent: str = ""
+            last_real_params: Dict[str, Any] = {}
+            executed_summaries: List[str] = []
+            for entry in sorted_intents:
+                step_intent = entry["intent"]
+                step_params = entry.get("params") or {}
+                try:
+                    step_result = execute_order_intent(
+                        wa_id=wa_id,
+                        business_id=str(business_id),
+                        business_context=business_context,
+                        session=current_session,
+                        intent=step_intent,
+                        params=step_params,
+                        conversation_history=conversation_history,
+                        message_body=message_body,
+                    )
+                except Exception as step_exc:
+                    logging.exception(
+                        "[ORDER_AGENT] intent=%s raised — continuing best-effort: %s",
+                        step_intent, step_exc,
+                    )
+                    continue
+                last_result = step_result
+                step_kind = step_result.get("result_kind") or ""
+                # Track the last "real" (non-recovery) successful step. The
+                # recovery branch fires when an intent fails the allowlist and
+                # the executor falls back to a state-appropriate chat — its
+                # prose ("¡Con gusto, que disfrutes!") will overwrite useful
+                # earlier results if we naively use last_result. Prefer the
+                # last non-recovery successful result for the response generator.
+                if not step_result.get("is_recovery"):
+                    last_real_result = step_result
+                    last_real_intent = step_intent
+                    last_real_params = step_params
+                executed_summaries.append(
+                    f"{step_intent}->{step_kind or '?'}"
+                    + ("(recovery)" if step_result.get("is_recovery") else "")
+                )
+                # Blocking result: stop the loop. The customer needs to
+                # answer this (disambiguation pick / fix the error) before
+                # any subsequent intent in this turn is meaningful.
+                if step_kind in _BLOCKING_RESULT_KINDS:
+                    logging.warning(
+                        "[ORDER_AGENT] blocking result_kind=%s — halting "
+                        "remaining intents in this turn",
+                        step_kind,
+                    )
+                    break
+                # Refresh session for the next iteration so subsequent
+                # intents see this step's state mutations (cart, profile,
+                # state transitions).
+                if len(sorted_intents) > 1:
+                    try:
+                        refreshed = session_state_service.load(wa_id, str(business_id))
+                        current_session = (refreshed or {}).get("session") or {}
+                    except Exception as exc:
+                        logging.warning(
+                            "[ORDER_AGENT] session reload between intents failed: %s", exc,
+                        )
+
+            # Pick the result that drives the response. Prefer the last
+            # non-recovery step (the intent the customer actually moved
+            # forward on). Fall back to whatever the last step produced if
+            # everything was a recovery.
+            exec_result = last_real_result or last_result
+            if last_real_result:
+                intent = last_real_intent
+                params = last_real_params
+            else:
+                intent = sorted_intents[-1]["intent"] if sorted_intents else INTENT_CHAT
+                params = sorted_intents[-1].get("params", {}) if sorted_intents else {}
+
+            # Defensive: if NOTHING ran (e.g. all intents raised), fall back
+            # to a single CHAT pass so we never silently dead-end the user.
+            if not exec_result:
+                exec_result = execute_order_intent(
+                    wa_id=wa_id,
+                    business_id=str(business_id),
+                    business_context=business_context,
+                    session=session,
+                    intent=INTENT_CHAT,
+                    params={},
+                    conversation_history=conversation_history,
+                    message_body=message_body,
+                )
+                intent = INTENT_CHAT
+                params = {}
             success = exec_result.get("success", False)
             cart_summary_after = exec_result.get("cart_summary") or cart_summary_str
 
@@ -1416,7 +1842,7 @@ class OrderAgent(BaseAgent):
             logging.warning(
                 "[ORDER_TURN] wa_id=%s turn_id=%s state_in=%s intent=%s "
                 "result_kind=%s state_out=%s success=%s rejected=%s "
-                "latency_ms=%d",
+                "latency_ms=%d steps=%s",
                 wa_id,
                 message_id or "-",
                 order_state,
@@ -1426,6 +1852,7 @@ class OrderAgent(BaseAgent):
                 success,
                 planner_intent_rejected,
                 int((time.time() - start_time) * 1000),
+                "|".join(executed_summaries) or "-",
             )
 
             # Handoff guard: empty-cart status query.
@@ -1457,6 +1884,68 @@ class OrderAgent(BaseAgent):
             # Pure greetings are handled upstream by the router fast-path
             # (see app/services/business_greeting.py) and never reach this agent.
             result_kind = exec_result.get("result_kind", "")
+
+            # Confirm-order CTA short-circuit. When all delivery data is
+            # present AND the business has a Twilio Content Template
+            # configured, send a button card ("Confirmar pedido" /
+            # "Cambiar algo") instead of the plain-text "¿Procedemos o
+            # quieres cambiar algo?" prompt. Reduces the friction that
+            # caused Yisela's 48-min silence (Biela / 3015349690,
+            # 2026-05-06) — one tap vs. typing a confirmation. Falls back
+            # to the LLM path on any failure or when the SID isn't set.
+            if result_kind == RESULT_KIND_DELIVERY_STATUS:
+                try:
+                    from ..services.order_cta import cta_confirm_order_payload
+                    cta = cta_confirm_order_payload(
+                        business_context, exec_result.get("delivery_status"),
+                    )
+                except Exception as exc:
+                    logging.warning(
+                        "[ORDER_AGENT] cta_confirm_order_payload raised: %s", exc,
+                    )
+                    cta = None
+                if cta is not None:
+                    try:
+                        from ..utils.whatsapp_utils import send_twilio_cta
+                        sent = send_twilio_cta(
+                            content_sid=cta["content_sid"],
+                            variables=cta["variables"],
+                            to=wa_id,
+                            business_context=business_context,
+                        )
+                    except Exception as exc:
+                        logging.error(
+                            "[ORDER_AGENT] confirm CTA send raised: %s", exc,
+                        )
+                        sent = None
+                    if sent is not None:
+                        try:
+                            conversation_service.store_conversation_message(
+                                wa_id=wa_id,
+                                message=cta["rendered_body"],
+                                role="assistant",
+                                business_id=str(business_id),
+                            )
+                        except Exception as exc:
+                            logging.error(
+                                "[ORDER_AGENT] confirm CTA persist failed: %s", exc,
+                            )
+                        logging.warning(
+                            "[ORDER_AGENT] confirm step sent via CTA Content Template",
+                        )
+                        tracer.end_run(
+                            run_id, success=True,
+                            latency_ms=(time.time() - start_time) * 1000,
+                        )
+                        return {
+                            "agent_type": self.agent_type,
+                            "message": "__SUPPRESS_SEND__",
+                            "state_update": {"active_agents": ["order"]},
+                        }
+                    logging.warning(
+                        "[ORDER_AGENT] confirm CTA send failed — falling back to LLM prompt",
+                    )
+
             response_system, resp_input = self._build_response_prompt(
                 result_kind=result_kind,
                 exec_result=exec_result,

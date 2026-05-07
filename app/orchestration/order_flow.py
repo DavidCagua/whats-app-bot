@@ -115,6 +115,11 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_GET_PRODUCT,
         INTENT_ADD_TO_CART,
         INTENT_ADD_PROMO_TO_CART,
+        # Allowed so multi-intent dispatch can capture delivery PII when
+        # the customer dumps everything in their first message (product +
+        # name + address + phone). Executor stays in GREETING when the
+        # cart is empty — purely additive data capture, no forced state move.
+        INTENT_SUBMIT_DELIVERY_INFO,
         INTENT_CONFIRM,
         INTENT_CHAT,
     ),
@@ -129,6 +134,8 @@ ALLOWED_INTENTS_BY_STATE: Dict[str, tuple] = {
         INTENT_UPDATE_CART_ITEM,
         INTENT_REMOVE_FROM_CART,
         INTENT_PROCEED_TO_CHECKOUT,
+        # Same rationale as GREETING — multi-intent capture path.
+        INTENT_SUBMIT_DELIVERY_INFO,
         INTENT_CONFIRM,
         INTENT_ABANDON_CART,
         INTENT_CHAT,
@@ -580,6 +587,8 @@ def _save_pending_disambiguation(
     requested_name: str,
     options: List[Dict[str, Any]],
     pending_replacement_product_id: Optional[str] = None,
+    requested_quantity: Optional[int] = None,
+    requested_notes: Optional[str] = None,
 ) -> None:
     """
     Save the options we just offered the customer so the NEXT turn's planner
@@ -589,6 +598,13 @@ def _save_pending_disambiguation(
     triggered by a product swap (UPDATE_CART_ITEM.new_product_name) — the
     bypass resolver in the next turn will remove that cart item after
     successfully adding the chosen replacement.
+
+    ``requested_quantity`` and ``requested_notes`` carry the customer's
+    original ask through the disambiguation roundtrip. Without them,
+    "dos limonadas" → "limonada natural" lands as 1x natural because the
+    planner's default quantity is 1 (production 2026-05-07,
+    Biela / 3177000722: customer ordered 2 limonadas + barracuda + vimota,
+    only 1 limonada was kept after disamb).
     """
     try:
         result = turn_cache.current().get_session(
@@ -602,6 +618,10 @@ def _save_pending_disambiguation(
         }
         if pending_replacement_product_id:
             pending_entry["pending_replacement_product_id"] = pending_replacement_product_id
+        if requested_quantity and requested_quantity > 0:
+            pending_entry["requested_quantity"] = int(requested_quantity)
+        if requested_notes:
+            pending_entry["requested_notes"] = requested_notes.strip()
         oc["pending_disambiguation"] = pending_entry
         _save_session_and_invalidate(wa_id, business_id, {"order_context": oc})
         turn_cache.current().invalidate_session(wa_id, business_id)
@@ -681,17 +701,24 @@ def _recovery_result(
     ("En este momento no podemos proceder con eso."), which dead-ends the
     customer — we saw Biela orders abandoned this way. Instead, re-render
     a state-appropriate prompt so the conversation keeps moving.
+
+    Tagged with ``is_recovery=True`` so the multi-intent dispatcher can
+    prefer a real prior result over a recovery when picking which result
+    drives the customer-facing reply.
     """
     if state_after in (ORDER_STATE_COLLECTING_DELIVERY, ORDER_STATE_READY_TO_PLACE):
         # Re-emit the confirmation/collection prompt the user was responding to.
         delivery_status = _build_delivery_status(wa_id, business_id, business_context)
-        return _base_result(
+        result = _base_result(
             state_after, wa_id, business_id,
             RESULT_KIND_DELIVERY_STATUS,
             delivery_status=delivery_status,
         )
-    # ORDERING / GREETING: a neutral CHAT turn is safer than a USER_ERROR.
-    return _base_result(state_after, wa_id, business_id, RESULT_KIND_CHAT)
+    else:
+        # ORDERING / GREETING: a neutral CHAT turn is safer than a USER_ERROR.
+        result = _base_result(state_after, wa_id, business_id, RESULT_KIND_CHAT)
+    result["is_recovery"] = True
+    return result
 
 
 def _internal_error_result(state_after: str, wa_id: str, business_id: str, message: str) -> Dict[str, Any]:
@@ -1096,6 +1123,11 @@ def execute_order_intent(
             # the post-loop branching below.
             multi_ambiguity: Optional[AmbiguousProductError] = None
             multi_ambiguity_query: str = ""
+            # Carry the original requested quantity/notes through the disamb
+            # roundtrip so the customer's "dos limonadas" doesn't collapse to
+            # 1x when they reply with the variant choice.
+            multi_ambiguity_quantity: Optional[int] = None
+            multi_ambiguity_notes: Optional[str] = None
             multi_not_found: List[str] = []
 
             if isinstance(params.get("items"), list) and len(params["items"]) > 0:
@@ -1173,6 +1205,12 @@ def execute_order_intent(
                                         (item.get("product_name") or "").strip()
                                         or (amb_err.query or "").strip()
                                     )
+                                    multi_ambiguity_quantity = (
+                                        int(item.get("quantity") or 1)
+                                    )
+                                    multi_ambiguity_notes = (
+                                        (item.get("notes") or "").strip() or None
+                                    )
                         else:
                             if multi_ambiguity is None:
                                 multi_ambiguity = amb_err
@@ -1180,10 +1218,17 @@ def execute_order_intent(
                                     (item.get("product_name") or "").strip()
                                     or (amb_err.query or "").strip()
                                 )
+                                multi_ambiguity_quantity = (
+                                    int(item.get("quantity") or 1)
+                                )
+                                multi_ambiguity_notes = (
+                                    (item.get("notes") or "").strip() or None
+                                )
                             logger.warning(
-                                "[ORDER_FLOW] multi-item: ambiguous item '%s' (%d matches); "
-                                "continuing with remaining items",
+                                "[ORDER_FLOW] multi-item: ambiguous item '%s' (qty=%s) "
+                                "(%d matches); continuing with remaining items",
                                 item.get("product_name"),
+                                item.get("quantity") or 1,
                                 len(amb_err.matches or []),
                             )
                     except ProductNotFoundError as nf_err:
@@ -1205,12 +1250,31 @@ def execute_order_intent(
                         "[ORDER_FLOW] bypass: resolved '%s' via pending_disambiguation → %s",
                         params.get("product_name"), bypass_pid,
                     )
+                # Quantity / notes resolution on a bypass: prefer the
+                # planner's params when explicitly > 1 (customer revised the
+                # number when picking the variant — "dame 3 limonadas
+                # natural"). Otherwise fall back to the original quantity
+                # captured when we first asked them to disambiguate, so a
+                # plain "limonada natural" reply preserves the "dos
+                # limonadas" they originally asked for. Same for notes.
+                planner_qty = int(params.get("quantity") or 1)
+                pending_qty = int((pending_disamb or {}).get("requested_quantity") or 0)
+                resolved_qty = planner_qty
+                if bypass_pid and planner_qty <= 1 and pending_qty > 1:
+                    resolved_qty = pending_qty
+                    logger.warning(
+                        "[ORDER_FLOW] bypass: preserving original quantity %d "
+                        "(planner emitted %d)", pending_qty, planner_qty,
+                    )
+                planner_notes = (params.get("notes") or "").strip()
+                pending_notes = ((pending_disamb or {}).get("requested_notes") or "").strip()
+                resolved_notes = planner_notes or (pending_notes if bypass_pid else "")
                 args = {
                     "injected_business_context": ctx,
                     "product_id": params.get("product_id") or bypass_pid or "",
                     "product_name": "" if bypass_pid else (params.get("product_name") or ""),
-                    "quantity": int(params.get("quantity") or 1),
-                    "notes": (params.get("notes") or "").strip(),
+                    "quantity": resolved_qty,
+                    "notes": resolved_notes,
                 }
                 tool_fn.invoke(args)
 
@@ -1290,6 +1354,8 @@ def execute_order_intent(
                 ]
                 _save_pending_disambiguation(
                     wa_id, business_id, multi_ambiguity_query, options,
+                    requested_quantity=multi_ambiguity_quantity,
+                    requested_notes=multi_ambiguity_notes,
                 )
                 extras: Dict[str, Any] = {
                     "cart_change": cart_change,
@@ -1600,8 +1666,9 @@ def execute_order_intent(
                 delivery_status["payment_rejected_input"] = payment_rejected_input
 
             state_after = current_state
-            if delivery_status["all_present"]:
-                cart_now = order_tools._cart_from_session(wa_id, business_id)
+            cart_now = order_tools._cart_from_session(wa_id, business_id)
+            cart_has_items = bool((cart_now.get("items") or []))
+            if delivery_status["all_present"] and cart_has_items:
                 _save_session_and_invalidate(
                     wa_id, business_id,
                     {"order_context": {
@@ -1616,13 +1683,28 @@ def execute_order_intent(
                     }},
                 )
                 state_after = ORDER_STATE_READY_TO_PLACE
-            else:
-                cart_now = order_tools._cart_from_session(wa_id, business_id)
+            elif cart_has_items:
+                # Cart has items but data is partial → standard checkout flow.
                 _save_session_and_invalidate(
                     wa_id, business_id,
                     {"order_context": {**cart_now, "state": ORDER_STATE_COLLECTING_DELIVERY}},
                 )
                 state_after = ORDER_STATE_COLLECTING_DELIVERY
+            else:
+                # Cart is empty — multi-intent capture path. The customer
+                # provided delivery data in the same turn as a product
+                # mention, but the ADD_TO_CART intent hasn't run yet (or
+                # was rejected). Persist the data silently and stay in
+                # whatever state we were in. The cart-mutating intent in
+                # the same turn (or a future turn) advances state when
+                # appropriate. Forcing COLLECTING_DELIVERY here would
+                # confuse the response generator into asking about
+                # delivery for an empty cart.
+                logger.warning(
+                    "[ORDER_FLOW] SUBMIT_DELIVERY_INFO with empty cart — "
+                    "persisting profile, state stays %s", current_state,
+                )
+                state_after = current_state
 
             return _base_result(
                 state_after, wa_id, business_id,

@@ -75,7 +75,11 @@ class TestEmptyCartStatusHandoff:
             "state_after": "GREETING",
             "cart_summary": "Pedido vacío.",
         }
+        # planner_llm (temp=0) and llm (response, temp=0.3) are now distinct
+        # properties — patch both with the same mock so the sequential
+        # side_effect counter still works for tests that exercise both calls.
         with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
              patch("app.agents.order_agent.execute_order_intent", return_value=empty_cart_result), \
              patch("app.agents.order_agent.conversation_service"), \
              patch("app.agents.order_agent.tracer"):
@@ -112,6 +116,7 @@ class TestEmptyCartStatusHandoff:
             "cart_summary": "Pedido vacío.",
         }
         with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
              patch("app.agents.order_agent.execute_order_intent", return_value=empty_cart_result), \
              patch("app.agents.order_agent.conversation_service"), \
              patch("app.agents.order_agent.tracer"):
@@ -146,6 +151,7 @@ class TestEmptyCartStatusHandoff:
             "cart_summary": "1x Barracuda.",
         }
         with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
              patch("app.agents.order_agent.execute_order_intent", return_value=non_empty_result), \
              patch("app.agents.order_agent.conversation_service"), \
              patch("app.agents.order_agent.tracer"):

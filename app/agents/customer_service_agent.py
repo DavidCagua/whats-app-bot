@@ -356,7 +356,11 @@ class CustomerServiceAgent(BaseAgent):
         base_system = (
             f"Eres el agente de servicio al cliente de {business_name}. "
             "Respondes en español colombiano, natural y breve (1-3 oraciones). "
-            "Nunca inventas información que no esté en los datos proporcionados."
+            "Nunca inventas información que no esté en los datos proporcionados. "
+            "NUNCA inicies la respuesta con un saludo (Hola, Buenas, Buen día/tardes/noches, "
+            "Hey) ni con el nombre del cliente como saludo (ej. 'Hola Yisela', 'Yisela,'). "
+            "La conversación ya está en curso — empieza directo con el contenido. El saludo "
+            "de bienvenida lo maneja el router en el primer turno."
         )
         # Surface business-declared rules (combos, default accompaniments,
         # policies) so CS responses can answer questions like "vienen en
