@@ -7,6 +7,7 @@ export type CustomerRow = {
   phone: string | null
   address: string | null
   payment_method: string | null
+  notes: string | null
   source: string
   orders_count: number
   last_seen_at: string | null
@@ -58,6 +59,7 @@ export async function getCustomersForBusiness(
       phone: link.phone ?? c.phone,
       address: link.address ?? c.address,
       payment_method: link.payment_method ?? c.payment_method,
+      notes: link.notes,
       source: link.source,
       orders_count: c._count.orders,
       last_seen_at: lastOrder ? lastOrder.toISOString() : null,

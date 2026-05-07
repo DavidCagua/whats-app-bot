@@ -14,6 +14,16 @@ type CreateCustomerInput = {
   paymentMethod?: string | null
 }
 
+type UpdateCustomerInput = {
+  businessId: string
+  customerId: number
+  name: string
+  phone?: string | null
+  address?: string | null
+  paymentMethod?: string | null
+  notes?: string | null
+}
+
 type ActionResult =
   | { success: true; customerId: number }
   | { success: false; error: string }
@@ -97,4 +107,47 @@ export async function createCustomer(
 
   revalidatePath(`/businesses/${input.businessId}/customers`)
   return { success: true, customerId: customer.id }
+}
+
+export async function updateCustomer(
+  input: UpdateCustomerInput
+): Promise<ActionResult> {
+  const session = await auth()
+  if (!session?.user) return { success: false, error: "Unauthorized" }
+  if (!canEditBusiness(session, input.businessId)) {
+    return { success: false, error: "Forbidden" }
+  }
+
+  const name = input.name.trim()
+  if (!name) return { success: false, error: "Nombre requerido" }
+
+  const phone = input.phone?.trim() || null
+  const address = input.address?.trim() || null
+  const paymentMethod = input.paymentMethod?.trim() || null
+  const notes = input.notes?.trim() || null
+
+  // Update only the per-business join row. The global customers row
+  // (canonical identity by whatsapp_id) intentionally stays untouched —
+  // a name typo on this business shouldn't propagate to other tenants.
+  const link = await prisma.business_customers.update({
+    where: {
+      business_id_customer_id: {
+        business_id: input.businessId,
+        customer_id: input.customerId,
+      },
+    },
+    data: {
+      name,
+      phone,
+      address,
+      payment_method: paymentMethod,
+      notes,
+      updated_at: new Date(),
+    },
+  }).catch(() => null)
+
+  if (!link) return { success: false, error: "Cliente no encontrado" }
+
+  revalidatePath(`/businesses/${input.businessId}/customers`)
+  return { success: true, customerId: input.customerId }
 }

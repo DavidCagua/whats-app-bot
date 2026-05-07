@@ -10,8 +10,11 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
+import { Pencil } from "lucide-react"
 import { format } from "date-fns"
 import type { CustomerRow } from "@/lib/customers-queries"
+import { EditCustomerDialog } from "./edit-customer-dialog"
 
 const capitalize = (value: string | null | undefined): string => {
   if (!value) return "—"
@@ -24,11 +27,14 @@ const formatDate = (iso: string | null) =>
   iso ? format(new Date(iso), "MMM d, yyyy") : "—"
 
 export function CustomersTable({
+  businessId,
   initialCustomers,
 }: {
+  businessId: string
   initialCustomers: CustomerRow[]
 }) {
   const [query, setQuery] = useState("")
+  const [editing, setEditing] = useState<CustomerRow | null>(null)
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -69,13 +75,14 @@ export function CustomersTable({
               <TableHead className="text-right">Pedidos</TableHead>
               <TableHead>Última actividad</TableHead>
               <TableHead>Cliente desde</TableHead>
+              <TableHead className="w-10" aria-label="Acciones" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={7}
+                  colSpan={8}
                   className="text-center text-muted-foreground py-8"
                 >
                   {initialCustomers.length === 0
@@ -103,12 +110,32 @@ export function CustomersTable({
                   <TableCell className="text-muted-foreground">
                     {formatDate(c.created_at)}
                   </TableCell>
+                  <TableCell>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setEditing(c)}
+                      aria-label="Editar cliente"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
       </div>
+
+      <EditCustomerDialog
+        businessId={businessId}
+        customer={editing}
+        open={editing !== null}
+        onOpenChange={(next) => {
+          if (!next) setEditing(null)
+        }}
+      />
     </div>
   )
 }

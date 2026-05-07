@@ -37,7 +37,7 @@ export default async function CustomersPage({ params }: CustomersPageProps) {
         <CreateCustomerDialog businessId={id} />
       </div>
 
-      <CustomersTable initialCustomers={initialCustomers} />
+      <CustomersTable businessId={id} initialCustomers={initialCustomers} />
     </div>
   )
 }
