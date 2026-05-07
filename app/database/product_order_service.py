@@ -415,6 +415,13 @@ class ProductOrderService:
                 )
                 customer_id = new_cust.get("id") if new_cust else None
 
+            if customer_id is not None:
+                customer_service.link_customer_to_business(
+                    customer_id=customer_id,
+                    business_id=business_id,
+                    source="auto",
+                )
+
             grand_total = subtotal + float(delivery_fee)
 
             order = Order(

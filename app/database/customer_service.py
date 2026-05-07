@@ -10,7 +10,8 @@ import logging
 from typing import Optional, Dict, List
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from .models import Customer, get_db_session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from .models import BusinessCustomer, Customer, get_db_session
 
 class CustomerService:
     """Service for managing customer information in PostgreSQL."""
@@ -246,6 +247,49 @@ class CustomerService:
 
         except Exception as e:
             logging.error(f"Error deleting customer for {whatsapp_id}: {e}")
+            return False
+
+    def link_customer_to_business(
+        self,
+        customer_id: int,
+        business_id: str,
+        source: str = "auto",
+    ) -> bool:
+        """
+        Idempotently associate a customer with a business so they appear
+        in that business's customers list. Safe to call after every
+        customer create/update in agent flows — ``ON CONFLICT DO NOTHING``
+        keeps existing per-business profiles intact.
+
+        Args:
+            customer_id: customers.id (integer PK)
+            business_id: businesses.id (UUID as string)
+            source: 'auto' for agent-created, 'manual' for admin-console
+
+        Returns:
+            True on success, False on error.
+        """
+        try:
+            session: Session = get_db_session()
+            stmt = (
+                pg_insert(BusinessCustomer.__table__)
+                .values(
+                    business_id=business_id,
+                    customer_id=customer_id,
+                    source=source,
+                )
+                .on_conflict_do_nothing(
+                    constraint="uq_business_customers_pair"
+                )
+            )
+            session.execute(stmt)
+            session.commit()
+            session.close()
+            return True
+        except Exception as e:
+            logging.error(
+                f"Error linking customer {customer_id} to business {business_id}: {e}"
+            )
             return False
 
     def get_customer_count(self) -> int:

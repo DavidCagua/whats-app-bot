@@ -421,6 +421,12 @@ def schedule_appointment(
             customer = customer_service.get_customer_by_whatsapp_id(whatsapp_id)
 
         customer_id = customer["id"] if customer else None
+        if customer_id is not None:
+            customer_service.link_customer_to_business(
+                customer_id=customer_id,
+                business_id=business_id,
+                source="auto",
+            )
 
         staff_name = ""
         st = staff_service.get_staff_member(chosen_staff_id)
@@ -626,6 +632,12 @@ def prepare_booking(
             customer = customer_service.get_customer_by_whatsapp_id(whatsapp_id)
 
         customer_id = customer["id"] if customer else None
+        if customer_id is not None:
+            customer_service.link_customer_to_business(
+                customer_id=customer_id,
+                business_id=business_id,
+                source="auto",
+            )
 
         staff_name = ""
         st = staff_service.get_staff_member(chosen_staff_id)

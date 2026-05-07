@@ -18,6 +18,7 @@ export type ModuleKey =
   | "products"
   | "promotions"
   | "services"
+  | "customers"
   | "staff"
   | "team"
   | "settings"
@@ -82,6 +83,13 @@ export const MODULES: readonly Module[] = [
     hrefSegment: "/services",
     required: false,
     description: "Servicios ofrecidos (peluquería, spa, etc.).",
+  },
+  {
+    key: "customers",
+    label: "Clientes",
+    hrefSegment: "/customers",
+    required: false,
+    description: "Clientes que han pedido o reservado en el negocio.",
   },
   {
     key: "staff",

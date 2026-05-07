@@ -427,6 +427,34 @@ class Customer(Base):
         }
 
 
+class BusinessCustomer(Base):
+    """
+    Per-business profile for a (business, customer) pair. The global
+    ``customers`` row stays as canonical identity; this row carries
+    per-business overrides on name/phone/address/payment_method and
+    drives the admin-console customers list (one query, indexed).
+    """
+    __tablename__ = 'business_customers'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id', ondelete='CASCADE'), nullable=False)
+    name = Column(String(100), nullable=True)
+    phone = Column(String(50), nullable=True)
+    address = Column(Text, nullable=True)
+    payment_method = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    source = Column(String(20), nullable=False, default='auto', server_default='auto')
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('business_id', 'customer_id', name='uq_business_customers_pair'),
+        Index('idx_business_customers_business_id', 'business_id'),
+        Index('idx_business_customers_customer_id', 'customer_id'),
+    )
+
+
 # ============================================================================
 # PRODUCTS AND ORDERS (Migration 007/008)
 # ============================================================================

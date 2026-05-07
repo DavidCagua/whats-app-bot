@@ -74,7 +74,10 @@ else
 
   echo "🧭 Alembic baseline + upgrade head..."
   cd "$REPO_ROOT"
-  DATABASE_URL="$LOCAL_DB_URL" alembic stamp head -q 2>&1 || DATABASE_URL="$LOCAL_DB_URL" alembic stamp head
+  # Raw SQL files above bring the schema up to migration 023, which is the
+  # baseline revision 44a057c1f6eb. Stamp that explicitly (NOT head!) so
+  # the post-baseline revisions actually run on the next line.
+  DATABASE_URL="$LOCAL_DB_URL" alembic stamp 44a057c1f6eb
   DATABASE_URL="$LOCAL_DB_URL" alembic upgrade head
   echo "✅ Alembic at head."
   echo ""
