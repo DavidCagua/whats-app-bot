@@ -68,35 +68,8 @@ from ..orchestration.customer_service_flow import (
 )
 from ..database.conversation_service import conversation_service
 from ..services import business_info_service
+from ..services.cancel_keywords import has_explicit_cancel_keyword
 from ..services.tracing import tracer
-
-
-# Explicit Spanish cancellation tokens. CANCEL_ORDER is destructive —
-# we refuse it unless the user actually said one of these words. The
-# planner LLM has hallucinated cancel intent on bare "Si Gracias" turns
-# right after PLACE_ORDER (production 2026-05-04, Biela / 3108069647).
-_CANCEL_KEYWORDS = (
-    # cancelar (+ imperative + clitic forms)
-    "cancela", "cancelalo", "cancelala", "cancelalos", "cancelalas",
-    "cancelar", "cancelarlo", "cancelarla",
-    "cancelo", "cancele", "cancelen", "celenlo",
-    "cancelacion",
-    "cancelado", "cancelados", "cancelada",
-    # anular (+ imperative + clitic forms)
-    "anula", "anulalo", "anulala", "anulalos", "anulalas",
-    "anular", "anularlo", "anularla",
-    "anulo", "anulen",
-    "anulada", "anulado",
-    # English form sometimes used
-    "cancel",
-    # destructive verbs scoped to "el/la/mi pedido / orden"
-    "borra el pedido", "borrar el pedido", "borralo",
-    "elimina el pedido", "eliminar el pedido",
-    "descarta", "descartar",
-    "no quiero el pedido", "no quiero la orden", "no quiero mi pedido",
-    "ya no quiero el pedido", "ya no quiero la orden",
-    "deja el pedido", "dejalo asi mejor no", "olvidalo",
-)
 
 
 _POST_ORDER_CLOSE_LONE_TOKENS = (
@@ -178,39 +151,6 @@ def _is_post_order_close(message: Optional[str]) -> bool:
     return False
 
 
-def _has_explicit_cancel_keyword(message: Optional[str]) -> bool:
-    """
-    Return True iff the user message contains an explicit cancel verb
-    or phrase. Accent-insensitive, case-insensitive.
-
-    Used as a hard precondition for INTENT_CANCEL_ORDER so the LLM
-    cannot trigger an order cancellation on bare affirmations like
-    "Si Gracias" or "Listo".
-    """
-    if not message:
-        return False
-    nfkd = unicodedata.normalize("NFD", message.lower())
-    cleaned = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
-    # Collapse punctuation so "no quiero el pedido!" still matches
-    # "no quiero el pedido".
-    cleaned = re.sub(r"[^\w\s]", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if not cleaned:
-        return False
-    # Single-word keywords matched as whole tokens; multi-word
-    # keywords matched as a contiguous substring of the normalized
-    # message.
-    tokens = set(cleaned.split())
-    for kw in _CANCEL_KEYWORDS:
-        if " " in kw:
-            if kw in cleaned:
-                return True
-        else:
-            if kw in tokens:
-                return True
-    return False
-
-
 PLANNER_SYSTEM_TEMPLATE = """Eres el clasificador de intención para el agente de servicio al cliente de un restaurante. Manejas preguntas pre-venta (horarios, ubicación, domicilio, medios de pago, promos) Y post-venta (estado de pedido, historial, cancelación).
 
 Devuelves EXACTAMENTE una intención en JSON. Nunca markdown, nunca explicación.
@@ -235,9 +175,13 @@ Reglas:
                         de visualización/envío: "envíame la carta", "me mandas el menú",
                         "pásame el menú", "quiero ver la carta", "quiero conocer la carta",
                         "tienes carta", "me puedes enviar la carta", "compárteme el menú",
-                        "qué tienen para comer", "qué venden". Las frases listadas son
-                        ilustrativas, NO exhaustivas — cualquier solicitud del cliente
-                        para ver/recibir el menú o la carta cae aquí.
+                        "me regalas la carta", "me podrías regalar la carta",
+                        "regálame el menú", "regalame la carta",
+                        "qué tienen para comer", "qué venden". En Colombia "regalar"/"me regalas"
+                        es un verbo coloquial equivalente a "dar"/"compartir" — trátalo igual que
+                        "envíame", "pásame", "compárteme". Las frases listadas son ilustrativas,
+                        NO exhaustivas — cualquier solicitud del cliente para ver/recibir el
+                        menú o la carta cae aquí.
     "payment_methods" → MEDIOS DE PAGO que el negocio acepta — la LISTA de opciones
                         ("aceptan nequi?", "qué pagos reciben", "puedo pagar con tarjeta?",
                         "aceptan efectivo?"). Responde si tal o cual medio se acepta.
@@ -436,17 +380,17 @@ class CustomerServiceAgent(BaseAgent):
 
         if result_kind == RESULT_KIND_INFO_MISSING:
             field = exec_result.get("field") or "(no identificado)"
-            fields_available = exec_result.get("available_fields") or []
             system = (
                 base_system
                 + "\nSITUACIÓN: No tienes ese dato configurado. Discúlpate brevemente y sugiere "
                 "que puedes responder sobre otros temas (horarios, dirección, domicilio, pagos, "
-                "estado de pedidos). NO inventes el dato."
+                "estado de pedidos). NO inventes el dato. NUNCA inventes URLs, links, ni uses "
+                "placeholders entre paréntesis tipo `(menu_url)` o `<link>` — si no tienes la URL real, "
+                "no la menciones."
             )
             inp = (
                 f"Pregunta del cliente: {message_body}\n"
-                f"Campo no disponible: {field}\n"
-                f"Campos disponibles: {', '.join(fields_available)}"
+                f"Campo no disponible: {field}"
             )
             return system, inp
 
@@ -716,7 +660,6 @@ class CustomerServiceAgent(BaseAgent):
             return system, inp
 
         if result_kind == RESULT_KIND_CHAT_FALLBACK:
-            fields = exec_result.get("available_fields") or []
             system = (
                 base_system
                 + "\nSITUACIÓN: La pregunta del cliente no encajó en una intención específica. "
@@ -726,12 +669,10 @@ class CustomerServiceAgent(BaseAgent):
                 "responden la pregunta, contesta usando esa información (NO digas 'no entendí'). "
                 "Solo si las reglas no aplican Y no tienes datos para responder, dile brevemente "
                 "con qué puedes ayudar: menú/carta, horarios, dirección, domicilio, medios de pago, "
-                "estado de pedido, historial."
+                "estado de pedido, historial. NUNCA inventes URLs, links, ni uses placeholders entre "
+                "paréntesis tipo `(menu_url)` o `<link>` — si no tienes la URL real, no la menciones."
             )
-            inp = (
-                f"Pregunta del cliente: {message_body}\n"
-                f"Temas disponibles: {', '.join(fields)}"
-            )
+            inp = f"Pregunta del cliente: {message_body}"
             return system, inp
 
         if result_kind == RESULT_KIND_INTERNAL_ERROR:
@@ -774,8 +715,13 @@ class CustomerServiceAgent(BaseAgent):
         history_text = ""
         # Uniform 10-msg window across router / order planner / CS planner
         # so every layer sees the same stateful view of the conversation.
+        # Operator-typed messages get a distinct label ("operator (human)")
+        # so the planner doesn't treat them as the bot's prior turn.
         for msg in (conversation_history or [])[-10:]:
             role = msg.get("role", "")
+            agent_type = (msg.get("agent_type") or "").strip().lower()
+            if role == "assistant" and agent_type == "operator":
+                role = "operator (human)"
             content = (msg.get("content") or msg.get("message", ""))[:180]
             history_text += f"{role}: {content}\n"
 
@@ -866,7 +812,7 @@ class CustomerServiceAgent(BaseAgent):
         # / "anula" / etc. — the LLM hallucinated a cancellation question
         # that the bot had not asked. Without an explicit verb of
         # cancellation, we MUST not act on a destructive intent.
-        if intent == INTENT_CANCEL_ORDER and not _has_explicit_cancel_keyword(message_body):
+        if intent == INTENT_CANCEL_ORDER and not has_explicit_cancel_keyword(message_body):
             logging.warning(
                 "[CS_AGENT] CANCEL_ORDER refused: no explicit cancel keyword in "
                 "message=%r — downgrading to CHAT",

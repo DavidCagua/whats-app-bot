@@ -348,6 +348,7 @@ def admin_send_message():
             attachments=[{"type": "audio", "url": media_url}],
             business_id=business_id,
             whatsapp_number_id=business_context.get("whatsapp_number_id"),
+            agent_type="operator",
         )
         return jsonify({"ok": True}), 200
 
@@ -362,6 +363,7 @@ def admin_send_message():
         role="assistant",
         business_id=business_id,
         whatsapp_number_id=business_context.get("whatsapp_number_id"),
+        agent_type="operator",
     )
 
     return jsonify({"ok": True}), 200

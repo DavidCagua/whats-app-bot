@@ -149,11 +149,23 @@ def build_turn_context(
             msg = (entry.get("message") or "").strip()
             if not role or not msg:
                 continue
+            # Remap manually-typed operator messages so planners can see
+            # the seam. Persisted as role='assistant' + agent_type='operator'
+            # by the admin-send endpoint; here we expose them as
+            # role='operator' in the rolling history so render_for_prompt
+            # can label them distinctly. Bot-generated assistant turns keep
+            # role='assistant' (agent_type is None for those).
+            agent_type = (entry.get("agent_type") or "").strip().lower()
+            if role == "assistant" and agent_type == "operator":
+                role = "operator"
             if len(msg) > _HISTORY_MSG_MAX_CHARS:
                 msg = msg[:_HISTORY_MSG_MAX_CHARS].rstrip() + "…"
             recent_history.append((role, msg))
         # Backward-compat: keep last_assistant_message populated from
-        # the same history load so existing callers don't break.
+        # the same history load so existing callers don't break. Operator
+        # turns DON'T count — last_assistant_message is meant to be
+        # "what the bot last said" so the planner can react to its own
+        # prior question.
         for role, msg in reversed(recent_history):
             if role == "assistant":
                 last_assistant_message = msg
@@ -274,12 +286,19 @@ def render_for_prompt(ctx: TurnContext, include_last_assistant: bool = True) -> 
     if ctx.recent_history:
         # Render the rolling window so every layer sees the same
         # stateful view (router was previously starved of user-turn
-        # history; uniform 10-msg window closes that gap).
+        # history; uniform 10-msg window closes that gap). Operator
+        # turns get a distinct label so the planner doesn't treat
+        # human-typed messages as its own prior reasoning.
         lines.append("Historial reciente (más antiguo arriba):")
         for role, msg in ctx.recent_history:
-            label = "usuario" if role == "user" else (
-                "bot" if role == "assistant" else role
-            )
+            if role == "user":
+                label = "usuario"
+            elif role == "assistant":
+                label = "bot"
+            elif role == "operator":
+                label = "operador (humano)"
+            else:
+                label = role
             lines.append(f"  {label}: {msg}")
     elif include_last_assistant and ctx.last_assistant_message:
         snippet = ctx.last_assistant_message

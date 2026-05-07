@@ -65,7 +65,8 @@ class ConversationService:
 
     def store_conversation_message(self, wa_id: str, message: str, role: str,
                                    business_id: Optional[str] = None,
-                                   whatsapp_number_id: Optional[str] = None) -> bool:
+                                   whatsapp_number_id: Optional[str] = None,
+                                   agent_type: Optional[str] = None) -> bool:
         """
         Store a single conversation message.
 
@@ -75,6 +76,9 @@ class ConversationService:
             role: 'user' or 'assistant'
             business_id: Business UUID (optional, defaults to default business)
             whatsapp_number_id: WhatsApp number UUID (optional)
+            agent_type: Source tag. ``'operator'`` for admin-console manual
+                sends so planners can distinguish them from real bot turns.
+                Leave None for bot-generated assistant messages.
 
         Returns:
             True if stored successfully, False otherwise
@@ -92,7 +96,8 @@ class ConversationService:
                 whatsapp_number_id=uuid.UUID(whatsapp_number_id) if whatsapp_number_id else None,
                 whatsapp_id=wa_id,
                 message=message,
-                role=role
+                role=role,
+                agent_type=agent_type,
             )
 
             session.add(conversation)
@@ -114,6 +119,7 @@ class ConversationService:
         attachments: List[Dict],
         business_id: Optional[str] = None,
         whatsapp_number_id: Optional[str] = None,
+        agent_type: Optional[str] = None,
     ) -> Optional[int]:
         """
         Store one conversation message and N attachment rows (provider URLs only).
@@ -140,6 +146,7 @@ class ConversationService:
                 message=message_text or "",
                 message_type=message_type,
                 role=role,
+                agent_type=agent_type,
             )
             session.add(conv)
             session.flush()

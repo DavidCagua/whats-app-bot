@@ -20,6 +20,7 @@ from ..services.order_eta import NOMINAL_RANGE_TEXT
 from ..services import promotion_service
 from ..orchestration.order_flow import (
     execute_order_intent,
+    _clear_pending_disambiguation,
     INTENT_ADD_TO_CART,
     INTENT_CHAT,
     INTENT_CONFIRM,
@@ -1244,14 +1245,39 @@ class OrderAgent(BaseAgent):
                 latest_order_block=latest_block,
             )
 
+            # Operator-handoff reset: if the most recent assistant-side turn
+            # in history was an operator (human) message — i.e. someone toggled
+            # the bot off, typed a manual reply, then toggled it back on — any
+            # cached pending_disambiguation belongs to whatever the bot last
+            # said BEFORE the operator stepped in, not to the operator's
+            # message. Clear it so the planner doesn't try to resolve the
+            # current user reply against stale options. Both Biela incidents
+            # (2026-05-06 / 3137112249, 2026-05-04 / 3108069647) had operator
+            # toggling preceding the misclassification.
+            operator_handoff_recent = False
+            for prior in reversed(conversation_history or []):
+                if (prior.get("role") or "").strip().lower() != "assistant":
+                    continue
+                if (prior.get("agent_type") or "").strip().lower() == "operator":
+                    operator_handoff_recent = True
+                break  # first assistant-side entry is decisive
+            if operator_handoff_recent and order_context.get("pending_disambiguation"):
+                logging.warning(
+                    "[ORDER_AGENT] operator handoff detected — clearing pending_disambiguation"
+                )
+                _clear_pending_disambiguation(wa_id, str(business_id))
+                order_context = {**order_context, "pending_disambiguation": None}
+                session = {**session, "order_context": order_context}
+
             # Pending disambiguation: if last turn we offered the customer a set
             # of options, inject them so the planner can resolve replies like
             # "la normal", "la primera", "la Corona" to a specific product.
             pending = order_context.get("pending_disambiguation") or {}
             logging.warning(
-                "[ORDER_AGENT] pending_disambiguation loaded=%s options=%s",
+                "[ORDER_AGENT] pending_disambiguation loaded=%s options=%s operator_handoff=%s",
                 bool(pending and pending.get("options")),
                 [o.get("name") for o in (pending.get("options") or [])] if pending else [],
+                operator_handoff_recent,
             )
             planner_system += build_pending_disambiguation_prompt_block(pending)
 
@@ -1264,8 +1290,15 @@ class OrderAgent(BaseAgent):
             history_text = ""
             # Uniform 10-msg window across router / order planner / CS planner
             # so every layer sees the same stateful view of the conversation.
+            # Operator-typed messages get a distinct label ("operator (human)")
+            # so the planner doesn't treat them as the bot's prior turn —
+            # otherwise an operator's manual reply can poison the next intent
+            # classification (see incident 2026-05-06, Biela / 3137112249).
             for msg in conversation_history[-10:]:
                 role = msg.get("role", "")
+                agent_type = (msg.get("agent_type") or "").strip().lower()
+                if role == "assistant" and agent_type == "operator":
+                    role = "operator (human)"
                 content = (msg.get("content") or msg.get("message", ""))[:400]
                 history_text += f"{role}: {content}\n"
             if handoff_promo_id:
@@ -1367,6 +1400,7 @@ class OrderAgent(BaseAgent):
                 intent=intent,
                 params=params,
                 conversation_history=conversation_history,
+                message_body=message_body,
             )
             success = exec_result.get("success", False)
             cart_summary_after = exec_result.get("cart_summary") or cart_summary_str

@@ -31,6 +31,7 @@ from ..services import order_tools
 from ..services import catalog_cache
 from ..services import catalog_service
 from ..services import promotion_service
+from ..services.cancel_keywords import has_explicit_cancel_keyword
 from . import turn_cache
 
 
@@ -836,6 +837,7 @@ def execute_order_intent(
     intent: str,
     params: Optional[Dict] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    message_body: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute one order intent: validate state, run one tool (or compute state),
@@ -860,6 +862,22 @@ def execute_order_intent(
             current_state, resolved,
         )
         intent = resolved
+
+    # --- Hard guard for ABANDON_CART --------------------------------------
+    # ABANDON_CART wipes the in-progress cart and resets state to GREETING.
+    # The planner has hallucinated this intent on bare clarifying nouns
+    # mid-checkout (production 2026-05-06, Biela / 3137112249: customer
+    # said "Hamburguesa" in COLLECTING_DELIVERY → ABANDON_CART → cart wiped,
+    # sale lost). Mirrors the CANCEL_ORDER guard in customer_service_agent;
+    # without an explicit cancel verb, downgrade to CHAT so the response
+    # generator just re-prompts the customer instead of acting destructively.
+    if intent == INTENT_ABANDON_CART and not has_explicit_cancel_keyword(message_body):
+        logger.warning(
+            "[ORDER_FLOW] ABANDON_CART refused: no explicit cancel keyword in "
+            "message=%r (state=%s) — downgrading to CHAT",
+            (message_body or "")[:120], current_state,
+        )
+        intent = INTENT_CHAT
 
     # --- Safety coercion --------------------------------------------------
     # If the planner still emits PROCEED_TO_CHECKOUT while in READY_TO_PLACE
