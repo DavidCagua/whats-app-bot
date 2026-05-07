@@ -592,7 +592,10 @@ def _match_cta_button(message_body: Optional[str]) -> Optional[Dict[str, Any]]:
     return _CTA_BUTTON_INTENTS.get(normalized)
 
 
-def _sort_intents_canonical(intents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _sort_intents_canonical(
+    intents: List[Dict[str, Any]],
+    current_state: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     Sort intents by canonical execution order. Stable on ties so the
     planner's emit order is the secondary key — useful when the planner
@@ -629,27 +632,36 @@ def _sort_intents_canonical(intents: List[Dict[str, Any]]) -> List[Dict[str, Any
         intents = [i for i in intents if i.get("intent") != "PLACE_ORDER"]
 
     # Suppress CONFIRM when paired with any state-mutating action — data
-    # submission OR cart change. The mutation result is what the customer
-    # should see next (recap card, cart change, etc.); CONFIRM piggybacked
-    # on the same turn would resolve through the just-advanced state and
-    # skip the recap. This is structural — we don't inspect user text;
-    # we just observe that the planner emitted "do X AND close" and the
-    # close should always come from a fresh, explicit turn.
+    # submission OR cart change — UNLESS we're already in READY_TO_PLACE.
+    # Two cases, opposite resolutions:
     #
-    # Production incidents that motivated this:
-    #   - 2026-05-07 (David / 3177000722): "transferencia" →
-    #     [SUBMIT_DELIVERY_INFO, CONFIRM] — order placed without the
-    #     "Confirmar pedido" button card ever appearing.
-    #   - 2026-05-07 (David / 3177000722): "dos barracudas" →
-    #     [ADD_TO_CART, CONFIRM] — CTA fired before the customer saw the
-    #     cart recap to add a drink.
-    #   - 2026-05-07 (David / 3177000722): "mejor una no más" →
-    #     [UPDATE_CART_ITEM, CONFIRM] — same shape, customer's correction
-    #     bypassed the recap.
+    #   Case A (state ≠ READY_TO_PLACE): customer is mid-flow, providing
+    #   data or mutating the cart. The mutation result is what they
+    #   should see next (cart recap, "missing payment" prompt, etc.);
+    #   CONFIRM piggybacked on the same turn would resolve through the
+    #   just-advanced state and skip the recap. Drop CONFIRM.
+    #     • "transferencia" in COLLECTING_DELIVERY →
+    #       [SUBMIT, CONFIRM] → SUBMIT only → CTA card fires.
+    #     • "dos barracudas" in GREETING →
+    #       [ADD_TO_CART, CONFIRM] → ADD only → cart recap.
+    #     • "mejor una no más" in ORDERING →
+    #       [UPDATE_CART_ITEM, CONFIRM] → UPDATE only → cart recap.
     #
-    # The customer's explicit confirmation comes from tapping the CTA
-    # button or sending an affirmation token in the next turn — single
-    # CONFIRM intents are unaffected by this dedup.
+    #   Case B (state == READY_TO_PLACE): data is already complete and
+    #   the CTA card was already sent on a prior turn. The planner
+    #   often re-emits SUBMIT_DELIVERY_INFO with the values it sees in
+    #   the recap card — that's a redundant echo, NOT a real data
+    #   change. Meanwhile CONFIRM ("Sí" / "Confirmo") is the customer's
+    #   genuine signal to place the order. Drop SUBMIT, keep CONFIRM.
+    #   Production 2026-05-07 (Luis / 3159280840): customer typed "Si"
+    #   after the CTA, planner emitted [SUBMIT(echo), CONFIRM], the
+    #   case-A dedup dropped CONFIRM, SUBMIT was a no-op, and the CTA
+    #   card looped.
+    #
+    # This is structural (operates on the intent set + state, not user
+    # text). Singleton CONFIRM (single intent in the list) is unaffected
+    # in either branch — the CTA-button fast-path and explicit-affirmation
+    # paths route through that.
     _MUTATING_INTENTS = (
         "SUBMIT_DELIVERY_INFO",
         "ADD_TO_CART",
@@ -657,11 +669,16 @@ def _sort_intents_canonical(intents: List[Dict[str, Any]]) -> List[Dict[str, Any
         "UPDATE_CART_ITEM",
         "REMOVE_FROM_CART",
     )
-    if (
-        "CONFIRM" in intent_names
-        and any(name in intent_names for name in _MUTATING_INTENTS)
-    ):
-        intents = [i for i in intents if i.get("intent") != "CONFIRM"]
+    if "CONFIRM" in intent_names:
+        if (
+            current_state == "READY_TO_PLACE"
+            and "SUBMIT_DELIVERY_INFO" in intent_names
+        ):
+            # Case B — data is already captured, SUBMIT is the echo.
+            intents = [i for i in intents if i.get("intent") != "SUBMIT_DELIVERY_INFO"]
+        elif any(name in intent_names for name in _MUTATING_INTENTS):
+            # Case A — mid-flow, the mutation should drive the response.
+            intents = [i for i in intents if i.get("intent") != "CONFIRM"]
 
     return sorted(
         intents,
@@ -1658,7 +1675,7 @@ class OrderAgent(BaseAgent):
             # a multi-intent list.
             for entry in raw_intents:
                 apply_disamb_reply_flavor_fallback(entry, message_body, pending)
-            sorted_intents = _sort_intents_canonical(raw_intents)
+            sorted_intents = _sort_intents_canonical(raw_intents, current_state=order_state)
             primary_intent = sorted_intents[0]["intent"] if sorted_intents else INTENT_CHAT
             logging.warning(
                 "[ORDER_AGENT] Planner emitted %d intent(s): %s",

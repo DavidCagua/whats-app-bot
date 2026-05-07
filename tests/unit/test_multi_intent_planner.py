@@ -239,6 +239,64 @@ class TestSortIntentsCanonical:
         ])
         assert [i["intent"] for i in out] == ["VIEW_CART", "CONFIRM"]
 
+    def test_ready_to_place_drops_submit_keeps_confirm(self):
+        """
+        Production regression (Luis / 3159280840, 2026-05-07): in
+        READY_TO_PLACE state, customer typed "Si" / "Confirmo" after the
+        CTA card. Planner re-emitted [SUBMIT_DELIVERY_INFO(echo of recap),
+        CONFIRM]. The mid-flow dedup dropped CONFIRM; SUBMIT was a no-op
+        (data already complete); the CTA card looped instead of placing
+        the order.
+
+        Fix: when state == READY_TO_PLACE, the SUBMIT in this combo is
+        the redundant echo and CONFIRM is the genuine signal. Drop
+        SUBMIT, keep CONFIRM so the order places.
+        """
+        out = _sort_intents_canonical(
+            [
+                {"intent": "SUBMIT_DELIVERY_INFO", "params": {"name": "Luis"}},
+                {"intent": "CONFIRM", "params": {}},
+            ],
+            current_state="READY_TO_PLACE",
+        )
+        assert [i["intent"] for i in out] == ["CONFIRM"]
+
+    def test_mid_flow_drops_confirm_keeps_submit(self):
+        """In COLLECTING_DELIVERY (data still being captured) the dedup
+        keeps SUBMIT and drops CONFIRM — the customer needs to see the
+        recap card before placing."""
+        out = _sort_intents_canonical(
+            [
+                {"intent": "SUBMIT_DELIVERY_INFO", "params": {"payment_method": "transferencia"}},
+                {"intent": "CONFIRM", "params": {}},
+            ],
+            current_state="COLLECTING_DELIVERY",
+        )
+        assert [i["intent"] for i in out] == ["SUBMIT_DELIVERY_INFO"]
+
+    def test_ready_to_place_with_cart_mutation_still_drops_confirm(self):
+        """Edge: customer adds another item while in READY_TO_PLACE.
+        ADD_TO_CART mutates the cart; CONFIRM should still be dropped
+        so the customer sees the new cart state. Only SUBMIT (the
+        redundant echo) gets the special READY_TO_PLACE treatment."""
+        out = _sort_intents_canonical(
+            [
+                {"intent": "ADD_TO_CART", "params": {"product_name": "BARRACUDA"}},
+                {"intent": "CONFIRM", "params": {}},
+            ],
+            current_state="READY_TO_PLACE",
+        )
+        assert [i["intent"] for i in out] == ["ADD_TO_CART"]
+
+    def test_no_state_falls_back_to_existing_behavior(self):
+        """When current_state isn't passed (legacy callers, tests), the
+        function defaults to the case-A behavior — drop CONFIRM."""
+        out = _sort_intents_canonical([
+            {"intent": "SUBMIT_DELIVERY_INFO", "params": {}},
+            {"intent": "CONFIRM", "params": {}},
+        ])
+        assert [i["intent"] for i in out] == ["SUBMIT_DELIVERY_INFO"]
+
     def test_submit_delivery_dedupes_confirm_to_keep_recap_step(self):
         """
         Production regression (David / 3177000722, 2026-05-07): customer
