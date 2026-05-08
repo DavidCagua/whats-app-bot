@@ -44,30 +44,16 @@ from __future__ import annotations
 from typing import Optional
 
 
-def _format_money(amount) -> str:
-    """Colombian peso formatting: ``$28000`` → ``$28.000``."""
-    try:
-        return f"${int(amount):,}".replace(",", ".")
-    except (TypeError, ValueError):
-        return ""
-
-
 def _summary_block(delivery_status: dict) -> str:
-    """
-    One-shot recap rendered into the template's ``{{1}}`` variable.
-
-    Includes: name, address, phone, payment method, total. Each on its
-    own line with bold labels (WhatsApp markdown). Missing fields are
-    omitted rather than printed as "(no registrado)" — the caller only
-    triggers the CTA when ``all_present`` is True so this is mostly a
-    belt-and-suspenders.
-    """
+    # Twilio Content API rejects "\n" inside a variable value (error
+    # 21656), so we join fields with " | " and let the template body
+    # provide its own line breaks around {{1}}. Total is omitted on
+    # purpose — the cart total already appeared in the previous turn.
     parts: list[str] = []
     name = (delivery_status.get("name") or "").strip()
     address = (delivery_status.get("address") or "").strip()
     phone = (delivery_status.get("phone") or "").strip()
     payment = (delivery_status.get("payment_method") or "").strip()
-    total = delivery_status.get("total")
     if name:
         parts.append(f"*Nombre:* {name}")
     if address:
@@ -76,9 +62,7 @@ def _summary_block(delivery_status: dict) -> str:
         parts.append(f"*Teléfono:* {phone}")
     if payment:
         parts.append(f"*Pago:* {payment}")
-    if total:
-        parts.append(f"*Total:* {_format_money(total)}")
-    return "\n".join(parts)
+    return " | ".join(parts)
 
 
 def cta_confirm_order_payload(
