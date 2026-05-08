@@ -164,3 +164,183 @@ class TestEmptyCartStatusHandoff:
             )
         assert output.get("handoff") is None
         assert "barracuda" in output["message"].lower()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Order-availability gate
+# ──────────────────────────────────────────────────────────────────
+
+class TestOrderClosedGate:
+    """
+    Order agent's order-availability gate. When the business is closed
+    (per business_availability rows), mutating intents (ADD_TO_CART,
+    SUBMIT_DELIVERY_INFO, etc.) are blocked and the turn is handed off
+    to customer_service. Browse intents pass through unchanged.
+    """
+
+    _CLOSED_GATE = {
+        "can_take_orders": False,
+        "reason": "closed",
+        "opens_at": None,
+        "next_open_dow": 1,
+        "next_open_time": None,
+        "now_local": None,
+    }
+
+    _OPEN_GATE = {
+        "can_take_orders": True,
+        "reason": "open",
+        "opens_at": None,
+        "next_open_dow": None,
+        "next_open_time": None,
+        "now_local": None,
+    }
+
+    def test_closed_blocks_add_to_cart(self):
+        """ADD_TO_CART while closed → handoff to customer_service with
+        reason=order_closed and the message body intact."""
+        agent = OrderAgent()
+        llm = MagicMock()
+        # Planner emits singleton ADD_TO_CART.
+        llm.invoke.return_value = _llm_response(
+            '{"intents":[{"intent":"ADD_TO_CART","params":{"product_name":"BARRACUDA","quantity":1}}]}'
+        )
+        with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
+             patch(
+                 "app.services.business_info_service.is_taking_orders_now",
+                 return_value=self._CLOSED_GATE,
+             ), \
+             patch("app.agents.order_agent.execute_order_intent") as exec_mock, \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"):
+            output = agent.execute(
+                message_body="una barracuda",
+                wa_id="+573001234567", name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                session={"order_context": {"items": []}},
+            )
+
+        # Executor must NOT have run for the blocked mutating intent.
+        exec_mock.assert_not_called()
+        # Handoff to customer_service with order_closed reason.
+        hand = output.get("handoff") or {}
+        assert hand.get("to") == "customer_service"
+        assert hand.get("segment") == "una barracuda"
+        ctx = hand.get("context") or {}
+        assert ctx.get("reason") == "order_closed"
+        assert ctx.get("has_active_cart") is False
+        assert "ADD_TO_CART" in (ctx.get("blocked_intents") or [])
+
+    def test_closed_lets_browse_intent_through(self):
+        """GET_PRODUCT (browse) while closed → executor runs normally,
+        no handoff. Customers can read the menu while the shop is closed."""
+        agent = OrderAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intents":[{"intent":"GET_PRODUCT","params":{"product_name":"BARRACUDA"}}]}'),
+            _llm_response("La BARRACUDA cuesta $28.000."),
+        ]
+        product_details_result = {
+            "result_kind": "product_details",
+            "success": True,
+            "product_details": {"name": "BARRACUDA", "price": 28000},
+            "state_after": "GREETING",
+            "cart_summary": "Pedido vacío.",
+        }
+        with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
+             patch(
+                 "app.services.business_info_service.is_taking_orders_now",
+                 return_value=self._CLOSED_GATE,
+             ), \
+             patch("app.agents.order_agent.execute_order_intent", return_value=product_details_result), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"):
+            output = agent.execute(
+                message_body="qué trae la barracuda",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                session={"order_context": {"items": []}},
+            )
+
+        assert output.get("handoff") is None
+        assert "28.000" in output["message"]
+
+    def test_open_is_no_op(self):
+        """Open business → gate is a no-op. ADD_TO_CART runs normally,
+        no handoff."""
+        agent = OrderAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intents":[{"intent":"ADD_TO_CART","params":{"product_name":"BARRACUDA","quantity":1}}]}'),
+            _llm_response("Se agregó la BARRACUDA."),
+        ]
+        cart_change_result = {
+            "result_kind": "cart_change",
+            "success": True,
+            "cart_change": {"action": "added", "items": [{"name": "BARRACUDA"}]},
+            "state_after": "ORDERING",
+            "cart_summary": "1x BARRACUDA",
+        }
+        with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
+             patch(
+                 "app.services.business_info_service.is_taking_orders_now",
+                 return_value=self._OPEN_GATE,
+             ), \
+             patch("app.agents.order_agent.execute_order_intent", return_value=cart_change_result), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"):
+            output = agent.execute(
+                message_body="una barracuda",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                session={"order_context": {"items": []}},
+            )
+
+        assert output.get("handoff") is None
+        assert "agregó" in output["message"].lower() or "agrego" in output["message"].lower()
+
+    def test_settings_opt_out_disables_gate(self):
+        """business.settings.order_gate_enabled=False bypasses the gate
+        even when the helper would say closed."""
+        agent = OrderAgent()
+        llm = MagicMock()
+        llm.invoke.side_effect = [
+            _llm_response('{"intents":[{"intent":"ADD_TO_CART","params":{"product_name":"BARRACUDA","quantity":1}}]}'),
+            _llm_response("Se agregó la BARRACUDA."),
+        ]
+        cart_change_result = {
+            "result_kind": "cart_change",
+            "success": True,
+            "cart_change": {"action": "added", "items": [{"name": "BARRACUDA"}]},
+            "state_after": "ORDERING",
+            "cart_summary": "1x BARRACUDA",
+        }
+        ctx_opt_out = {
+            "business_id": "biela",
+            "business": {"name": "Biela", "settings": {"order_gate_enabled": False}},
+        }
+        with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
+             patch(
+                 "app.services.business_info_service.is_taking_orders_now",
+             ) as gate_mock, \
+             patch("app.agents.order_agent.execute_order_intent", return_value=cart_change_result), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"):
+            output = agent.execute(
+                message_body="una barracuda",
+                wa_id="x", name="X",
+                business_context=ctx_opt_out,
+                conversation_history=[],
+                session={"order_context": {"items": []}},
+            )
+
+        # The gate helper must NOT have been called when opted-out.
+        gate_mock.assert_not_called()
+        assert output.get("handoff") is None

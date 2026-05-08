@@ -25,6 +25,7 @@ from ..orchestration.order_flow import (
     INTENT_CHAT,
     INTENT_CONFIRM,
     INTENT_VIEW_CART,
+    ORDER_MUTATING_INTENTS,
     RESULT_KIND_CHAT,
     RESULT_KIND_MENU_CATEGORIES,
     RESULT_KIND_PRODUCTS_LIST,
@@ -34,6 +35,7 @@ from ..orchestration.order_flow import (
     RESULT_KIND_CART_ABANDONED,
     RESULT_KIND_DELIVERY_STATUS,
     RESULT_KIND_ORDER_PLACED,
+    RESULT_KIND_ORDER_CLOSED,
     RESULT_KIND_NEEDS_CLARIFICATION,
     RESULT_KIND_USER_ERROR,
     RESULT_KIND_INTERNAL_ERROR,
@@ -1683,6 +1685,61 @@ class OrderAgent(BaseAgent):
                 [(e["intent"], e.get("params") or {}) for e in sorted_intents],
             )
 
+            # Order-availability gate: compute once per turn. When the
+            # business is closed (per business_availability rows), block
+            # mutating intents (ADD_TO_CART, SUBMIT_DELIVERY_INFO, etc.)
+            # and hand the turn off to customer_service so the customer
+            # gets a "estamos cerrados" reply. Browse intents
+            # (GET_MENU_CATEGORIES, LIST_PRODUCTS, GET_PRODUCT,
+            # SEARCH_PRODUCTS, VIEW_CART, CHAT) pass through unchanged —
+            # the menu is browsable while closed.
+            #
+            # Opt-out: business.settings.order_gate_enabled = False
+            # disables the gate even when availability rows exist.
+            # When the business has no availability rows configured,
+            # is_taking_orders_now returns can_take_orders=True, so the
+            # gate is effectively no-op for unconfigured businesses.
+            order_gate: Optional[Dict[str, Any]] = None
+            try:
+                _settings = ((business_context or {}).get("business") or {}).get("settings") or {}
+                _gate_opt_in = _settings.get("order_gate_enabled", True) is not False
+                if not _gate_opt_in:
+                    logging.warning(
+                        "[ORDER_GATE] business=%s wa_id=%s opt-out via "
+                        "business.settings.order_gate_enabled=False — gate skipped",
+                        business_id, wa_id,
+                    )
+                else:
+                    from ..services import business_info_service as _bi_svc
+                    order_gate = _bi_svc.is_taking_orders_now(str(business_id))
+                    # Format the structured fields so a single grep on
+                    # [ORDER_GATE] reconstructs every decision: what the
+                    # bot thought "now" was, what reason it landed on,
+                    # and (when closed) when it thinks orders resume.
+                    _now_local = order_gate.get("now_local")
+                    _opens_at = order_gate.get("opens_at")
+                    _next_dow = order_gate.get("next_open_dow")
+                    _next_time = order_gate.get("next_open_time")
+                    logging.warning(
+                        "[ORDER_GATE] business=%s wa_id=%s state_in=%s "
+                        "can_take_orders=%s reason=%s "
+                        "now_local=%s opens_at=%s next_open_dow=%s next_open_time=%s",
+                        business_id, wa_id, order_state,
+                        order_gate.get("can_take_orders"),
+                        order_gate.get("reason"),
+                        _now_local.isoformat() if _now_local else "",
+                        _opens_at.isoformat() if _opens_at else "",
+                        _next_dow if _next_dow is not None else "",
+                        _next_time.isoformat() if _next_time else "",
+                    )
+            except Exception as exc:
+                logging.warning(
+                    "[ORDER_GATE] business=%s wa_id=%s compute failed "
+                    "(defaulting to open): %s",
+                    business_id, wa_id, exc,
+                )
+                order_gate = None
+
             # Defensive promo-discovery handoff: when the router misclassifies
             # a "qué promos hay" question as `order` and our planner picks
             # CHAT (because there's no add-to-cart intent expressed), bounce
@@ -1764,6 +1821,59 @@ class OrderAgent(BaseAgent):
             for entry in sorted_intents:
                 step_intent = entry["intent"]
                 step_params = entry.get("params") or {}
+
+                # Order-availability gate (per-intent). Only fires when the
+                # gate computed at top-of-turn says the business is closed
+                # AND this step is a mutating intent. Browse intents are
+                # allowed through even while closed. On a hit, halt the
+                # loop and hand off to customer_service — the CS branch
+                # for handoff_context.reason="order_closed" composes the
+                # "estamos cerrados, abrimos a las X" reply. The cart
+                # stays in session untouched, so when the shop reopens
+                # the customer's items are still there.
+                if order_gate is not None and not order_gate.get("can_take_orders"):
+                    if step_intent in ORDER_MUTATING_INTENTS:
+                        blocked = [
+                            e["intent"] for e in sorted_intents
+                            if e["intent"] in ORDER_MUTATING_INTENTS
+                        ]
+                        logging.warning(
+                            "[ORDER_GATE] business=%s wa_id=%s BLOCKED "
+                            "intent=%s blocked_intents=%s has_active_cart=%s "
+                            "→ handoff customer_service reason=order_closed",
+                            business_id, wa_id, step_intent,
+                            blocked, bool(items),
+                        )
+                        tracer.end_run(
+                            run_id, success=True,
+                            latency_ms=(time.time() - start_time) * 1000,
+                        )
+                        return {
+                            "agent_type": self.agent_type,
+                            "message": "",
+                            # Keep the cart in session so a returning customer
+                            # picks up where they left off.
+                            "state_update": {"active_agents": ["order"]},
+                            "handoff": {
+                                "to": "customer_service",
+                                "segment": message_body,
+                                "context": {
+                                    "reason": "order_closed",
+                                    "has_active_cart": bool(items),
+                                    "blocked_intents": blocked,
+                                },
+                            },
+                        }
+                    else:
+                        # Browse / read-only intent slipping through a
+                        # closed shop. Useful trace for verifying the
+                        # "menu reading while closed" UX is firing.
+                        logging.warning(
+                            "[ORDER_GATE] business=%s wa_id=%s ALLOW "
+                            "intent=%s (browse) reason=closed",
+                            business_id, wa_id, step_intent,
+                        )
+
                 try:
                     step_result = execute_order_intent(
                         wa_id=wa_id,

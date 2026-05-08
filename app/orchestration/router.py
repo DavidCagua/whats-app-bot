@@ -110,10 +110,17 @@ def _greeting_fast_path(
     message_body: str,
     business_context: Optional[dict],
     customer_name: Optional[str],
+    gate: Optional[dict] = None,
 ) -> Optional[str]:
-    """Return the greeting template if message is a pure greeting, else None."""
+    """Return the greeting template if message is a pure greeting, else None.
+
+    ``gate`` is the order-availability decision from
+    ``business_info_service.is_taking_orders_now`` — when present and
+    closed, ``get_greeting`` appends the closed-status sentence so the
+    customer is told upfront the shop is closed.
+    """
     if business_greeting.is_pure_greeting(message_body):
-        return business_greeting.get_greeting(business_context, customer_name)
+        return business_greeting.get_greeting(business_context, customer_name, gate=gate)
     return None
 
 
@@ -626,6 +633,7 @@ def route(
     ctx: Optional[TurnContext] = None,
     wa_id: Optional[str] = None,
     turn_id: Optional[str] = None,
+    gate: Optional[dict] = None,
 ) -> RouterResult:
     """
     Classify the message and decide how to respond.
@@ -638,9 +646,14 @@ def route(
     `ctx` is the per-turn snapshot (order state, cart, last assistant
     message, recent cancellable order). When omitted, the classifier
     runs without context — used by tests and the legacy callers.
+
+    ``gate`` is the order-availability decision (``can_take_orders``
+    + reason + next-open fields). Threaded into ``get_greeting`` so a
+    pure greeting on a closed shop announces the closed state inline
+    instead of waiting for the customer to send a product first.
     """
     # 1. Greeting fast-path
-    greeting = _greeting_fast_path(message_body, business_context, customer_name)
+    greeting = _greeting_fast_path(message_body, business_context, customer_name, gate=gate)
     if greeting is not None:
         logger.info("[ROUTER] greeting fast-path hit")
         return RouterResult(direct_reply=greeting)
@@ -726,7 +739,7 @@ def route(
     if len(segments) == 1 and segments[0][0] == DOMAIN_GREETING:
         logger.info("[ROUTER] LLM classified as greeting → direct reply")
         return RouterResult(
-            direct_reply=business_greeting.get_greeting(business_context, customer_name),
+            direct_reply=business_greeting.get_greeting(business_context, customer_name, gate=gate),
         )
     if any(d == DOMAIN_GREETING for d, _ in segments):
         segments = [(d, t) for d, t in segments if d != DOMAIN_GREETING]

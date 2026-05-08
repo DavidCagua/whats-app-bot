@@ -161,3 +161,119 @@ class TestCtaWelcomePayload:
         # Body still says "Hola" — never echoes the placeholder.
         assert out["rendered_body"].startswith("Hola 👋 Bienvenido a Biela")
         assert "Cliente" not in out["rendered_body"]
+
+
+# ──────────────────────────────────────────────────────────────────
+# Closed-greeting (order-availability gate) tests
+# ──────────────────────────────────────────────────────────────────
+
+class TestClosedGreeting:
+    """
+    When ``business_info_service.is_taking_orders_now`` says the shop
+    is closed, the greeting should announce it inline. Two paths:
+
+    - get_greeting (plain text): always appends the closed sentence.
+    - cta_welcome_payload: uses ``welcome_closed_content_sid`` if set,
+      else returns None to force plain-text fallback.
+    """
+
+    _CLOSED_GATE_TODAY = {
+        "can_take_orders": False,
+        "reason": "closed",
+        "opens_at": None,
+        "next_open_dow": 5,           # Friday
+        "next_open_time": __import__("datetime").time(9, 0),
+        "now_local": __import__("datetime").datetime(2026, 5, 7, 18, 0),
+    }
+    _OPEN_GATE = {
+        "can_take_orders": True,
+        "reason": "open",
+        "opens_at": None,
+        "next_open_dow": None,
+        "next_open_time": None,
+        "now_local": None,
+    }
+
+    BIELA_OPEN_ONLY_CTX = {
+        "provider": "twilio",
+        "business": {
+            "name": "Biela",
+            "settings": {"welcome_content_sid": "HXopen123"},
+        },
+    }
+    BIELA_BOTH_SIDS_CTX = {
+        "provider": "twilio",
+        "business": {
+            "name": "Biela",
+            "settings": {
+                "welcome_content_sid": "HXopen123",
+                "welcome_closed_content_sid": "HXclosed456",
+            },
+        },
+    }
+
+    # ── get_greeting (plain text) ────────────────────────────────
+
+    def test_get_greeting_open_unchanged(self):
+        out = business_greeting.get_greeting(
+            self.BIELA_OPEN_ONLY_CTX, "Yisela", gate=self._OPEN_GATE,
+        )
+        assert "cerrados" not in out.lower()
+        assert "antoja hoy" in out  # original open-state copy
+
+    def test_get_greeting_closed_appends_sentence(self):
+        out = business_greeting.get_greeting(
+            self.BIELA_OPEN_ONLY_CTX, "Yisela", gate=self._CLOSED_GATE_TODAY,
+        )
+        assert "cerrados" in out.lower()
+        assert "Hola Yisela" in out
+        # Tail invites browsing while closed — not "antoja hoy" pressure.
+        assert "menú" in out.lower() or "duda" in out.lower()
+        assert "antoja hoy" not in out
+
+    def test_get_greeting_no_gate_defaults_to_open(self):
+        """Legacy callers passing no gate get the existing open behavior."""
+        out = business_greeting.get_greeting(self.BIELA_OPEN_ONLY_CTX, "Yisela")
+        assert "cerrados" not in out.lower()
+
+    # ── cta_welcome_payload ──────────────────────────────────────
+
+    def test_cta_open_uses_open_sid(self):
+        out = business_greeting.cta_welcome_payload(
+            self.BIELA_OPEN_ONLY_CTX, "Yisela", gate=self._OPEN_GATE,
+        )
+        assert out is not None
+        assert out["content_sid"] == "HXopen123"
+        assert out["kind"] == "open_cta"
+        assert "cerrados" not in out["rendered_body"].lower()
+
+    def test_cta_closed_with_closed_sid_uses_closed_template(self):
+        out = business_greeting.cta_welcome_payload(
+            self.BIELA_BOTH_SIDS_CTX, "Yisela", gate=self._CLOSED_GATE_TODAY,
+        )
+        assert out is not None
+        assert out["content_sid"] == "HXclosed456"
+        assert out["kind"] == "closed_cta"
+        # Variables include {{3}} for the closed sentence.
+        assert "3" in out["variables"]
+        assert "cerrados" in out["variables"]["3"].lower()
+        # Rendered body matches the body we'll persist for the inbox UI.
+        assert "Hola Yisela" in out["rendered_body"]
+        assert "cerrados" in out["rendered_body"].lower()
+
+    def test_cta_closed_without_closed_sid_returns_none(self):
+        """When no closed-state SID is configured, return None so the
+        caller falls back to the plain-text greeting (which appends the
+        closed sentence inline via get_greeting)."""
+        out = business_greeting.cta_welcome_payload(
+            self.BIELA_OPEN_ONLY_CTX, "Yisela", gate=self._CLOSED_GATE_TODAY,
+        )
+        assert out is None
+
+    def test_cta_no_gate_defaults_to_open(self):
+        out = business_greeting.cta_welcome_payload(
+            self.BIELA_OPEN_ONLY_CTX, "Yisela",
+        )
+        assert out is not None
+        assert out["content_sid"] == "HXopen123"
+        assert out["kind"] == "open_cta"

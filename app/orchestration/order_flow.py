@@ -76,6 +76,26 @@ INTENT_CONFIRM = "CONFIRM"
 # agent — see customer_service_flow.INTENT_CANCEL_ORDER.
 INTENT_ABANDON_CART = "ABANDON_CART"
 
+# Intents that mutate cart / customer profile / order state. Used by the
+# order-availability gate: when the business is closed (no availability
+# row covers the current Bogotá time), these intents are blocked and the
+# turn is handed off to customer_service. Browse / read-only intents
+# (GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT,
+# VIEW_CART, GET_CUSTOMER_INFO, CHAT) are intentionally NOT in this set
+# — customers can still read the menu while the shop is closed.
+ORDER_MUTATING_INTENTS = (
+    INTENT_ADD_TO_CART,
+    INTENT_ADD_PROMO_TO_CART,
+    INTENT_UPDATE_CART_ITEM,
+    INTENT_REMOVE_FROM_CART,
+    INTENT_PROCEED_TO_CHECKOUT,
+    INTENT_SUBMIT_DELIVERY_INFO,
+    INTENT_PLACE_ORDER,
+    # CONFIRM resolves to PROCEED_TO_CHECKOUT or PLACE_ORDER depending
+    # on state — both are mutating, so block CONFIRM too.
+    INTENT_CONFIRM,
+)
+
 # Result kinds — routing signal for the response generator.
 # Every execute_order_intent return carries exactly one of these so the
 # response generator can pick the right branch without string-sniffing tool output.
@@ -91,6 +111,11 @@ RESULT_KIND_NEEDS_CLARIFICATION = "needs_clarification"
 RESULT_KIND_USER_ERROR = "user_error"
 RESULT_KIND_INTERNAL_ERROR = "internal_error"
 RESULT_KIND_CART_ABANDONED = "cart_abandoned"
+# Returned when the order-availability gate blocks a mutating intent
+# (business is closed). The order agent emits a handoff to
+# customer_service alongside this result kind so the customer gets a
+# "estamos cerrados, abrimos a las X" reply instead of an executor run.
+RESULT_KIND_ORDER_CLOSED = "order_closed"
 
 # Cart-change actions
 CART_ACTION_ADDED = "added"

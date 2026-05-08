@@ -715,6 +715,68 @@ class CustomerServiceAgent(BaseAgent):
 
         tracer.start_run(run_id=run_id, user_id=wa_id, message_id=message_id, business_id=str(business_id))
 
+        # 0) Order-closed handoff fast-path. When the order agent's
+        # availability gate blocked a mutating intent, it hands off to
+        # us with handoff_context.reason="order_closed". Compose a
+        # deterministic reply using business_info_service so the prose
+        # matches the existing "¿están abiertos?" answer (single source
+        # of truth: format_open_status_sentence). Skip the planner LLM —
+        # this is a fixed situation, not a free-text classification.
+        handoff_context = kwargs.get("handoff_context") or {}
+        if (handoff_context.get("reason") or "").strip() == "order_closed":
+            blocked_intents = handoff_context.get("blocked_intents") or []
+            has_active_cart = bool(handoff_context.get("has_active_cart"))
+            logging.warning(
+                "[ORDER_GATE] business=%s wa_id=%s CS handling order_closed "
+                "handoff blocked_intents=%s has_active_cart=%s",
+                business_id, wa_id, blocked_intents, has_active_cart,
+            )
+            try:
+                from ..services import business_info_service as _bi_svc
+                status = _bi_svc.compute_open_status(str(business_id))
+                sentence = _bi_svc.format_open_status_sentence(status)
+            except Exception as exc:
+                logging.warning(
+                    "[ORDER_GATE] business=%s wa_id=%s open-status compute failed: %s",
+                    business_id, wa_id, exc,
+                )
+                sentence = "Por ahora estamos cerrados."
+            base = sentence or "Por ahora estamos cerrados."
+            if has_active_cart:
+                tail = (
+                    " Tu pedido se queda guardado, lo retomamos cuando "
+                    "abramos. Mientras tanto puedo resolverte cualquier duda."
+                )
+            else:
+                tail = (
+                    " Mientras tanto puedo contarte del menú o resolverte "
+                    "cualquier duda."
+                )
+            message = base + tail
+            try:
+                conversation_service.store_conversation_message(
+                    wa_id, message, "assistant", business_id=business_id,
+                )
+            except Exception as exc:
+                logging.error(
+                    "[ORDER_GATE] business=%s wa_id=%s persist failed: %s",
+                    business_id, wa_id, exc,
+                )
+            logging.warning(
+                "[ORDER_GATE] business=%s wa_id=%s CS replied "
+                "(deterministic, no LLM)",
+                business_id, wa_id,
+            )
+            tracer.end_run(
+                run_id, success=True,
+                latency_ms=(time.time() - start_time) * 1000,
+            )
+            return {
+                "agent_type": self.agent_type,
+                "message": message,
+                "state_update": {},
+            }
+
         # 1) Planner
         history_text = ""
         # Uniform 10-msg window across router / order planner / CS planner

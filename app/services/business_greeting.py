@@ -55,9 +55,42 @@ _LEGACY_DEFAULT_BUSINESS_NAME = "BIELA FAST FOOD"
 _LEGACY_DEFAULT_MENU_URL = "https://gixlink.com/Biela"
 
 
+def _closed_sentence_from_gate(gate: Optional[dict]) -> str:
+    """
+    Render the live "we're closed, opens at X" sentence from the gate
+    payload returned by ``business_info_service.is_taking_orders_now``.
+    Returns "" when the gate is None / open / no_data — caller should
+    treat empty as "no override".
+
+    Mirrors ``business_info_service.format_open_status_sentence`` so
+    the closed prose is identical across the welcome greeting and the
+    CS ``order_closed`` handoff branch.
+    """
+    if not gate or gate.get("can_take_orders") or gate.get("reason") != "closed":
+        return ""
+    try:
+        from . import business_info_service as _bi_svc
+        # format_open_status_sentence expects the compute_open_status
+        # shape; gate's fields are a strict superset, so we can pass it
+        # as-is for the closed branch.
+        synthesized = {
+            "is_open": False,
+            "has_data": True,
+            "opens_at": gate.get("opens_at"),
+            "closes_at": None,
+            "next_open_dow": gate.get("next_open_dow"),
+            "next_open_time": gate.get("next_open_time"),
+            "now_local": gate.get("now_local"),
+        }
+        return _bi_svc.format_open_status_sentence(synthesized)
+    except Exception:
+        return "Por ahora estamos cerrados."
+
+
 def get_greeting(
     business_context: Optional[dict],
     customer_name: Optional[str],
+    gate: Optional[dict] = None,
 ) -> str:
     """
     Build the plain-text greeting reply — body matches the Twilio CTA
@@ -68,6 +101,10 @@ def get_greeting(
     a Twilio business without `welcome_content_sid`). Reads name +
     menu_url from business_context.business.settings; falls back to the
     legacy Biela defaults.
+
+    When ``gate`` indicates the business is closed, the greeting
+    announces it inline ("Por ahora estamos cerrados…") so customers
+    don't have to send a product to discover the shop is closed.
     """
     business_name = _LEGACY_DEFAULT_BUSINESS_NAME
     menu_url = _LEGACY_DEFAULT_MENU_URL
@@ -82,10 +119,20 @@ def get_greeting(
     has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
     opener = f"Hola {first} " if has_real_name else "Hola "
 
-    body = (
-        f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
-        "¿Qué se te antoja hoy? Estamos listos para ayudarte"
-    )
+    closed_sentence = _closed_sentence_from_gate(gate)
+    if closed_sentence:
+        body = (
+            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+            f"\n"
+            f"{closed_sentence}\n"
+            f"\n"
+            "Mientras tanto puedo contarte del menú o resolverte cualquier duda."
+        )
+    else:
+        body = (
+            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+            "¿Qué se te antoja hoy? Estamos listos para ayudarte"
+        )
     if menu_url:
         body += f"\n\n{menu_url}"
     return body
@@ -94,39 +141,71 @@ def get_greeting(
 def cta_welcome_payload(
     business_context: Optional[dict],
     customer_name: Optional[str],
+    gate: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     Return CTA Content Template payload when this business should send the
     welcome via a button-styled card; None otherwise (caller falls back to
     the plain-text greeting).
 
-    Activation: business.settings.welcome_content_sid set + provider=twilio.
-    The Content Template at that SID must define exactly:
-      {{1}} = business name
-      {{2}} = name fragment of the opener — either "Hola <Name> " (with
-              trailing space) or "Hola " when the contact's name is
-              unknown. Carrying it as a variable lets us cleanly drop
-              the name without breaking the rest of the sentence.
-    The CTA URL is hardcoded inside the template (Twilio rejects a pure
-    variable in the action.url field — URL is per-business anyway, so
-    bake it into the template at creation time).
+    Two templates are supported per business:
 
-    Returns: {"content_sid", "variables", "rendered_body"}.
-    rendered_body is the plain-text version we persist to conversation
-    history; it must match what the customer sees on WhatsApp so the
-    inbox UI is consistent.
+    - ``welcome_content_sid`` — open-state greeting (existing). Body uses
+      ``{{1}}`` (business name) and ``{{2}}`` (opener fragment).
+    - ``welcome_closed_content_sid`` — closed-state greeting (new).
+      Same {{1}}/{{2}} plus ``{{3}}`` carrying the live closed
+      sentence. Selected when ``gate`` says ``can_take_orders=False``.
+
+    Selection rules when ``gate`` indicates closed:
+      1. ``welcome_closed_content_sid`` set → render closed CTA.
+      2. Otherwise → return None so the caller falls back to the
+         plain-text greeting (which will include the closed sentence
+         via ``get_greeting`` + ``gate``).
+
+    Returns: ``{"content_sid", "variables", "rendered_body", "kind"}``.
+    ``rendered_body`` is the plain-text version persisted to
+    conversation history; must match what the customer sees on
+    WhatsApp so the inbox UI stays consistent. ``kind`` is one of
+    ``"open_cta"`` / ``"closed_cta"`` for log/trace.
     """
     if not business_context or business_context.get("provider") != "twilio":
         return None
     biz = business_context.get("business") or {}
     settings = biz.get("settings") or {}
-    content_sid = (settings.get("welcome_content_sid") or "").strip()
-    if not content_sid:
-        return None
     business_name = (biz.get("name") or _LEGACY_DEFAULT_BUSINESS_NAME).strip()
     first = _first_name(customer_name)
     has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
     opener = f"Hola {first} " if has_real_name else "Hola "
+
+    is_closed = bool(gate and not gate.get("can_take_orders") and gate.get("reason") == "closed")
+
+    if is_closed:
+        closed_sid = (settings.get("welcome_closed_content_sid") or "").strip()
+        if not closed_sid:
+            # No closed-state template configured — caller falls back
+            # to the plain-text greeting, which renders the closed
+            # sentence inline via get_greeting(gate=...).
+            return None
+        closed_sentence = _closed_sentence_from_gate(gate) or "Por ahora estamos cerrados."
+        variables = {"1": business_name, "2": opener, "3": closed_sentence}
+        rendered_body = (
+            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+            f"\n"
+            f"{closed_sentence}\n"
+            f"\n"
+            "Mientras tanto puedo contarte del menú o resolverte cualquier duda."
+        )
+        return {
+            "content_sid": closed_sid,
+            "variables": variables,
+            "rendered_body": rendered_body,
+            "kind": "closed_cta",
+        }
+
+    # Open-state path: requires the open-template SID.
+    content_sid = (settings.get("welcome_content_sid") or "").strip()
+    if not content_sid:
+        return None
     variables = {"1": business_name, "2": opener}
     rendered_body = (
         f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
@@ -136,4 +215,5 @@ def cta_welcome_payload(
         "content_sid": content_sid,
         "variables": variables,
         "rendered_body": rendered_body,
+        "kind": "open_cta",
     }

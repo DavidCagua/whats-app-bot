@@ -342,6 +342,60 @@ def _format_time_lower(t: _time) -> str:
     return _format_time_12h(t)
 
 
+def is_taking_orders_now(
+    business_id: str,
+    now: Optional[_datetime] = None,
+) -> Dict[str, Any]:
+    """
+    Decide whether the order agent should be accepting cart-mutating
+    intents at this moment.
+
+    Wraps ``compute_open_status``. When the business has no
+    availability rows configured (``has_data=False``), default to
+    accepting orders — the gate is opt-in via the presence of
+    ``business_availability`` data.
+
+    Returns a dict::
+
+        {
+          "can_take_orders": bool,
+          "reason": "open" | "closed" | "no_data",
+          "opens_at": time | None,            # today's open, when closed-but-opens-today
+          "next_open_dow": int | None,        # 0=Sun..6=Sat
+          "next_open_time": time | None,
+          "now_local": datetime | None,       # Bogotá tz
+        }
+
+    Browse intents (menu / product details / search) should be
+    permitted even when ``can_take_orders`` is False — the customer
+    can still read the menu while the shop is closed. The gate is
+    applied per-intent inside the order agent's dispatch loop; this
+    helper just answers the yes/no question.
+    """
+    status = compute_open_status(business_id, now=now)
+    base: Dict[str, Any] = {
+        "can_take_orders": True,
+        "reason": "no_data",
+        "opens_at": None,
+        "next_open_dow": None,
+        "next_open_time": None,
+        "now_local": status.get("now_local"),
+    }
+    if not status.get("has_data"):
+        return base
+    if status.get("is_open"):
+        base["reason"] = "open"
+        return base
+    return {
+        "can_take_orders": False,
+        "reason": "closed",
+        "opens_at": status.get("opens_at"),
+        "next_open_dow": status.get("next_open_dow"),
+        "next_open_time": status.get("next_open_time"),
+        "now_local": status.get("now_local"),
+    }
+
+
 def format_open_status_sentence(status: Dict[str, Any]) -> str:
     """
     One-liner Spanish sentence summarizing whether the business is

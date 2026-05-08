@@ -380,6 +380,79 @@ class TestComputeOpenStatus:
         assert s["has_data"] is False
 
 
+class TestIsTakingOrdersNow:
+    """
+    Order-availability gate. Returns can_take_orders=True/False with
+    reason in {"open", "closed", "no_data"}. Default-open when the
+    business has no availability rows configured (gate is opt-in via
+    the presence of business_availability data).
+    """
+
+    BIELA_ROWS = [
+        {"day_of_week": 0, "open_time": _time(17, 30), "close_time": _time(22, 0), "is_active": False},
+        {"day_of_week": 1, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 2, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 3, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 4, "open_time": _time(17, 0), "close_time": _time(22, 0), "is_active": True},
+        {"day_of_week": 5, "open_time": _time(17, 0), "close_time": _time(22, 30), "is_active": True},
+        {"day_of_week": 6, "open_time": _time(17, 0), "close_time": _time(22, 30), "is_active": True},
+    ]
+
+    def _run(self, iso, rows=None):
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            pytest.skip("zoneinfo unavailable")
+        rows = rows if rows is not None else self.BIELA_ROWS
+        now = datetime.fromisoformat(iso).replace(tzinfo=ZoneInfo("America/Bogota"))
+        with patch(
+            "app.services.business_info_service._load_active_availability_rows",
+            return_value=rows,
+        ):
+            return bis.is_taking_orders_now("biz", now=now)
+
+    def test_open_returns_can_take_orders(self):
+        gate = self._run("2026-05-05T18:00:00")
+        assert gate["can_take_orders"] is True
+        assert gate["reason"] == "open"
+
+    def test_closed_returns_cannot_take_orders(self):
+        gate = self._run("2026-05-05T14:45:00")
+        assert gate["can_take_orders"] is False
+        assert gate["reason"] == "closed"
+        assert gate["opens_at"] == _time(17, 0)
+        assert gate["next_open_dow"] == 2  # Tuesday
+        assert gate["next_open_time"] == _time(17, 0)
+
+    def test_after_close_returns_cannot_take_orders(self):
+        # Tue 22:30 → past close, next open is Wednesday.
+        gate = self._run("2026-05-05T22:30:00")
+        assert gate["can_take_orders"] is False
+        assert gate["reason"] == "closed"
+        assert gate["next_open_dow"] == 3
+
+    def test_no_availability_rows_defaults_to_open(self):
+        """Gate is opt-in via the presence of availability data —
+        a business without configured rows keeps accepting orders."""
+        gate = self._run("2026-05-05T18:00:00", rows=[])
+        assert gate["can_take_orders"] is True
+        assert gate["reason"] == "no_data"
+
+    def test_exact_close_time_is_closed(self):
+        """Boundary: at exactly close_time we treat as closed
+        (compute_open_status uses ot <= cur_time < ct)."""
+        gate = self._run("2026-05-05T22:00:00")
+        assert gate["can_take_orders"] is False
+        assert gate["reason"] == "closed"
+
+    def test_exact_open_time_is_open(self):
+        """Boundary: at exactly open_time we treat as open."""
+        gate = self._run("2026-05-05T17:00:00")
+        assert gate["can_take_orders"] is True
+        assert gate["reason"] == "open"
+
+
 class TestFormatOpenStatusSentence:
     """Spanish copy for the open-status sentence."""
 

@@ -422,6 +422,24 @@ def run_scenario(scenario: AgentScenario) -> ScenarioRun:
         patch("app.orchestration.order_flow._find_tool", side_effect=_maybe_stub_place_order),
         patch("app.orchestration.order_flow._clear_pending_disambiguation"),
         patch("app.agents.order_agent.tracer"),
+        # Order-availability gate: evals test the planner/executor flow,
+        # not the gate. Force "open" so tests don't get bounced to a
+        # customer_service handoff when the local Biela availability
+        # rows happen to mark the current Bogotá time as closed.
+        # The gate has its own dedicated unit tests in
+        # tests/unit/test_business_info_service.py and
+        # tests/unit/test_order_agent_handoff.py.
+        patch(
+            "app.services.business_info_service.is_taking_orders_now",
+            return_value={
+                "can_take_orders": True,
+                "reason": "open",
+                "opens_at": None,
+                "next_open_dow": None,
+                "next_open_time": None,
+                "now_local": None,
+            },
+        ),
         # Wrap the executor to capture the planner's decision.
         patch("app.agents.order_agent.execute_order_intent", side_effect=_capturing_execute),
     ]

@@ -833,3 +833,89 @@ class TestDespedidaPostPedidoSafetyNet:
                 turn_ctx=self._ctx_post_order(),
             )
         assert output.get("handoff") in (None, {})
+
+
+class TestOrderClosedHandoff:
+    """
+    When the order agent's availability gate fires, it hands off to CS
+    with handoff_context.reason="order_closed". The CS agent answers
+    deterministically using business_info_service.format_open_status_sentence
+    so the prose matches the existing "¿están abiertos?" reply.
+    Skips the planner LLM entirely on this path.
+    """
+
+    _CLOSED_STATUS = {
+        "is_open": False,
+        "has_data": True,
+        "opens_at": None,
+        "closes_at": None,
+        "next_open_dow": 1,  # Monday
+        "next_open_time": None,
+        "now_local": None,
+    }
+
+    def test_no_active_cart_uses_chat_invitation(self):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch(
+                 "app.services.business_info_service.compute_open_status",
+                 return_value=self._CLOSED_STATUS,
+             ), \
+             patch(
+                 "app.services.business_info_service.format_open_status_sentence",
+                 return_value="Por ahora estamos cerrados.",
+             ), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch("app.agents.customer_service_agent.tracer"):
+            output = agent.execute(
+                message_body="una barracuda",
+                wa_id="+573001234567", name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                handoff_context={
+                    "reason": "order_closed",
+                    "has_active_cart": False,
+                    "blocked_intents": ["ADD_TO_CART"],
+                },
+            )
+
+        # Planner LLM must NOT have been called — deterministic path.
+        llm.invoke.assert_not_called()
+        msg = output["message"]
+        assert "cerrados" in msg.lower()
+        # Empty-cart tail invites the customer to chat / browse.
+        assert "menú" in msg.lower() or "duda" in msg.lower()
+        assert output.get("handoff") in (None, {})
+
+    def test_active_cart_says_cart_is_saved(self):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch(
+                 "app.services.business_info_service.compute_open_status",
+                 return_value=self._CLOSED_STATUS,
+             ), \
+             patch(
+                 "app.services.business_info_service.format_open_status_sentence",
+                 return_value="Por ahora estamos cerrados.",
+             ), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch("app.agents.customer_service_agent.tracer"):
+            output = agent.execute(
+                message_body="confirmo",
+                wa_id="+573001234567", name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                handoff_context={
+                    "reason": "order_closed",
+                    "has_active_cart": True,
+                    "blocked_intents": ["CONFIRM"],
+                },
+            )
+
+        llm.invoke.assert_not_called()
+        msg = output["message"]
+        assert "cerrados" in msg.lower()
+        # Active-cart tail mentions the cart is preserved.
+        assert "guardado" in msg.lower() or "retomamos" in msg.lower()

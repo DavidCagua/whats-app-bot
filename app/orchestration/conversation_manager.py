@@ -175,6 +175,27 @@ class ConversationManager:
         # session / history / latest order on its own.
         turn_ctx = build_turn_context(wa_id=wa_id, business_id=business_id)
 
+        # Order-availability gate, computed once per turn. Pure-data
+        # check; no LLM. The router uses it to announce the closed
+        # state on greetings, and the order agent uses it to block
+        # cart-mutating intents (it'll re-load it inside its own
+        # execute() — the gate function is cheap and idempotent).
+        # Honors business.settings.order_gate_enabled (default True).
+        # When the business has no availability rows configured,
+        # is_taking_orders_now returns can_take_orders=True so the
+        # gate is effectively no-op for unconfigured tenants.
+        order_gate: Optional[dict] = None
+        try:
+            _bg_settings = ((business_context or {}).get("business") or {}).get("settings") or {}
+            if _bg_settings.get("order_gate_enabled", True) is not False:
+                from ..services import business_info_service as _bi_svc
+                order_gate = _bi_svc.is_taking_orders_now(str(business_id))
+        except Exception as exc:
+            logging.warning(
+                "[ORDER_GATE] greeting compute failed (defaulting to open): %s", exc,
+            )
+            order_gate = None
+
         # 1. Router fast-path: pure greetings reply directly.
         # Pass wa_id + message_id (used as turn_id) into the router so its
         # LangSmith spans are filterable by user and so all LLM spans
@@ -188,23 +209,30 @@ class ConversationManager:
             ctx=turn_ctx,
             wa_id=wa_id,
             turn_id=message_id,
+            gate=order_gate,
         )
         if router_result.direct_reply is not None:
             logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")
             whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
 
-            # POC: send welcome as a Twilio CTA Content Template (button card)
-            # when the business has settings.welcome_content_sid configured.
-            # Falls back to the plain-text path on any failure.
+            # Send welcome as a Twilio CTA Content Template (button card)
+            # when the business has the appropriate SID configured. Two
+            # templates are supported per business:
+            #   - welcome_content_sid (open-state)
+            #   - welcome_closed_content_sid (closed-state, optional)
+            # The gate computed above selects which one — when closed
+            # AND no closed SID is configured, cta_welcome_payload
+            # returns None so we fall back to the plain-text greeting
+            # (which already includes the closed sentence inline).
             cta = None
             try:
                 from ..services import business_greeting as _bg
-                cta = _bg.cta_welcome_payload(business_context, name)
+                cta = _bg.cta_welcome_payload(business_context, name, gate=order_gate)
+                _gate_reason = (order_gate or {}).get("reason") or "unknown"
+                _kind = (cta or {}).get("kind") or ("plaintext" if cta is None else "cta")
                 logging.warning(
-                    "[CONVERSATION_MANAGER] cta_welcome_payload resolved: provider=%s sid=%s cta=%s",
-                    (business_context or {}).get("provider"),
-                    (((business_context or {}).get("business") or {}).get("settings") or {}).get("welcome_content_sid"),
-                    "yes" if cta else "no",
+                    "[ORDER_GATE] greeting business=%s wa_id=%s gate=%s kind=%s",
+                    business_id, wa_id, _gate_reason, _kind,
                 )
             except Exception as exc:
                 logging.warning(f"[CONVERSATION_MANAGER] cta_welcome_payload failed: {exc}")
