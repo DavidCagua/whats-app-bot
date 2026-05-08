@@ -52,6 +52,8 @@ export default async function OrdersPage({ params, searchParams }: OrdersPagePro
         businessName={business.name}
         initialOrders={initialOrders}
         initialRange={range}
+        products={createData.products}
+        customers={createData.customers}
       />
     </div>
   )

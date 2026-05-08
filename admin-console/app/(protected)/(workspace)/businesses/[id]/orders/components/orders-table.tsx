@@ -23,7 +23,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { Bell, BellOff, BellRing, ChevronLeft, ChevronRight } from "lucide-react"
+import { Bell, BellOff, BellRing, ChevronLeft, ChevronRight, Pencil, Printer } from "lucide-react"
 import { format } from "date-fns"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
@@ -36,6 +36,11 @@ import {
 } from "@/lib/order-status"
 import { useEventSource } from "@/lib/use-event-source"
 import type { OrderRow } from "@/lib/orders-queries"
+import type {
+  CustomerOption,
+  ProductOption,
+} from "@/lib/orders-create-data"
+import { EditOrderDialog } from "./edit-order-dialog"
 import {
   getAlertsEnabled,
   playChime,
@@ -110,16 +115,21 @@ export function OrdersTable({
   businessName,
   initialOrders,
   initialRange,
+  products,
+  customers,
 }: {
   businessId: string
   businessName: string
   initialOrders: OrderRow[]
   initialRange: DateRange
+  products: ProductOption[]
+  customers: CustomerOption[]
 }) {
   const router = useRouter()
   const [orders, setOrders] = useState<OrderRow[]>(initialOrders)
   const [updating, setUpdating] = useState<string | null>(null)
   const [range, setRange] = useState<DateRange>(initialRange)
+  const [editingOrderId, setEditingOrderId] = useState<string | null>(null)
   // Server snapshots overwrite local state, but only after a brief settle —
   // when the user changes filter, the URL update + server-rendered initialOrders
   // hand the new list down via props. The SSE stream then reconnects with the
@@ -452,13 +462,14 @@ export function OrdersTable({
             <TableHead>Ítems</TableHead>
             <TableHead>Total</TableHead>
             <TableHead>Estado</TableHead>
+            <TableHead>Acciones</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {orders.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={9}
+                colSpan={10}
                 className="text-center text-muted-foreground py-8"
               >
                 No hay pedidos en este rango.
@@ -569,6 +580,40 @@ export function OrdersTable({
                       </Select>
                     )}
                   </TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setEditingOrderId(order.id)}
+                        disabled={isTerminal}
+                        aria-label="Editar pedido"
+                        title={
+                          isTerminal
+                            ? "No se puede editar un pedido completado o cancelado"
+                            : "Editar pedido"
+                        }
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() =>
+                          window.open(
+                            `/orders/${order.id}/print`,
+                            "_blank",
+                            "noopener,noreferrer"
+                          )
+                        }
+                        aria-label="Imprimir pedido"
+                      >
+                        <Printer className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
                 </TableRow>
               )
             })
@@ -576,6 +621,16 @@ export function OrdersTable({
         </TableBody>
       </Table>
       </div>
+
+      <EditOrderDialog
+        orderId={editingOrderId}
+        open={editingOrderId !== null}
+        onOpenChange={(next) => {
+          if (!next) setEditingOrderId(null)
+        }}
+        products={products}
+        customers={customers}
+      />
     </div>
   )
 }

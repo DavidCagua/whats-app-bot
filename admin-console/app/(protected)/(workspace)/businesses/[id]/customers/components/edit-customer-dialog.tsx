@@ -31,6 +31,7 @@ export function EditCustomerDialog({
 }) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
+  const [whatsappId, setWhatsappId] = useState("")
   const [name, setName] = useState("")
   const [phone, setPhone] = useState("")
   const [address, setAddress] = useState("")
@@ -43,6 +44,7 @@ export function EditCustomerDialog({
   const [lastSeenId, setLastSeenId] = useState<number | null>(null)
   if (customer && customer.id !== lastSeenId) {
     setLastSeenId(customer.id)
+    setWhatsappId(customer.whatsapp_id)
     setName(customer.name)
     setPhone(customer.phone ?? "")
     setAddress(customer.address ?? "")
@@ -57,6 +59,7 @@ export function EditCustomerDialog({
       const result = await updateCustomer({
         businessId,
         customerId: customer.id,
+        whatsappId,
         name,
         phone,
         address,
@@ -79,17 +82,25 @@ export function EditCustomerDialog({
         <DialogHeader>
           <DialogTitle>Editar cliente</DialogTitle>
           <DialogDescription>
-            Estos cambios solo afectan a este negocio. El número de WhatsApp
-            es la identidad del cliente y no se puede cambiar.
+            Nombre, teléfono, dirección y notas son por negocio. El WhatsApp
+            es la identidad global del cliente — al cambiarlo se renombra
+            en todos los negocios donde aparece.
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={onSubmit} className="space-y-3">
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">WhatsApp</Label>
-            <p className="font-mono text-sm">
-              {customer?.whatsapp_id ?? "—"}
-            </p>
+            <Label htmlFor="whatsappId">
+              WhatsApp <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="whatsappId"
+              inputMode="tel"
+              placeholder="+573001234567"
+              value={whatsappId}
+              onChange={(e) => setWhatsappId(e.target.value)}
+              required
+            />
           </div>
 
           <div className="space-y-1.5">

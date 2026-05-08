@@ -17,6 +17,8 @@ type CreateCustomerInput = {
 type UpdateCustomerInput = {
   businessId: string
   customerId: number
+  /** Optional. Renames the global customers.whatsapp_id (canonical identity). */
+  whatsappId?: string | null
   name: string
   phone?: string | null
   address?: string | null
@@ -126,27 +128,72 @@ export async function updateCustomer(
   const paymentMethod = input.paymentMethod?.trim() || null
   const notes = input.notes?.trim() || null
 
-  // Update only the per-business join row. The global customers row
-  // (canonical identity by whatsapp_id) intentionally stays untouched —
-  // a name typo on this business shouldn't propagate to other tenants.
-  const link = await prisma.business_customers.update({
-    where: {
-      business_id_customer_id: {
-        business_id: input.businessId,
-        customer_id: input.customerId,
-      },
-    },
-    data: {
-      name,
-      phone,
-      address,
-      payment_method: paymentMethod,
-      notes,
-      updated_at: new Date(),
-    },
-  }).catch(() => null)
+  // The global customers row owns whatsapp_id (UNIQUE). The per-business
+  // business_customers join row owns the override fields. We may need
+  // to touch both, so do it in a transaction.
+  const newWhatsappId = input.whatsappId?.trim()
+  if (newWhatsappId !== undefined && newWhatsappId !== "") {
+    if (!WHATSAPP_ID_RE.test(newWhatsappId)) {
+      return {
+        success: false,
+        error: "WhatsApp ID inválido — usa solo dígitos (con + opcional)",
+      }
+    }
+  }
 
-  if (!link) return { success: false, error: "Cliente no encontrado" }
+  const existing = await prisma.customers.findUnique({
+    where: { id: input.customerId },
+    select: { id: true, whatsapp_id: true },
+  })
+  if (!existing) return { success: false, error: "Cliente no encontrado" }
+
+  // Pre-check the uniqueness collision so we can return a friendly message
+  // instead of letting Postgres throw a P2002 from the unique index.
+  if (
+    newWhatsappId &&
+    newWhatsappId !== existing.whatsapp_id
+  ) {
+    const collision = await prisma.customers.findUnique({
+      where: { whatsapp_id: newWhatsappId },
+      select: { id: true },
+    })
+    if (collision && collision.id !== existing.id) {
+      return {
+        success: false,
+        error: "Ya existe otro cliente con ese WhatsApp",
+      }
+    }
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      if (newWhatsappId && newWhatsappId !== existing.whatsapp_id) {
+        await tx.customers.update({
+          where: { id: existing.id },
+          data: { whatsapp_id: newWhatsappId, updated_at: new Date() },
+        })
+      }
+
+      await tx.business_customers.update({
+        where: {
+          business_id_customer_id: {
+            business_id: input.businessId,
+            customer_id: input.customerId,
+          },
+        },
+        data: {
+          name,
+          phone,
+          address,
+          payment_method: paymentMethod,
+          notes,
+          updated_at: new Date(),
+        },
+      })
+    })
+  } catch {
+    return { success: false, error: "No se pudo actualizar el cliente" }
+  }
 
   revalidatePath(`/businesses/${input.businessId}/customers`)
   return { success: true, customerId: input.customerId }
