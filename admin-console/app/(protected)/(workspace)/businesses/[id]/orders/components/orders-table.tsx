@@ -31,7 +31,7 @@ import { updateOrderStatus } from "@/lib/actions/orders"
 import {
   type OrderStatus,
   STATUS_LABELS,
-  allowedNext,
+  adminAllowedNext,
   isValidStatus,
 } from "@/lib/order-status"
 import { useEventSource } from "@/lib/use-event-source"
@@ -477,8 +477,12 @@ export function OrdersTable({
             </TableRow>
           ) : (
             orders.map((order) => {
-              const nextStates = Array.from(allowedNext(order.status))
-              const isTerminal = nextStates.length === 0
+              const nextStates = Array.from(adminAllowedNext(order.status))
+              // Bot's "terminal" set still gates the edit-items dialog —
+              // we don't want admins rewriting completed/cancelled order
+              // contents. The status badge itself is always editable.
+              const isBotTerminal =
+                order.status === "completed" || order.status === "cancelled"
               return (
                 <TableRow
                   key={order.id}
@@ -544,41 +548,34 @@ export function OrdersTable({
                     </div>
                   </TableCell>
                   <TableCell>
-                    {isTerminal ? (
-                      <Badge variant={statusVariant(order.status)}>
-                        {labelFor(order.status)}
-                      </Badge>
-                    ) : (
-                      <Select
-                        value={order.status}
-                        onValueChange={(val) =>
-                          void handleStatusChange(order.id, val as OrderStatus)
-                        }
-                        disabled={updating === order.id}
-                      >
-                        <SelectTrigger className="w-36 h-8">
-                          <Badge
-                            variant={statusVariant(order.status)}
-                            className="pointer-events-none"
-                          >
-                            {updating === order.id
-                              ? "..."
-                              : labelFor(order.status)}
-                          </Badge>
-                        </SelectTrigger>
-                        <SelectContent>
-                          {/* current status (disabled) + every legal next state */}
-                          <SelectItem value={order.status} disabled>
-                            {labelFor(order.status)}
+                    <Select
+                      value={order.status}
+                      onValueChange={(val) =>
+                        void handleStatusChange(order.id, val as OrderStatus)
+                      }
+                      disabled={updating === order.id}
+                    >
+                      <SelectTrigger className="w-36 h-8">
+                        <Badge
+                          variant={statusVariant(order.status)}
+                          className="pointer-events-none"
+                        >
+                          {updating === order.id
+                            ? "..."
+                            : labelFor(order.status)}
+                        </Badge>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={order.status} disabled>
+                          {labelFor(order.status)}
+                        </SelectItem>
+                        {nextStates.map((s) => (
+                          <SelectItem key={s} value={s}>
+                            {STATUS_LABELS[s]}
                           </SelectItem>
-                          {nextStates.map((s) => (
-                            <SelectItem key={s} value={s}>
-                              {STATUS_LABELS[s]}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    )}
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1">
@@ -587,10 +584,10 @@ export function OrdersTable({
                         variant="ghost"
                         size="icon"
                         onClick={() => setEditingOrderId(order.id)}
-                        disabled={isTerminal}
+                        disabled={isBotTerminal}
                         aria-label="Editar pedido"
                         title={
-                          isTerminal
+                          isBotTerminal
                             ? "No se puede editar un pedido completado o cancelado"
                             : "Editar pedido"
                         }

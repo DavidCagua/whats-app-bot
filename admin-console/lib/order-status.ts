@@ -35,6 +35,29 @@ export function canTransition(
   return allowedNext(from).has(to)
 }
 
+/**
+ * Admin-only transition set: every status except the current one.
+ *
+ * The bot still goes through `allowedNext()` (mirror of the Python state
+ * machine) so it can never accidentally undo a cancellation or revive a
+ * completed order. The admin console UI uses this looser version so a
+ * human can recover from "I clicked the wrong status" without touching
+ * the bot's safety net.
+ */
+export function adminAllowedNext(
+  from: OrderStatus | string | null | undefined
+): ReadonlySet<OrderStatus> {
+  if (!from || !isValidStatus(from)) return new Set(ORDER_STATUSES)
+  return new Set(ORDER_STATUSES.filter((s) => s !== from))
+}
+
+export function adminCanTransition(
+  from: OrderStatus | string | null | undefined,
+  to: OrderStatus
+): boolean {
+  return adminAllowedNext(from).has(to)
+}
+
 // Returns the column on `orders` that should be set to NOW() when
 // entering this status. null = no dedicated timestamp.
 export function timestampFieldFor(status: OrderStatus): "confirmed_at" | "completed_at" | "cancelled_at" | null {

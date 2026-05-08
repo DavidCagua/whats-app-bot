@@ -6,7 +6,7 @@ import { canEditBusiness } from "@/lib/permissions"
 import { revalidatePath } from "next/cache"
 import {
   type OrderStatus,
-  canTransition,
+  adminCanTransition,
   isValidStatus,
   timestampFieldFor,
 } from "@/lib/order-status"
@@ -41,10 +41,12 @@ export async function updateOrderStatus(
     return { success: true as const }
   }
 
-  if (!canTransition(existing.status, status)) {
+  // Admin-only loose machine: any-to-any except no-op (already filtered
+  // above). Keeps the bot's strict transitions untouched.
+  if (!adminCanTransition(existing.status, status)) {
     return {
       success: false as const,
-      error: `No se puede pasar de "${existing.status}" a "${status}"`,
+      error: `Estado inválido: "${status}"`,
     }
   }
 
