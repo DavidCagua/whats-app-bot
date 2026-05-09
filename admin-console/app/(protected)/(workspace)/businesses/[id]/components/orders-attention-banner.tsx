@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useEffect, useState } from "react"
+import { useState, useSyncExternalStore } from "react"
 import { AlertTriangle, X } from "lucide-react"
 import { useEventSource } from "@/lib/use-event-source"
 import { cn } from "@/lib/utils"
@@ -18,6 +18,12 @@ type OrdersAttentionBannerProps = {
 
 const dismissKey = (businessId: string) => `orders:attention-banner-dismissed:${businessId}`
 
+// Custom event we dispatch ourselves on dismiss — the standard
+// `storage` event only fires across tabs, not within the same tab,
+// so a user dismissing here wouldn't otherwise see the banner hide
+// until a re-mount.
+const DISMISS_EVENT = "orders-attention-banner-dismissed"
+
 const parseDismissed = (raw: string | null): Counts | null => {
   if (!raw) return null
   try {
@@ -31,17 +37,51 @@ const parseDismissed = (raw: string | null): Counts | null => {
   }
 }
 
+// Stable subscribe for useSyncExternalStore — must be reference-stable
+// across renders or React will tear down + re-subscribe every render.
+const subscribeDismissed = (onChange: () => void) => {
+  if (typeof window === "undefined") return () => {}
+  window.addEventListener("storage", onChange)
+  window.addEventListener(DISMISS_EVENT, onChange)
+  return () => {
+    window.removeEventListener("storage", onChange)
+    window.removeEventListener(DISMISS_EVENT, onChange)
+  }
+}
+
+// Snapshot cache so getSnapshot returns a reference-stable value when
+// the underlying localStorage string hasn't changed. Without this,
+// parseDismissed allocates a fresh object on every read and
+// useSyncExternalStore detects "change" on every render → infinite
+// loop / re-render warning.
+const dismissedSnapshotCache = new Map<string, { raw: string | null; parsed: Counts | null }>()
+
+const getDismissedSnapshot = (businessId: string): Counts | null => {
+  if (typeof window === "undefined") return null
+  const raw = localStorage.getItem(dismissKey(businessId))
+  const cached = dismissedSnapshotCache.get(businessId)
+  if (cached && cached.raw === raw) return cached.parsed
+  const parsed = parseDismissed(raw)
+  dismissedSnapshotCache.set(businessId, { raw, parsed })
+  return parsed
+}
+
 export function OrdersAttentionBanner({
   businessId,
   initialCounts,
 }: OrdersAttentionBannerProps) {
   const [counts, setCounts] = useState<Counts>(initialCounts)
-  const [dismissedAt, setDismissedAt] = useState<Counts | null>(null)
 
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    setDismissedAt(parseDismissed(localStorage.getItem(dismissKey(businessId))))
-  }, [businessId])
+  // Sync with localStorage via the React-blessed external-store hook.
+  // SSR returns null (no banner-dismissal info on the server); on the
+  // client, hydration fires the subscribe callback and re-renders
+  // with the parsed value. No setState-in-effect, no manual hydration
+  // gymnastics.
+  const dismissedAt = useSyncExternalStore<Counts | null>(
+    subscribeDismissed,
+    () => getDismissedSnapshot(businessId),
+    () => null,
+  )
 
   useEventSource<Counts>(
     `/api/orders/banner-counts/stream?businessId=${encodeURIComponent(businessId)}`,
@@ -52,7 +92,11 @@ export function OrdersAttentionBanner({
   const dismiss = () => {
     if (typeof window === "undefined") return
     localStorage.setItem(dismissKey(businessId), JSON.stringify(counts))
-    setDismissedAt(counts)
+    // Invalidate the cache so the next snapshot read picks up the new
+    // value, then dispatch our custom event so useSyncExternalStore
+    // re-reads (the standard `storage` event only fires across tabs).
+    dismissedSnapshotCache.delete(businessId)
+    window.dispatchEvent(new Event(DISMISS_EVENT))
   }
 
   const nothingToShow = counts.pending === 0 && counts.inFlight === 0

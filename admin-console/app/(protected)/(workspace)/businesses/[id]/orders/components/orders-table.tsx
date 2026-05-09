@@ -126,6 +126,11 @@ export function OrdersTable({
   customers: CustomerOption[]
 }) {
   const router = useRouter()
+  // Pull initialRange's primitives out so the effect's dep array
+  // references stable scalars (satisfies react-hooks/exhaustive-deps
+  // without depending on the parent's object identity, which would
+  // trigger spurious re-syncs on every parent render).
+  const { from: initialFrom, to: initialTo } = initialRange
   const [orders, setOrders] = useState<OrderRow[]>(initialOrders)
   const [updating, setUpdating] = useState<string | null>(null)
   const [range, setRange] = useState<DateRange>(initialRange)
@@ -135,8 +140,8 @@ export function OrdersTable({
   // hand the new list down via props. The SSE stream then reconnects with the
   // new from/to and replaces the snapshot. Keep both in sync.
   useEffect(() => {
-    setRange(initialRange)
-  }, [initialRange.from, initialRange.to])
+    setRange({ from: initialFrom, to: initialTo })
+  }, [initialFrom, initialTo])
 
   const kind = useMemo(() => detectKind(range), [range])
 
