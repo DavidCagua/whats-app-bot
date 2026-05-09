@@ -896,7 +896,16 @@ def execute_order_intent(
     return a structured result the response generator can consume by result_kind.
     """
     params = params or {}
-    ctx = {**(business_context or {}), "wa_id": wa_id, "business_id": business_id}
+    # ``legacy_bypass`` opts the place_order tool's awaiting_confirmation
+    # guard out for the legacy executor. The legacy path enforces its own
+    # state-machine (CONFIRM/PROCEED_TO_CHECKOUT routing in READY_TO_PLACE)
+    # so the new tool-level interlock would double-gate it.
+    ctx = {
+        **(business_context or {}),
+        "wa_id": wa_id,
+        "business_id": business_id,
+        "legacy_bypass": True,
+    }
     order_context = session.get("order_context") or {}
     current_state = order_context.get("state") or derive_order_state(order_context)
     # Capture any pending disambiguation from the previous turn BEFORE we clear

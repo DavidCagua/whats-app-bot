@@ -106,7 +106,64 @@ class TestAddToCart:
         assert items[0]["quantity"] == 2
         assert session["session"]["order_context"].get("total") == 36000
 
-    # Case: Add same product with different notes — creates separate line item
+    def test_add_twice_same_product_with_same_notes_stacks(self, fake_session, sample_products):
+        """Two adds with identical notes ("sin bbq", "sin bbq") merge
+        into one line at qty=2 — they used to create two separate
+        lines, which made remove_from_cart / update_cart_item awkward
+        (one nuked everything, the other only one of the duplicates).
+        Regression: Biela / 2026-05-09."""
+        mock_product_service = MagicMock()
+        mock_product_service.get_product.return_value = sample_products[0]  # BARRACUDA
+
+        invoke_kw = {
+            "injected_business_context": _make_ctx(),
+            "product_id": "",
+            "product_name": "barracuda",
+            "quantity": 1,
+            "notes": "sin bbq",
+        }
+        with patch("app.services.order_tools.product_order_service", mock_product_service), \
+             patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import add_to_cart
+            add_to_cart.invoke(invoke_kw)
+            add_to_cart.invoke(invoke_kw)
+
+        session = fake_session.load(FAKE_WA_ID, FAKE_BUSINESS_ID)
+        items = session["session"]["order_context"].get("items", [])
+        assert len(items) == 1, (
+            f"expected stacked line, got {len(items)} lines: {items}"
+        )
+        assert items[0]["quantity"] == 2
+        assert items[0]["notes"] == "sin bbq"
+
+    def test_add_twice_same_product_with_different_notes_keeps_two_lines(
+        self, fake_session, sample_products,
+    ):
+        """Different notes → still two separate lines (one with the
+        original note, one with the new). Stacking is by (product_id,
+        notes) tuple, not by product_id alone."""
+        mock_product_service = MagicMock()
+        mock_product_service.get_product.return_value = sample_products[0]
+
+        kw1 = {
+            "injected_business_context": _make_ctx(),
+            "product_id": "",
+            "product_name": "barracuda",
+            "quantity": 1,
+            "notes": "sin bbq",
+        }
+        kw2 = {**kw1, "notes": "sin cebolla"}
+        with patch("app.services.order_tools.product_order_service", mock_product_service), \
+             patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import add_to_cart
+            add_to_cart.invoke(kw1)
+            add_to_cart.invoke(kw2)
+
+        session = fake_session.load(FAKE_WA_ID, FAKE_BUSINESS_ID)
+        items = session["session"]["order_context"].get("items", [])
+        assert len(items) == 2
+        assert {it["notes"] for it in items} == {"sin bbq", "sin cebolla"}
+
     # Case: Add product with quantity > 1
     # Case: Product not found by name → returns ❌ error
     # Case: Quantity < 1 → returns ❌ error
@@ -121,11 +178,114 @@ class TestAddToCart:
 class TestRemoveFromCart:
     """Test the remove_from_cart tool."""
 
-    # Case: Remove by product_id — item removed, total recalculated
-    # Case: Remove by product_name (exact match) — resolves to product_id, removes
-    # Case: Remove by product_name (partial/fuzzy match) — e.g. "coca" matches "COCA COLA"
-    # Case: Product not in cart → returns ❌ "no encontré ese producto"
-    # Case: Remove last item → cart becomes empty, total = 0
+    def _seed_cart(self, fake_session, items):
+        from app.database.session_state_service import session_state_service as real_svc
+        # The fake_session fixture stores by (wa_id, business_id) — write
+        # the seed cart there so remove_from_cart's _cart_from_session sees it.
+        fake_session.save(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+            {"order_context": {"items": items, "total": sum(
+                int(it.get("price", 0)) * int(it.get("quantity", 0)) for it in items
+            )}},
+        )
+
+    def test_remove_entire_product_default_qty(self, fake_session, sample_products):
+        """quantity=0 (default): remove the entire product line (legacy)."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 2},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import remove_from_cart
+            result = remove_from_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_id": "",
+                "product_name": "BARRACUDA",
+            })
+        assert "✅ Producto quitado" in result
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert items == []
+
+    def test_remove_decrement_by_quantity(self, fake_session, sample_products):
+        """quantity=1 on a line at qty=2 should decrement to qty=1."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 2},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import remove_from_cart
+            result = remove_from_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 1,
+            })
+        assert "Quitamos 1" in result
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert len(items) == 1
+        assert items[0]["quantity"] == 1
+
+    def test_remove_decrement_drops_line_at_zero(self, fake_session, sample_products):
+        """quantity equals line qty → drop the line entirely."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 2},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import remove_from_cart
+            remove_from_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 2,
+            })
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert items == []
+
+    def test_remove_decrement_overshoots(self, fake_session, sample_products):
+        """quantity > line qty → drop the line, surface the actual count removed."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 2},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import remove_from_cart
+            result = remove_from_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 5,
+            })
+        assert "Quitamos 2" in result  # only 2 were available
+        assert "no había más" in result
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert items == []
+
+    def test_remove_decrement_cascades_across_notes_lines(self, fake_session, sample_products):
+        """Different notes → separate lines. Decrement cascades from
+        the first matching line into the next when one runs out."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000,
+             "quantity": 1, "notes": "sin bbq"},
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000,
+             "quantity": 2, "notes": "sin cebolla"},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import remove_from_cart
+            remove_from_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 2,
+            })
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        # First line (qty=1, sin bbq) drops; cascades 1 unit into the
+        # second line (qty=2 → 1, sin cebolla) leaving qty=1.
+        assert len(items) == 1
+        assert items[0]["notes"] == "sin cebolla"
+        assert items[0]["quantity"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -135,11 +295,151 @@ class TestRemoveFromCart:
 class TestUpdateCartItem:
     """Test the update_cart_item tool."""
 
-    # Case: Update notes on existing item (quantity stays same)
-    # Case: Update quantity to 0 → item removed
-    # Case: Update quantity to new value
-    # Case: Product not in cart (invalid product_id) → returns ❌
-    # Case: Both notes and quantity=0 → keeps item with new notes (quantity preserved)
+    def _seed_cart(self, fake_session, items):
+        fake_session.save(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+            {"order_context": {"items": items, "total": sum(
+                int(it.get("price", 0)) * int(it.get("quantity", 0)) for it in items
+            )}},
+        )
+
+    def test_update_by_product_id_changes_quantity(self, fake_session, sample_products):
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 2},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import update_cart_item
+            update_cart_item.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_id": "prod-001",
+                "quantity": 1,
+            })
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert len(items) == 1
+        assert items[0]["quantity"] == 1
+        assert items[0]["product_id"] == "prod-001"
+
+    def test_update_by_product_name_resolves_against_cart(
+        self, fake_session, sample_products,
+    ):
+        """The model often passes product_name (especially for the
+        first edit when the UUID isn't in scope). update_cart_item
+        must resolve it against current cart contents."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 2},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import update_cart_item
+            update_cart_item.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 1,
+            })
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert len(items) == 1
+        assert items[0]["quantity"] == 1
+        assert items[0]["product_id"] == "prod-001"  # NOT a phantom 'BARRACUDA' string
+
+    def test_update_refuses_when_product_not_in_cart(
+        self, fake_session, sample_products,
+    ):
+        """Regression: model passed product_id='MONTESA' (a name, not a
+        UUID) and update_cart_item happily appended a new line with
+        name='', price=0. Now it refuses with a clear redirect to
+        add_to_cart instead of creating phantom data."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 1},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import update_cart_item
+            result = update_cart_item.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_id": "MONTESA",  # bogus id (it's a name)
+                "quantity": 1,
+            })
+        assert "no está en el carrito" in result.lower()
+        assert "add_to_cart" in result
+        # Cart unchanged — no phantom line appended.
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert len(items) == 1
+        assert items[0]["product_id"] == "prod-001"
+        assert items[0]["price"] == 18000  # not zeroed out
+
+    def test_update_quantity_zero_removes_item(self, fake_session, sample_products):
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000, "quantity": 1},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import update_cart_item
+            result = update_cart_item.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 0,
+            })
+        assert "Producto quitado" in result
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert items == []
+
+    def test_update_refuses_when_multiple_lines_match_by_name(
+        self, fake_session, sample_products,
+    ):
+        """Cart has 2 MONTESA lines (different notes). User says
+        'solo una montesa'. Model calls update_cart_item(qty=1).
+        Tool must refuse — picking the first match silently and
+        reporting success while the cart total stays unchanged is
+        the 'tool lied' bug (Biela / 2026-05-09)."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000,
+             "quantity": 1, "notes": "sin bbq"},
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000,
+             "quantity": 1},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import update_cart_item
+            result = update_cart_item.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 1,
+            })
+        assert "❌" in result
+        assert "2 líneas" in result
+        assert "remove_from_cart" in result
+        # Cart unchanged — both lines still present
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert len(items) == 2
+
+    def test_update_preserves_existing_notes_when_only_changing_qty(
+        self, fake_session, sample_products,
+    ):
+        """Caller updates qty without passing notes → existing notes
+        survive. Without this, the line would silently lose its notes."""
+        self._seed_cart(fake_session, [
+            {"product_id": "prod-001", "name": "BARRACUDA", "price": 18000,
+             "quantity": 2, "notes": "sin cebolla"},
+        ])
+        with patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import update_cart_item
+            update_cart_item.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_name": "BARRACUDA",
+                "quantity": 1,
+            })
+        items = fake_session.load(
+            FAKE_WA_ID, FAKE_BUSINESS_ID,
+        )["session"]["order_context"]["items"]
+        assert len(items) == 1
+        assert items[0]["quantity"] == 1
+        assert items[0]["notes"] == "sin cebolla"
 
 
 # ---------------------------------------------------------------------------

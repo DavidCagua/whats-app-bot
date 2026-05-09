@@ -33,20 +33,54 @@ class TestIsPureGreeting:
     @pytest.mark.parametrize(
         "msg",
         [
+            # Compound greetings — production trace 2026-05-09 showed
+            # the LLM-only fallback misclassifying these into ``order``.
+            # Deterministic regex must catch them so we don't depend on
+            # prompt fidelity.
+            "hola buenas noches",
+            "hola buenas tardes",
+            "hola buenos días",
+            "hola buenas",
+            "buenas hola",
+            "hola qué tal",
+            "hola que tal",
+            "hola qué más",
+            "buenas qué más",
+            "hey hola",
+            "hola, qué tal",
+            "buenas tardes hola",
+            "hola cómo estás?",
+            "Hola, cómo estás",
+            "hola cómo están",
+            "buenos días qué hubo",
+            "Hola Buenas Noches",
+        ],
+    )
+    def test_compound_greeting_variants_match(self, msg):
+        assert business_greeting.is_pure_greeting(msg) is True
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
             "",
             "   ",
             None,
             "hola quiero una barracuda",
-            "hola cómo estás?",
             "buenas, a qué hora abren",
             "quiero pedir",
             "dame una coca",
-            "hola cómo están",
             "tienes barracuda",
             "a qué hora abren",
             # Greeting + emoji / extra word should NOT fast-path either.
             "hola 😊",
             "hola amigo",
+            "hola un domicilio",
+            "buenas tardes una hamburguesa",
+            "hola necesito ayuda",
+            # Greeting prefix + product / question — the substantive
+            # half decides routing, not the greeting.
+            "buenos días tienen barracuda",
+            "hola, qué precio tiene la picada",
         ],
     )
     def test_non_pure_greeting_rejected(self, msg):

@@ -321,6 +321,7 @@ class ProductOrderService:
         payment_method: Optional[str] = None,
         customer_name: Optional[str] = None,
         delivery_fee: float = 0.0,
+        fulfillment_type: str = "delivery",
     ) -> Dict[str, Any]:
         """
         Create an order with line items and delivery info.
@@ -336,6 +337,11 @@ class ProductOrderService:
             payment_method: Payment method for this order
             customer_name: Customer name for order; used when creating/updating customer
             delivery_fee: Delivery fee to add to the order total (default 0)
+            fulfillment_type: 'delivery' (default) or 'pickup'. Pickup orders
+                skip the delivery fee unconditionally — even if a non-zero
+                ``delivery_fee`` is passed, the caller's intent is "pickup
+                at store" and the fee is dropped. Persisted on the order
+                row for reporting and the admin filter.
 
         Returns:
             {"success": True, "order_id": "uuid", "subtotal": float, "total": float} or {"success": False, "error": str}
@@ -343,6 +349,10 @@ class ProductOrderService:
         try:
             if not items:
                 return {"success": False, "error": "El pedido está vacío"}
+
+            ftype = (fulfillment_type or "delivery").strip().lower()
+            if ftype not in ("delivery", "pickup"):
+                return {"success": False, "error": f"fulfillment_type inválido: {fulfillment_type!r}"}
 
             db_session = get_db_session()
             order_items_data = []
@@ -422,13 +432,15 @@ class ProductOrderService:
                     source="auto",
                 )
 
-            grand_total = subtotal + float(delivery_fee)
+            effective_delivery_fee = 0.0 if ftype == "pickup" else float(delivery_fee)
+            grand_total = subtotal + effective_delivery_fee
 
             order = Order(
                 business_id=uuid.UUID(business_id),
                 customer_id=customer_id,
                 whatsapp_id=whatsapp_id,
                 status=STATUS_PENDING,
+                fulfillment_type=ftype,
                 total_amount=grand_total,
                 promo_discount_amount=promo_discount,
                 notes=notes,
@@ -467,8 +479,9 @@ class ProductOrderService:
 
             logger.info(
                 f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, "
-                f"subtotal={subtotal}, promo_discount={promo_discount}, "
-                f"delivery_fee={delivery_fee}, total={grand_total}, "
+                f"fulfillment_type={ftype}, subtotal={subtotal}, "
+                f"promo_discount={promo_discount}, "
+                f"delivery_fee={effective_delivery_fee}, total={grand_total}, "
                 f"applied_promos={len(applications)}, address={bool(delivery_address)}"
             )
             return {

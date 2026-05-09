@@ -126,6 +126,11 @@ export function OrdersTable({
   customers: CustomerOption[]
 }) {
   const router = useRouter()
+  // Pull initialRange's primitives out so the effect's dep array
+  // references stable scalars (satisfies react-hooks/exhaustive-deps
+  // without depending on the parent's object identity, which would
+  // trigger spurious re-syncs on every parent render).
+  const { from: initialFrom, to: initialTo } = initialRange
   const [orders, setOrders] = useState<OrderRow[]>(initialOrders)
   const [updating, setUpdating] = useState<string | null>(null)
   const [range, setRange] = useState<DateRange>(initialRange)
@@ -135,8 +140,8 @@ export function OrdersTable({
   // hand the new list down via props. The SSE stream then reconnects with the
   // new from/to and replaces the snapshot. Keep both in sync.
   useEffect(() => {
-    setRange(initialRange)
-  }, [initialRange.from, initialRange.to])
+    setRange({ from: initialFrom, to: initialTo })
+  }, [initialFrom, initialTo])
 
   const kind = useMemo(() => detectKind(range), [range])
 
@@ -461,6 +466,7 @@ export function OrdersTable({
             <TableHead>Pago</TableHead>
             <TableHead>Ítems</TableHead>
             <TableHead>Total</TableHead>
+            <TableHead>Notas</TableHead>
             <TableHead>Estado</TableHead>
             <TableHead>Acciones</TableHead>
           </TableRow>
@@ -469,7 +475,7 @@ export function OrdersTable({
           {orders.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={10}
+                colSpan={11}
                 className="text-center text-muted-foreground py-8"
               >
                 No hay pedidos en este rango.
@@ -508,9 +514,19 @@ export function OrdersTable({
                   </TableCell>
                   <TableCell>{capitalize(order.customer_name)}</TableCell>
                   <TableCell className="max-w-[220px] whitespace-normal break-words align-top">
-                    {capitalize(order.delivery_address)}
+                    {order.fulfillment_type === "pickup" ? (
+                      <Badge variant="secondary" className="font-normal">
+                        🏃 Recoger en local
+                      </Badge>
+                    ) : (
+                      capitalize(order.delivery_address)
+                    )}
                   </TableCell>
-                  <TableCell>{capitalize(order.payment_method)}</TableCell>
+                  <TableCell>
+                    {order.fulfillment_type === "pickup"
+                      ? "—"
+                      : capitalize(order.payment_method)}
+                  </TableCell>
                   <TableCell className="text-sm align-top">
                     {order.items.length > 0
                       ? order.items.map((item) => (
@@ -540,12 +556,17 @@ export function OrdersTable({
                     <div className="text-xs text-muted-foreground">
                       Subtotal: {formatAmount(order.subtotal)}
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      Domicilio: {formatAmount(order.delivery_fee)}
-                    </div>
+                    {order.fulfillment_type !== "pickup" && (
+                      <div className="text-xs text-muted-foreground">
+                        Domicilio: {formatAmount(order.delivery_fee)}
+                      </div>
+                    )}
                     <div className="font-medium">
                       Total: {formatAmount(order.total_amount)}
                     </div>
+                  </TableCell>
+                  <TableCell className="max-w-[220px] whitespace-normal break-words align-top text-sm">
+                    {order.notes ?? "—"}
                   </TableCell>
                   <TableCell>
                     <Select

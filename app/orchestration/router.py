@@ -260,6 +260,65 @@ Responde SOLO con JSON en esta forma exacta, sin markdown, sin explicación:
 """
 
 
+# ── Context-first router prompt (v2 redesign) ───────────────────────
+#
+# This prompt replaces the v1 enumerative-rules approach with a
+# context-first framing: the model is asked to decide using the
+# conversation flow (last assistant turn + current user turn),
+# disambiguating only on a small set of genuine domain-knowledge rules
+# rather than long keyword lists. See
+# tests/evals/test_router_classification.py for the regression gate.
+#
+# Activated by setting ``settings.router_prompt_mode = "context_first"``
+# on a per-business basis. Default remains v1 until shadow-deploy
+# diff-checks pass.
+_ROUTER_SYSTEM_PROMPT_V2 = """Eres el router de un bot de WhatsApp para un restaurante. Tu trabajo es leer el mensaje del cliente — junto con la última respuesta del bot y el estado del pedido — y decidir a qué dominio pertenece. La mayoría de los mensajes son UN solo segmento; divide en varios solo cuando el cliente exprese DOS o más intenciones independientes en el mismo turno.
+
+CONTEXTO QUE RECIBES (úsalo como señal primaria):
+- Estado del pedido: GREETING / ORDERING / COLLECTING_DELIVERY / READY_TO_PLACE
+- Carrito actual (vacío o con items)
+- Último pedido (estado): pending / confirmed / out_for_delivery / completed / cancelled — solo si hay uno reciente.
+- Última respuesta del bot (literal).
+- Mensaje del cliente.
+
+DOMINIOS:
+- "order": el cliente está en el funnel de pedido — explorar el menú, preguntar por productos del catálogo (existencia, ingredientes, precio), agregar/quitar/modificar items, dar datos de entrega, confirmar el pedido. También: abrir la conversación con intención de pedir ("para un domicilio", "quiero pedir") sin mencionar producto todavía.
+- "customer_service": el cliente pide INFORMACIÓN del negocio (horarios, ubicación, política de domicilio, medios de pago, link del menú) o pregunta por sus pedidos pasados/actuales (estado, cancelar uno ya confirmado, historial). También: discovery de promos como información ("¿qué promos tienen?").
+- "greeting": el mensaje es ÚNICAMENTE un saludo, sin contenido sustantivo. Si añade pregunta o producto, NO es greeting.
+- "chat": pequeña conversación general sin tema claro de los otros dominios. NO uses chat cuando el mensaje sea un follow-up a una respuesta de customer_service o order — esos siguen en su dominio.
+
+CÓMO DECIDIR (regla central — sigue este orden):
+1. Lee la **última respuesta del bot** Y el **mensaje del cliente** juntos. Pregúntate: ¿es FOLLOW-UP (responde a lo que el bot acaba de decir) o CAMBIO DE TEMA (nueva intención independiente)?
+2. Si el mensaje contiene un trigger CLARO de un dominio (verbo de pedir + producto, pregunta interrogativa sobre datos del negocio, etc.) → ese dominio gana, sin importar el follow-up.
+3. Si es follow-up corto / ambiguo (ack, agradecimiento, pregunta breve relacionada al tema previo) → MANTÉN el dominio del turno anterior:
+    * Si el bot habló de un dato CS (horarios, dirección, política de pago, política de domicilio, link del menú, estado de un pedido pasado) → cualquier follow-up corto del cliente ("ok", "ah ya", "vale", "gracias", "entiendo", "perfecto", "y cuánto X", "y la dirección") sigue siendo customer_service.
+    * Si el bot estaba en el flujo de pedido (mostrando carrito, pidiendo datos, preguntando ¿procedemos?) → follow-ups cortos siguen en order.
+4. Si no hay contexto previo claro y el mensaje es genuinamente ambiguo → "chat".
+
+DOMAIN KNOWLEDGE (cosas específicas del negocio que el modelo no puede inferir):
+- "tienen X?" donde X es un PRODUCTO/PLATO/BEBIDA → order (browsing). Aplica con typos y descripciones ("la del concurso", "la famosa") — el backend hace fuzzy match.
+- "tienen X?" donde X es un SERVICIO/DATO (estacionamiento, wifi, domicilio como política, horarios) → customer_service.
+- PRECIO de un producto NOMBRADO ("cuánto vale la barracuda", "una picada qué valor") → order. Precio/política sin producto nombrado ("cuánto cuesta el domicilio", "valor del envío") → customer_service.
+- VERBOS DE PEDIR — "dame", "regálame", "me regalan", "tráeme", "ponme", "agrégame", "una/un X" + producto, "quiero X" → order. Aplica también con saludo prefijo: "Hola, me regalan una hamburguesa" → order.
+- "para un domicilio" / "quiero pedir" sin verbo interrogativo → order (apertura). CON interrogativo sobre costo de envío → customer_service.
+- CANCELAR (depende del estado, NO del verbo):
+    * Carrito activo (state ORDERING/COLLECTING_DELIVERY/READY_TO_PLACE con items) → order (abandona el carrito; "cancela", "anula", "quítalo todo", "no quiero ya" todos van aquí).
+    * Sin carrito + pedido confirmado pendiente → customer_service (cancelación post-venta).
+    * Sin carrito + sin pedido pendiente → customer_service (responde "no hay pedido por cancelar").
+- NEGATIVOS DURANTE CHECKOUT — estado ORDERING/COLLECTING_DELIVERY/READY_TO_PLACE con carrito Y bot acaba de preguntar "¿algo más?" / "¿procedemos?" / "¿confirmamos?" → order ("no más", "eso es todo", "nada más" cierran el carrito, NO cancelan).
+- DESPEDIDAS POST-PEDIDO — carrito vacío Y Último pedido reciente (pending/confirmed/etc.): cualquier mensaje del cliente que sea acuse de recibo o despedida ("gracias", "vale gracias", "perfecto", "ok", "dale", "listo", "muchas gracias", "dale espero entonces", "bueno gracias") → order. El order agent maneja la despedida acorde al pedido. Solo NO clasifiques como order si el mensaje pregunta explícitamente por información del negocio o por el estado del pedido.
+
+SEGMENTACIÓN:
+- UNA intención → UN segmento.
+- Varios productos en un solo pedido → UN solo segmento order.
+- Dos intenciones de DOMINIOS DIFERENTES → segmentos separados (máx 3).
+- Saludo prefijo (Hola, Buenas, Buenos días) NUNCA cambia el dominio — es contexto. Clasifica por la intención DESPUÉS del saludo.
+
+SALIDA — SOLO JSON, sin markdown, sin explicación:
+{"segments": [{"domain": "order" | "customer_service" | "chat" | "greeting", "text": "..."}]}
+"""
+
+
 _llm_classifier = None
 
 
@@ -360,16 +419,46 @@ def _classify_with_llm(
 
     if ctx is None:
         ctx = TurnContext()
-    user_payload = (
-        f"CONTEXTO:\n{render_for_prompt(ctx)}\n\n"
-        f"Mensaje: {message_body}"
-    )
+
+    # Pick the system prompt: per-business override via
+    # settings.router_prompt_mode = "context_first" lets us run the
+    # v2 redesign against a real business while v1 stays the default
+    # everywhere else. Eval suite forces v2 explicitly so we can
+    # measure the redesign in isolation.
+    settings = ((business_context or {}).get("business") or {}).get("settings") or {}
+    prompt_mode = str(settings.get("router_prompt_mode") or "v1").strip().lower()
+    is_v2 = prompt_mode in ("context_first", "v2")
+    system_prompt = _ROUTER_SYSTEM_PROMPT_V2 if is_v2 else _ROUTER_SYSTEM_PROMPT
+
+    # Payload format must match what the system prompt describes. v1
+    # prompt explicitly references a "CONTEXTO" block ("Recibes en el
+    # mensaje del usuario un bloque \"CONTEXTO\" con: ..."); v2 uses
+    # the explicit ESTADO/MENSAJE markers it was designed for. Sending
+    # one shape with the other prompt confused the LLM enough to
+    # misclassify compound greetings (production trace 2026-05-09:
+    # "hola buenas noches" routed to order). Keep both paths behaving
+    # exactly as their prompts specify.
+    if is_v2:
+        user_payload = (
+            "===== ESTADO Y HISTORIAL DEL TURNO =====\n"
+            "(lo que YA pasó antes de este turno)\n\n"
+            f"{render_for_prompt(ctx)}\n"
+            "===== FIN DEL ESTADO =====\n\n"
+            "[MENSAJE ACTUAL DEL CLIENTE — procesa SOLO este mensaje; "
+            "los anteriores en ESTADO son historial]\n"
+            f"Mensaje: {message_body}"
+        )
+    else:
+        user_payload = (
+            f"CONTEXTO:\n{render_for_prompt(ctx)}\n\n"
+            f"Mensaje: {message_body}"
+        )
 
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
         response = llm.invoke(
             [
-                SystemMessage(content=_ROUTER_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=user_payload),
             ],
             config={

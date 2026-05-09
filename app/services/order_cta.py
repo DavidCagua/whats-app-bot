@@ -49,19 +49,30 @@ def _summary_block(delivery_status: dict) -> str:
     # 21656), so we join fields with " | " and let the template body
     # provide its own line breaks around {{1}}. Total is omitted on
     # purpose — the cart total already appeared in the previous turn.
+    # Pickup variant collapses to "Nombre + Modo" — address / phone /
+    # pago don't apply since the customer is walking in.
+    ftype = (delivery_status.get("fulfillment_type") or "delivery").strip().lower()
     parts: list[str] = []
     name = (delivery_status.get("name") or "").strip()
+    notes = (delivery_status.get("notes") or "").strip()
+    if name:
+        parts.append(f"*Nombre:* {name}")
+    if ftype == "pickup":
+        parts.append("*Modo:* 🏃 Recoger en local")
+        if notes:
+            parts.append(f"*Notas:* {notes}")
+        return " | ".join(parts)
     address = (delivery_status.get("address") or "").strip()
     phone = (delivery_status.get("phone") or "").strip()
     payment = (delivery_status.get("payment_method") or "").strip()
-    if name:
-        parts.append(f"*Nombre:* {name}")
     if address:
         parts.append(f"*Dirección:* {address}")
     if phone:
         parts.append(f"*Teléfono:* {phone}")
     if payment:
         parts.append(f"*Pago:* {payment}")
+    if notes:
+        parts.append(f"*Notas:* {notes}")
     return " | ".join(parts)
 
 

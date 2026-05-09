@@ -21,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     MetaData,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY, ENUM as PgEnum
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
@@ -66,6 +67,17 @@ class Business(Base):
     name = Column(String(255), nullable=False)
     business_type = Column(String(50), default='barberia')
     settings = Column(JSONB, default={})
+    # Optional admin-console modules each business has access to. Required
+    # modules (overview, inbox, team/access, settings) aren't stored — they
+    # are always available. Owned by migration f1a3b6c2d8e9; mirrored here
+    # so alembic autogenerate doesn't drift.
+    enabled_modules = Column(
+        ARRAY(Text),
+        nullable=False,
+        server_default=text(
+            "ARRAY['bookings', 'orders', 'products', 'promotions', 'services', 'staff']::text[]"
+        ),
+    )
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
@@ -85,6 +97,7 @@ class Business(Base):
             'name': self.name,
             'business_type': self.business_type,
             'settings': self.settings,
+            'enabled_modules': list(self.enabled_modules) if self.enabled_modules else [],
             'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -570,6 +583,7 @@ class Order(Base):
     customer_id = Column(Integer, ForeignKey('customers.id', ondelete='SET NULL'), nullable=True, index=True)
     whatsapp_id = Column(String(50), nullable=True)
     status = Column(order_status_enum, nullable=False, default='pending', server_default='pending', index=True)
+    fulfillment_type = Column(Text, nullable=False, default='delivery', server_default='delivery', index=True)
     total_amount = Column(Numeric(12, 2), nullable=False, default=0)
     notes = Column(Text, nullable=True)
     delivery_address = Column(Text, nullable=True)
@@ -593,6 +607,7 @@ class Order(Base):
             'customer_id': self.customer_id,
             'whatsapp_id': self.whatsapp_id,
             'status': self.status,
+            'fulfillment_type': self.fulfillment_type or 'delivery',
             'total_amount': float(self.total_amount) if self.total_amount else 0,
             'notes': self.notes,
             'delivery_address': self.delivery_address,

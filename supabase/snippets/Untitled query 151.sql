@@ -29,5 +29,6 @@ WHERE whatsapp_id IN ('+573177000722', '573177000722');
 SELECT 'conversation_sessions_after' AS label, COUNT(*) AS total
 FROM conversation_sessions
 WHERE wa_id IN ('+573177000722', '573177000722');
-
+DELETE FROM customers
+WHERE whatsapp_id IN ('+573177000722', '573177000722');
 COMMIT;

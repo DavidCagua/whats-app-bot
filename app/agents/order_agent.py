@@ -286,15 +286,63 @@ def _format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
             parts.append(
                 "Métodos de pago aceptados: "
                 + ", ".join(cleaned_methods)
-                + ". NO aceptes otros métodos. Si el cliente menciona uno distinto "
-                "(ej. Nequi, DaviPlata, tarjeta, PayPal) y no está en la lista, "
-                "OMITE el campo `payment_method` del SUBMIT_DELIVERY_INFO — "
-                "el negocio rechazará el método y le pediremos al cliente que "
-                "elija uno permitido."
+                + ". Cuando el cliente indique su método de pago, EMPAREJA su "
+                "texto contra esta lista de forma flexible (case-insensitive, "
+                "fragmentos, abreviaturas, errores de tipeo razonables) y pasa "
+                "el NOMBRE CANÓNICO de la lista al campo `payment_method` de "
+                "submit_delivery_info. Ejemplos: 'breb' o 'bre' → 'Llave BreB'; "
+                "'efe' o 'cash' → 'efectivo'; 'transf' o 'transferencia bancaria' "
+                "→ 'transferencia'; 'nequi' (cualquier capitalización) → 'Nequi'. "
+                "Solo OMITE el campo `payment_method` cuando el cliente mencione "
+                "EXPLÍCITAMENTE un método que claramente NO está en la lista "
+                "(ej. PayPal, tarjeta de crédito) y no haya overlap razonable con "
+                "ningún canónico — entonces emite delivery_info_collected con la "
+                "lista canónica en facts para que el cliente elija."
             )
     ai_prompt = (settings.get("ai_prompt") or "").strip()
     if ai_prompt:
         parts.append("IMPORTANTE: Reglas y contexto del negocio (usa para preguntas sobre combos, hamburguesas con papas, etc.):\n" + ai_prompt)
+    # Universal pickup-vs-delivery rules. Surfaced for every business —
+    # not behind a per-business flag — so the model has one consistent
+    # mental model. Default is delivery; pickup is set only when the
+    # customer explicitly signals it. Switching is symmetric.
+    parts.append(
+        "Modos de cumplimiento disponibles:\n"
+        "- 🛵 Domicilio (default): se requiere nombre, dirección, teléfono y medio de pago.\n"
+        "- 🏃 Recoger en local (pickup): se requiere SOLO el nombre. El número de WhatsApp "
+        "cubre el teléfono y el pago se hace en el local.\n"
+        "El modo activo está visible en \"Modo:\" del bloque ESTADO Y HISTORIAL DEL TURNO. "
+        "El cliente comienza en domicilio por default. Cambia a pickup ÚNICAMENTE cuando el "
+        "cliente lo indique explícitamente con frases como: \"lo recojo\", \"paso a recoger\", "
+        "\"para recoger\", \"en sitio\", \"en el local\", \"para llevar\", \"recogida\". "
+        "En ese caso llama submit_delivery_info(fulfillment_type='pickup', name=<si lo dijo>) "
+        "— NO pidas dirección ni medio de pago. Cambia de vuelta a domicilio si el cliente "
+        "dice \"no, mejor domicilio\", \"envíenmelo\", \"para domicilio\" pasando "
+        "submit_delivery_info(fulfillment_type='delivery')."
+    )
+    out_of_zone = settings.get("out_of_zone_delivery_contacts") or []
+    if isinstance(out_of_zone, list) and out_of_zone:
+        rows: list[str] = []
+        for entry in out_of_zone:
+            if not isinstance(entry, dict):
+                continue
+            city = (entry.get("city") or "").strip()
+            phone = (entry.get("phone") or "").strip()
+            if city and phone:
+                rows.append(f"- {city} → contacto: {phone}")
+        if rows:
+            parts.append(
+                "Zonas FUERA de cobertura de domicilio (NO atendemos pedidos a estas ciudades; "
+                "el cliente debe escribir al número listado):\n"
+                + "\n".join(rows)
+                + "\n\nSi el cliente pide hacer un pedido o domicilio a una de estas "
+                "ciudades (lo dice en la dirección, en el destino, o explícitamente "
+                "'a Ipiales', 'para X', 'envíen a Y'), NO recolectes datos de entrega "
+                "ni intentes crear el pedido. Llama "
+                "respond(kind='out_of_scope', summary='out_of_zone:<ciudad>', "
+                "facts=['city:<ciudad>', 'phone:<numero>']) — el sistema redirigirá "
+                "al cliente al número correspondiente."
+            )
     if not parts:
         return "Información del negocio: (no configurada)."
     return "Información del negocio:\n" + "\n".join(parts)
@@ -696,7 +744,20 @@ class OrderAgent(BaseAgent):
     def __init__(self):
         self._llm = None
         self._planner_llm = None
+        self._v2_agent = None
         logging.info("[ORDER_AGENT] Initialized with planner + executor + response generator (LLM lazy)")
+
+    def _tool_calling_agent(self):
+        """
+        Lazy-init the tool-calling agent. Only constructed for businesses
+        that opt in via settings.order_agent_mode='tool_calling'. Singleton
+        per OrderAgent instance; the registry already singletons OrderAgent
+        itself.
+        """
+        if self._v2_agent is None:
+            from .order_agent_tool_calling import OrderAgentToolCalling
+            self._v2_agent = OrderAgentToolCalling()
+        return self._v2_agent
 
     @property
     def llm(self) -> ChatOpenAI:
@@ -1481,6 +1542,29 @@ class OrderAgent(BaseAgent):
         **kwargs,
     ) -> AgentOutput:
         """Planner (intent) -> executor (one tool) -> response generator from actual tool result and cart."""
+        # Feature-flag delegation to the tool-calling agent. Opt-in per
+        # business via settings.order_agent_mode = "tool_calling"; the
+        # default ("legacy" / unset) keeps the planner+executor path.
+        # See docs/order-agent-rearchitecture-plan.md for context.
+        try:
+            settings = ((business_context or {}).get("business") or {}).get("settings") or {}
+            mode = str(settings.get("order_agent_mode") or "legacy").strip().lower()
+        except Exception:
+            mode = "legacy"
+        if mode == "tool_calling":
+            return self._tool_calling_agent().execute(
+                message_body=message_body,
+                wa_id=wa_id,
+                name=name,
+                business_context=business_context,
+                conversation_history=conversation_history,
+                message_id=message_id,
+                session=session,
+                stale_turn=stale_turn,
+                abort_key=abort_key,
+                **kwargs,
+            )
+
         run_id = str(uuid.uuid4())
         start_time = time.time()
         business_id = business_context.get("business_id") if business_context else None

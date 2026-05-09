@@ -777,25 +777,67 @@ class CustomerServiceAgent(BaseAgent):
                 "state_update": {},
             }
 
-        # 1) Planner
-        history_text = ""
-        # Uniform 10-msg window across router / order planner / CS planner
-        # so every layer sees the same stateful view of the conversation.
-        # Operator-typed messages get a distinct label ("operator (human)")
-        # so the planner doesn't treat them as the bot's prior turn.
-        for msg in (conversation_history or [])[-10:]:
-            role = msg.get("role", "")
-            agent_type = (msg.get("agent_type") or "").strip().lower()
-            if role == "assistant" and agent_type == "operator":
-                role = "operator (human)"
-            content = (msg.get("content") or msg.get("message", ""))[:180]
-            history_text += f"{role}: {content}\n"
+        # 0b) Out-of-zone delivery redirect. Order agent hands off here
+        # with reason="out_of_zone" + city/phone when the customer asks
+        # to order/deliver to a city listed in
+        # ``business.settings.out_of_zone_delivery_contacts``. We render
+        # a polished, deterministic redirect — no LLM, no hallucinated
+        # phone numbers.
+        if (handoff_context.get("reason") or "").strip() == "out_of_zone":
+            city = (handoff_context.get("city") or "").strip()
+            phone = (handoff_context.get("phone") or "").strip()
+            logging.warning(
+                "[OUT_OF_ZONE] business=%s wa_id=%s CS handling redirect "
+                "city=%s phone=%s",
+                business_id, wa_id, city, phone,
+            )
+            if city and phone:
+                message = (
+                    f"📍 Por ahora no tenemos cobertura de domicilio en *{city}*.\n\n"
+                    f"Para tu pedido en esa zona, escríbele directamente a "
+                    f"este WhatsApp 👉 *{phone}*\n\n"
+                    "¡Allá te atienden con todo! 🙌"
+                )
+            else:
+                message = (
+                    "📍 Por ahora no tenemos cobertura de domicilio en esa zona. "
+                    "¿Te puedo ayudar con algo más?"
+                )
+            try:
+                conversation_service.store_conversation_message(
+                    wa_id, message, "assistant", business_id=business_id,
+                )
+            except Exception as exc:
+                logging.error(
+                    "[OUT_OF_ZONE] business=%s wa_id=%s persist failed: %s",
+                    business_id, wa_id, exc,
+                )
+            tracer.end_run(
+                run_id, success=True,
+                latency_ms=(time.time() - start_time) * 1000,
+            )
+            return {
+                "agent_type": self.agent_type,
+                "message": message,
+                "state_update": {},
+            }
 
+        # 1) Planner
+        # Unified context block — same shape every layer (router /
+        # order / CS) sees. render_for_prompt now includes recent
+        # history with role labels, so we don't render it separately.
+        # Avoids the prior double-rendering and ensures operator turns
+        # are labeled identically across layers.
         ctx_block = ""
         if turn_ctx is not None:
             try:
                 from ..orchestration.turn_context import render_for_prompt as _render_ctx
-                ctx_block = f"CONTEXTO:\n{_render_ctx(turn_ctx, include_last_assistant=False)}\n\n"
+                ctx_block = (
+                    "===== ESTADO Y HISTORIAL DEL TURNO =====\n"
+                    "(lo que YA pasó antes de este turno)\n\n"
+                    + _render_ctx(turn_ctx)
+                    + "\n===== FIN DEL ESTADO =====\n\n"
+                )
             except Exception:
                 ctx_block = ""
 
@@ -804,7 +846,9 @@ class CustomerServiceAgent(BaseAgent):
             HumanMessage(
                 content=(
                     f"{ctx_block}"
-                    f"Historial reciente:\n{history_text}\n"
+                    "[MENSAJE ACTUAL DEL CLIENTE — procesa SOLO este "
+                    "mensaje en este turno; los anteriores en CONTEXTO "
+                    "son historial]\n"
                     f"Usuario: {message_body}\n\n"
                     "Responde solo con JSON: intent y params."
                 )
