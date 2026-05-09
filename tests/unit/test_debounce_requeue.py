@@ -512,6 +512,10 @@ class TestFlusherWaitsForInflight:
         # Drain returns no messages → flusher exits cleanly after the wait.
         drain_script = MagicMock(return_value=[])
         r.register_script.return_value = drain_script
+        # llen mocked at 0 (no buffer growth → no window extensions).
+        # Tests after the adaptive-backoff change: window stays at the
+        # initial size since no new message arrives during the wait.
+        r.llen.return_value = 0
 
         # exists() consumes from the sequence; subsequent calls reuse last.
         sequence_iter = iter(exists_sequence)
@@ -530,33 +534,49 @@ class TestFlusherWaitsForInflight:
 
         with patch.object(debounce, "_get_redis", return_value=r), \
              patch.object(debounce.time, "sleep", fake_sleep), \
-             patch.object(debounce.time, "time", fake_time):
+             patch.object(debounce.time, "time", fake_time), \
+             patch.object(debounce, "_read_requeue_count", return_value=0):
             debounce._flush("+573177000722", "whatsapp:+14155238886", flask_app)
 
         return r, sleeps, exists_calls
 
     def test_waits_for_proc_key_before_draining(self):
-        """proc_key True then False → poll, then drain."""
+        """proc_key True then False → poll, then drain. After the
+        adaptive-backoff change, the debounce window is now a polling
+        loop (multiple sleeps of _BACKOFF_POLL_INTERVAL summing to
+        DEBOUNCE_SECONDS) instead of a single time.sleep — but the
+        downstream contract (poll proc_key, drain when clear) is the
+        same."""
         r, sleeps, exists_calls = self._drive_flush_with_inflight(
             exists_sequence=[True, True, True, False],
         )
-        # First sleep is the debounce window itself.
-        assert sleeps[0] == debounce.DEBOUNCE_SECONDS
-        # Subsequent sleeps are poll intervals while waiting.
-        assert all(
-            s == debounce._INFLIGHT_POLL_INTERVAL for s in sleeps[1:]
-        ), sleeps[1:]
-        # We must have polled proc_key at least once and proceeded once
-        # it cleared (4 polls: 3 True + 1 False).
+        # Split sleeps at the boundary: backoff-window sleeps come
+        # first (each <= _BACKOFF_POLL_INTERVAL); inflight-poll sleeps
+        # come after (each == _INFLIGHT_POLL_INTERVAL).
+        backoff_sleeps = [
+            s for s in sleeps if s != debounce._INFLIGHT_POLL_INTERVAL
+        ]
+        inflight_sleeps = [
+            s for s in sleeps if s == debounce._INFLIGHT_POLL_INTERVAL
+        ]
+        # Backoff sleeps total ≈ DEBOUNCE_SECONDS within one poll tick.
+        assert abs(sum(backoff_sleeps) - debounce.DEBOUNCE_SECONDS) <= debounce._BACKOFF_POLL_INTERVAL
+        # We polled the proc_key sequence to completion.
+        assert inflight_sleeps, "expected at least one inflight poll sleep"
         assert len(exists_calls) >= 4
 
     def test_drains_immediately_when_no_inflight(self):
-        """proc_key starts cleared → no polling, no extra sleeps."""
+        """proc_key starts cleared → no inflight polling sleeps after
+        the backoff window."""
         r, sleeps, exists_calls = self._drive_flush_with_inflight(
             exists_sequence=[False],
         )
-        # Only the debounce-window sleep, no poll sleeps.
-        assert sleeps == [debounce.DEBOUNCE_SECONDS]
+        # All sleeps should be backoff polls (no inflight polls).
+        assert all(
+            s != debounce._INFLIGHT_POLL_INTERVAL for s in sleeps
+        ), f"unexpected inflight poll sleep: {sleeps}"
+        # And they sum to ≈ DEBOUNCE_SECONDS.
+        assert abs(sum(sleeps) - debounce.DEBOUNCE_SECONDS) <= debounce._BACKOFF_POLL_INTERVAL
         # One exists check is enough — it returned False.
         assert len(exists_calls) == 1
 

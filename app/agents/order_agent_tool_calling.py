@@ -366,6 +366,38 @@ class OrderAgentToolCalling(BaseAgent):
             # prompt + add eval cases — not another keyword list.
 
             for iteration in range(MAX_ITERATIONS):
+                # Mid-loop abort check. Mirrors v1's between-planner-and-
+                # executor check (order_agent.py:1863). Each LLM iteration
+                # is the v2 equivalent of a planner step; if a newer user
+                # message arrived during the previous iteration, halt now,
+                # requeue the in-flight text so the next debounce flusher
+                # coalesces it with the newcomer, and return __ABORTED__.
+                # The dispatcher consumes this as a clean abort and the
+                # caller skips the send.
+                if abort_key:
+                    from ..services.debounce import (
+                        check_abort,
+                        clear_abort,
+                        requeue_aborted_text,
+                    )
+                    if check_abort(abort_key):
+                        clear_abort(abort_key)
+                        requeue_aborted_text(abort_key, message_body)
+                        logging.warning(
+                            "[ABORT] %s: v2 abort detected at iteration=%d — "
+                            "requeued for next flush",
+                            wa_id, iteration,
+                        )
+                        tracer.end_run(
+                            run_id, success=False,
+                            latency_ms=(time.time() - start_time) * 1000,
+                        )
+                        return {
+                            "agent_type": self.agent_type,
+                            "message": "__ABORTED__",
+                            "state_update": {},
+                        }
+
                 response = self.llm.invoke(
                     messages,
                     config={

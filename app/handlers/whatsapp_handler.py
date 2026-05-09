@@ -23,7 +23,7 @@ from app.utils.whatsapp_utils import (
 )
 
 
-def process_whatsapp_message(body, business_context=None, abort_key=None, stale_turn=False):
+def process_whatsapp_message(body, business_context=None, abort_key=None, stale_turn=False, skip_persist=False):
     """
     Process incoming WhatsApp message: parse, persist, optionally run agent and send reply.
     Voice-only messages are persisted and enqueued; reply is sent later when transcript is ready.
@@ -33,11 +33,26 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
             message arrived during processing and this response should be dropped.
         stale_turn: True when this message was queued behind another turn —
             the user sent it before seeing the bot's previous reply.
+        skip_persist: True when this invocation comes from the abort+requeue
+            path (debounce.requeue_aborted_text). The user message was
+            already persisted by the original webhook's first flush —
+            re-persisting here would create duplicate `role='user'` rows
+            for one Twilio inbound.
+
+    Returns:
+        bool: True iff the turn aborted (mid-turn abort signal or
+            pre-send abort gate fired). The debounce flusher uses this
+            to decide whether to reset the requeue-count backoff
+            counter — a turn that aborted should NOT reset the counter
+            (the counter exists precisely because of the abort). Defaults
+            to False on every non-agent path (early returns, voice-only,
+            attachments-only) so callers see the conservative answer.
     """
     overall_start = time.time()
     # Fresh per-turn memoization cache. Eliminates 2-4x redundant reads
     # of session / customer / product search across order_flow layers.
     turn_cache.begin_turn()
+    was_aborted = False
     try:
         logging.warning("[DEBUG] ========== PROCESSING MESSAGE ==========")
         provider = "twilio" if (business_context or {}).get("provider") == "twilio" else "meta"
@@ -67,7 +82,15 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
         inferred_whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
 
         try:
-            if attachments:
+            if skip_persist:
+                # Requeue path: text was already persisted by the original
+                # webhook's first flush. Skip persist + media-job re-enqueue
+                # (the original conv_id already has the media job queued).
+                logging.warning(
+                    "[CONVERSATION] %s: skip_persist=True (requeue path) — not re-storing user message",
+                    wa_id,
+                )
+            elif attachments:
                 conv_id = conversation_service.store_conversation_message_with_attachments(
                     wa_id=wa_id,
                     message_text=message_body,
@@ -129,7 +152,7 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
         if not agent_allowed:
             return
 
-        _run_agent_and_send(
+        _send_ok, was_aborted = _run_agent_and_send(
             wa_id=wa_id,
             message_body=message_body,
             name=name,
@@ -145,6 +168,7 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
         logging.error(traceback.format_exc())
     finally:
         logging.warning(f"[TIMING] process_whatsapp_message total took {time.time() - overall_start:.3f}s")
+    return was_aborted
 
 
 def _agent_gate_and_name(wa_id: str, business_context: Optional[dict]) -> tuple:
@@ -195,8 +219,21 @@ def _run_agent_and_send(
     message_id: Optional[str] = None,
     abort_key: Optional[str] = None,
     stale_turn: bool = False,
-) -> bool:
-    """Run conversation manager and send reply via utils. Returns True if send succeeded."""
+) -> tuple:
+    """Run conversation manager and send reply via utils.
+
+    Returns (send_ok, was_aborted):
+        send_ok: True iff the reply was successfully dispatched (or
+            intentionally suppressed). False on abort, error, or send
+            failure.
+        was_aborted: True iff the turn aborted (mid-turn abort signal,
+            pre-send abort gate, etc.). Distinct from send_ok=False
+            because the caller (debounce flusher) needs to know the
+            difference for backoff-counter accounting — a clean turn
+            with a send error should NOT reset the requeue counter the
+            way a clean delivered turn would, but it also shouldn't be
+            counted as an abort.
+    """
     llm_start = time.time()
     try:
         logging.warning("[DEBUG] Calling ConversationManager...")
@@ -224,14 +261,14 @@ def _run_agent_and_send(
     # sending so the newer message's flusher processes cleanly.
     if response == "__ABORTED__":
         logging.warning("[ABORT] %s: aborted after planner, skipping send", wa_id)
-        return False
+        return (False, True)
 
     # Conversation manager already dispatched a rich message (e.g. Twilio
     # CTA Content Template for the welcome). Skip the normal text send so
     # we don't double-send the greeting.
     if response == "__SUPPRESS_SEND__":
         logging.warning("[SEND] %s: suppress-send sentinel, rich message already dispatched", wa_id)
-        return True
+        return (True, False)
 
     # Pre-send abort gate: covers paths that don't go through the agent
     # (greeting fast-path) and paths where the dispatcher's abort fallback
@@ -248,7 +285,7 @@ def _run_agent_and_send(
                     "[ABORT] %s: pre-send abort detected, dropping response (len=%d)",
                     wa_id, len(response or ""),
                 )
-                return False
+                return (False, True)
         except Exception as exc:
             # Never let the abort check break the send path.
             logging.warning("[ABORT] %s: pre-send check failed: %s", wa_id, exc)
@@ -260,9 +297,9 @@ def _run_agent_and_send(
     logging.warning(f"[TIMING] send_message took {time.time() - send_start:.3f}s")
     if result is None:
         logging.error("❌ Failed to send message to WhatsApp API")
-        return False
+        return (False, False)
     logging.warning("✅ Message sent successfully to WhatsApp API")
-    return True
+    return (True, False)
 
 
 def run_agent_and_send_reply(wa_id: str, message_text: str, business_id: str) -> bool:

@@ -58,12 +58,16 @@ class TestPreSendAbortGate:
 
     def test_drops_send_when_abort_flag_is_set(self):
         """The exact greeting-fast-path case: response is the rendered
-        greeting, abort signal is set during the Twilio round-trip."""
+        greeting, abort signal is set during the Twilio round-trip.
+        Return is now a tuple (send_ok, was_aborted) — pre-send abort
+        is the latter, so we expect (False, True)."""
         ok, send_called, check, clear = self._run_with(
             agent_response="Hola David. Gracias por comunicarte con Biela...",
             abort_set=True,
         )
-        assert ok is False
+        send_ok, was_aborted = ok
+        assert send_ok is False
+        assert was_aborted is True
         send_called.assert_not_called()
         # We MUST clear the flag so a stale signal doesn't strand the
         # next turn (which would never see check_abort=True if we left
@@ -75,7 +79,9 @@ class TestPreSendAbortGate:
             agent_response="Tu pedido ya fue confirmado.",
             abort_set=False,
         )
-        assert ok is True
+        send_ok, was_aborted = ok
+        assert send_ok is True
+        assert was_aborted is False
         send_called.assert_called_once()
         clear.assert_not_called()
 
@@ -125,7 +131,10 @@ class TestPreSendAbortGate:
                 message_id="SMfirst",
                 abort_key="abort:whatsapp:+14155238886:+573177000722",
             )
-        assert ok is False
+        send_ok, was_aborted = ok
+        # __ABORTED__ sentinel: send did not fire, was_aborted is True.
+        assert send_ok is False
+        assert was_aborted is True
         send_called.assert_not_called()
         # __ABORTED__ short-circuits before the pre-send check.
         check.assert_not_called()

@@ -35,6 +35,78 @@ _MSG_TTL = 120      # safety expiry on buffered messages (seconds)
 _PROCESSING_TTL = 60  # safety expiry on processing flag (seconds)
 _ABORT_TTL = 30       # safety expiry on abort signal (seconds)
 
+# ── Adaptive debounce backoff ────────────────────────────────────────
+#
+# (a) Window-extension on continued activity: while the flusher is
+#     sleeping, if a new message arrives, push the wake time out by
+#     ``_EXTENSION_SECONDS``. Caps the total wait at
+#     ``_MAX_TOTAL_WAIT_SECONDS`` so the user never sits unanswered
+#     forever on a long burst. Polled every ``_BACKOFF_POLL_INTERVAL``.
+#
+# (b) Requeue-driven backoff: each abort+requeue increments a
+#     per-conversation counter (``debounce:requeue_count:...``) with
+#     ``_REQUEUE_COUNT_TTL``. The next flush reads the counter and
+#     starts at ``DEBOUNCE_SECONDS * 2^count``, capped at
+#     ``_MAX_REQUEUE_BACKOFF_SECONDS``. After ``_REQUEUE_COUNT_TTL`` of
+#     calm, the counter expires and the window resets to base — no
+#     manual reset needed for healthy turns.
+_EXTENSION_SECONDS = float(os.getenv("DEBOUNCE_EXTENSION_SECONDS", "1.0"))
+_MAX_TOTAL_WAIT_SECONDS = float(os.getenv("DEBOUNCE_MAX_TOTAL_WAIT_SECONDS", "12.0"))
+_BACKOFF_POLL_INTERVAL = float(os.getenv("DEBOUNCE_BACKOFF_POLL_INTERVAL", "0.25"))
+_MAX_REQUEUE_BACKOFF_SECONDS = float(os.getenv("DEBOUNCE_MAX_REQUEUE_BACKOFF_SECONDS", "8.0"))
+_REQUEUE_COUNT_TTL = int(os.getenv("DEBOUNCE_REQUEUE_COUNT_TTL", "60"))
+
+
+def _requeue_count_key(to_number: str, phone: str) -> str:
+    return f"debounce:requeue_count:{to_number}:{phone}"
+
+
+def _bump_requeue_count(to_number: str, phone: str) -> int:
+    """Atomically INCR + EXPIRE the per-conversation requeue counter.
+
+    Each call extends the TTL so a steady stream of requeues keeps the
+    counter alive; calm conversations let it expire naturally. Returns
+    the new count, or 0 on failure (degrades gracefully).
+    """
+    r = _get_redis()
+    if r is None:
+        return 0
+    try:
+        pipe = r.pipeline()
+        pipe.incr(_requeue_count_key(to_number, phone))
+        pipe.expire(_requeue_count_key(to_number, phone), _REQUEUE_COUNT_TTL)
+        results = pipe.execute()
+        return int(results[0]) if results else 0
+    except Exception:
+        return 0
+
+
+def _read_requeue_count(to_number: str, phone: str) -> int:
+    """Read the current requeue counter; 0 when absent or Redis blips."""
+    r = _get_redis()
+    if r is None:
+        return 0
+    try:
+        raw = r.get(_requeue_count_key(to_number, phone))
+        return int(raw) if raw else 0
+    except Exception:
+        return 0
+
+
+def _compute_initial_window(requeue_count: int) -> float:
+    """Exponential backoff window for the next flush.
+
+    Healthy turn (count=0)  → DEBOUNCE_SECONDS (e.g. 1.5s).
+    1 recent requeue       → DEBOUNCE_SECONDS * 2 (3s).
+    2 recent requeues      → DEBOUNCE_SECONDS * 4 (6s, capped at MAX).
+    Capped at ``_MAX_REQUEUE_BACKOFF_SECONDS`` so we never sit forever.
+    """
+    if requeue_count <= 0:
+        return DEBOUNCE_SECONDS
+    raw = DEBOUNCE_SECONDS * (2 ** min(requeue_count, 6))  # 2^6 ≈ 96x cap defense
+    return min(raw, _MAX_REQUEUE_BACKOFF_SECONDS)
+
+
 # After the debounce window, also wait for any in-flight turn to finish
 # before draining. This prevents the race where a new message's flusher
 # wakes faster than the in-flight turn can detect+requeue: the requeued
@@ -127,7 +199,14 @@ def requeue_aborted_text(abort_key: str, text: str) -> None:
     # Synthesizing a message id avoids logging `turn_id=-` and prevents
     # any dedup collision when the same text is requeued twice.
     synthetic_id = f"requeue-{uuid.uuid4().hex[:8]}-{int(time.time())}"
+    # _skip_persist marks this entry as "do not persist as a new
+    # conversations row" — the original Twilio webhook already
+    # persisted the user message before the agent ran. Without this
+    # flag, the requeued text gets re-persisted on the next flush,
+    # producing duplicate `role='user'` rows for one Twilio inbound
+    # (the visible "user message duplicated in inbox" bug).
     payload = json.dumps({
+        "_skip_persist": True,
         "normalized_body": {
             "entry": [{"changes": [{"value": {
                 "contacts": [{"wa_id": phone}],
@@ -149,10 +228,15 @@ def requeue_aborted_text(abort_key: str, text: str) -> None:
             args=[payload, _MSG_TTL, _FLUSHER_TTL],
         )
         won_flusher = bool(lua_result)
+        # Note: we do NOT bump the requeue counter here — it was
+        # already bumped at abort-signal time (inside debounce_message)
+        # so the new flusher reads the post-bump value before sleeping.
+        # Bumping again here would double-count the same thrash.
+        current_count = _read_requeue_count(to_number, phone)
         logging.warning(
             "[DEBOUNCE] %s: requeued aborted text (%d chars) to=%s "
-            "won_flusher=%s",
-            phone, len(text), to_number, won_flusher,
+            "won_flusher=%s requeue_count=%d",
+            phone, len(text), to_number, won_flusher, current_count,
         )
         if won_flusher:
             # Capture the Flask app from the current context so the
@@ -257,10 +341,6 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
     # Unique ID so we can trace which drain belongs to which flusher.
     fid = uuid.uuid4().hex[:6]
     t0 = time.time()
-    logging.warning("[DEBOUNCE] %s fid=%s: sleeping %.1fs (pid=%d t=%.3f)", phone, fid, DEBOUNCE_SECONDS, os.getpid(), t0)
-    time.sleep(DEBOUNCE_SECONDS)
-    t1 = time.time()
-    logging.warning("[DEBOUNCE] %s fid=%s: woke after %.3fs (pid=%d t=%.3f)", phone, fid, t1 - t0, os.getpid(), t1)
 
     r = _get_redis()
     if r is None:
@@ -272,6 +352,63 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
     key_msgs = f"debounce:msgs:{to_number}:{phone}"
     key_flusher = f"debounce:flusher:{to_number}:{phone}"
     proc_key = _processing_key(to_number, phone)
+
+    # Adaptive debounce window:
+    #   (b) Initial window grows exponentially with the recent
+    #       requeue count (DEBOUNCE_SECONDS * 2^count, capped).
+    #   (a) Each new arrival during the wait extends the window by
+    #       _EXTENSION_SECONDS, capped at _MAX_TOTAL_WAIT_SECONDS
+    #       (absolute deadline anchored on flusher start).
+    requeue_count = _read_requeue_count(to_number, phone)
+    initial_window = _compute_initial_window(requeue_count)
+    deadline = t0 + initial_window
+    hard_deadline = t0 + _MAX_TOTAL_WAIT_SECONDS
+    last_buffer_size = -1
+    try:
+        last_buffer_size = int(r.llen(key_msgs) or 0)
+    except Exception:
+        pass
+    extensions = 0
+    logging.warning(
+        "[DEBOUNCE] %s fid=%s: window_start=%.2fs requeue_count=%d cap=%.1fs "
+        "(pid=%d t=%.3f)",
+        phone, fid, initial_window, requeue_count, _MAX_TOTAL_WAIT_SECONDS,
+        os.getpid(), t0,
+    )
+    while True:
+        now = time.time()
+        if now >= deadline or now >= hard_deadline:
+            break
+        # Sleep to the next decision point: whichever comes first —
+        # the deadline, the hard deadline, or the next poll tick.
+        sleep_for = min(deadline - now, hard_deadline - now, _BACKOFF_POLL_INTERVAL)
+        if sleep_for <= 0:
+            break
+        time.sleep(sleep_for)
+        # Did a new message arrive during this poll interval? If so,
+        # push the deadline out (capped at hard_deadline).
+        try:
+            current_size = int(r.llen(key_msgs) or 0)
+        except Exception:
+            current_size = last_buffer_size
+        if last_buffer_size >= 0 and current_size > last_buffer_size:
+            new_deadline = min(time.time() + _EXTENSION_SECONDS, hard_deadline)
+            if new_deadline > deadline:
+                deadline = new_deadline
+                extensions += 1
+                logging.warning(
+                    "[DEBOUNCE] %s fid=%s: window extended (msgs=%d→%d, "
+                    "extension=%.1fs, total_extensions=%d)",
+                    phone, fid, last_buffer_size, current_size,
+                    _EXTENSION_SECONDS, extensions,
+                )
+        last_buffer_size = current_size
+
+    t1 = time.time()
+    logging.warning(
+        "[DEBOUNCE] %s fid=%s: woke after %.3fs (extensions=%d, pid=%d t=%.3f)",
+        phone, fid, t1 - t0, extensions, os.getpid(), t1,
+    )
 
     # Wait for any in-flight turn to finish before draining. The in-flight
     # turn may be about to requeue its text (because we already set the
@@ -369,6 +506,21 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
                         phone, exc,
                     )
 
+        # Skip-persist if EVERY entry in this batch is a requeue (solo
+        # requeue or batched-requeues). When a fresh inbound is mixed
+        # in, persist normally — the new content needs a row, and the
+        # merged body covers it. The narrower fix (only-skip-on-solo)
+        # is what catches the production bug from 2026-05-09 without
+        # changing behavior for healthy turns.
+        skip_persist = bool(entries) and all(
+            e.get("_skip_persist") for e in entries
+        )
+        if skip_persist:
+            logging.warning(
+                "[DEBOUNCE] %s: solo requeue (%d entries) — skipping user-persist on this flush",
+                phone, len(entries),
+            )
+
         # ── Resolve business context inside the flusher ──────────────
         # Done here (not in the webhook thread) so the debounce window
         # isn't eaten by the ~3–5 s Supabase round trip. One lookup
@@ -390,13 +542,41 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
         except Exception:
             pass
 
+        was_aborted = False
         with flask_app.app_context():
             with wa_id_turn_lock(phone) as lock_result:
-                process_whatsapp_message(
+                was_aborted = bool(process_whatsapp_message(
                     combined_body,
                     business_context=business_context,
                     abort_key=ab_key,
                     stale_turn=lock_result.waited,
+                    skip_persist=skip_persist,
+                ))
+
+        # Counter decay is intentionally TTL-only (not reset on first
+        # clean turn). Eager reset turned out to be too aggressive in
+        # production: a single thrash bumped the counter, the next
+        # turn cleared it, and the third turn was back to a 1.5s
+        # window — so a chatty conversation kept seeing rapid replies
+        # during follow-up messages even though it had just thrashed
+        # seconds ago. With TTL-only decay, the backoff persists for
+        # ``_REQUEUE_COUNT_TTL`` seconds (60s default) of inactivity
+        # before resetting; bursts within that window stay in the
+        # backed-off regime. The log line below makes it visible.
+        if was_aborted:
+            logging.warning(
+                "[DEBOUNCE] %s fid=%s: turn aborted — requeue_count preserved (backoff stays)",
+                phone, fid,
+            )
+        else:
+            try:
+                preserved = _read_requeue_count(to_number, phone) if r else 0
+            except Exception:
+                preserved = 0
+            if preserved > 0:
+                logging.warning(
+                    "[DEBOUNCE] %s fid=%s: clean turn — requeue_count=%d preserved (TTL %ds)",
+                    phone, fid, preserved, _REQUEUE_COUNT_TTL,
                 )
 
     except Exception as exc:
@@ -491,14 +671,25 @@ def debounce_message(
         # Runs for ALL messages (not just coalesced) because _LUA_DRAIN
         # releases the flusher lock at drain time, so new messages
         # arriving during processing get lua_result=1 (own flusher).
+        #
+        # Bump the requeue counter HERE (at signal time) instead of in
+        # requeue_aborted_text (at abort-handling time). Reason: the
+        # new flusher we just spawned will read the counter BEFORE the
+        # in-flight turn finishes its abort path. If we wait for the
+        # abort handler to bump, every new flusher sees the stale
+        # pre-thrash value and commits to the base window — defeating
+        # backoff (b). Setting the signal IS the moment we know a
+        # thrash just started; bump now.
         proc_key = _processing_key(to_number, phone)
         try:
             if r.exists(proc_key):
                 ab_key = _abort_key(to_number, phone)
                 r.set(ab_key, "1", ex=_ABORT_TTL)
+                requeue_count = _bump_requeue_count(to_number, phone)
                 logging.warning(
-                    "[DEBOUNCE] %s: ABORT signal set (processing in-flight) t=%.3f",
-                    phone, time.time(),
+                    "[DEBOUNCE] %s: ABORT signal set (processing in-flight) "
+                    "requeue_count=%d t=%.3f",
+                    phone, requeue_count, time.time(),
                 )
         except Exception as exc:
             logging.warning("[DEBOUNCE] %s: failed to set abort: %s", phone, exc)
