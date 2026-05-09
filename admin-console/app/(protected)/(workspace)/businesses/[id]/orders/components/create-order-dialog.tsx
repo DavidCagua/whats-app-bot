@@ -72,11 +72,15 @@ export function CreateOrderDialog({
   const [newCustomerName, setNewCustomerName] = useState("")
 
   const [items, setItems] = useState<ItemDraft[]>([emptyItem()])
+  const [fulfillmentType, setFulfillmentType] = useState<"delivery" | "pickup">(
+    "delivery"
+  )
   const [deliveryAddress, setDeliveryAddress] = useState("")
   const [contactPhone, setContactPhone] = useState("")
   const [paymentMethod, setPaymentMethod] = useState("")
   const [deliveryFee, setDeliveryFee] = useState(0)
   const [notes, setNotes] = useState("")
+  const isPickup = fulfillmentType === "pickup"
 
   const productById = useMemo(
     () => new Map(products.map((p) => [p.id, p])),
@@ -87,13 +91,15 @@ export function CreateOrderDialog({
     () => items.reduce((acc, i) => acc + i.quantity * i.unitPrice, 0),
     [items]
   )
-  const total = subtotal + (Number.isFinite(deliveryFee) ? deliveryFee : 0)
+  const effectiveFee = isPickup ? 0 : Number.isFinite(deliveryFee) ? deliveryFee : 0
+  const total = subtotal + effectiveFee
 
   function reset() {
     setCustomerChoice(NO_CUSTOMER)
     setNewWhatsappId("")
     setNewCustomerName("")
     setItems([emptyItem()])
+    setFulfillmentType("delivery")
     setDeliveryAddress("")
     setContactPhone("")
     setPaymentMethod("")
@@ -146,10 +152,11 @@ export function CreateOrderDialog({
           unitPrice: i.unitPrice,
           notes: i.notes,
         })),
-        deliveryAddress,
+        fulfillmentType,
+        deliveryAddress: isPickup ? null : deliveryAddress,
         contactPhone,
-        paymentMethod,
-        deliveryFee,
+        paymentMethod: isPickup ? null : paymentMethod,
+        deliveryFee: isPickup ? 0 : deliveryFee,
         notes,
       })
       if (!result.success) {
@@ -341,14 +348,34 @@ export function CreateOrderDialog({
           {/* Delivery + payment */}
           <section className="grid grid-cols-2 gap-2">
             <div className="space-y-1.5 col-span-2">
-              <Label htmlFor="address">Dirección</Label>
-              <Textarea
-                id="address"
-                rows={2}
-                value={deliveryAddress}
-                onChange={(e) => setDeliveryAddress(e.target.value)}
-              />
+              <Label htmlFor="fulfillment">Modo</Label>
+              <Select
+                value={fulfillmentType}
+                onValueChange={(v) =>
+                  setFulfillmentType(v as "delivery" | "pickup")
+                }
+              >
+                <SelectTrigger id="fulfillment">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="delivery">🛵 Domicilio</SelectItem>
+                  <SelectItem value="pickup">🏃 Recoger en local</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
+
+            {!isPickup && (
+              <div className="space-y-1.5 col-span-2">
+                <Label htmlFor="address">Dirección</Label>
+                <Textarea
+                  id="address"
+                  rows={2}
+                  value={deliveryAddress}
+                  onChange={(e) => setDeliveryAddress(e.target.value)}
+                />
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="phone">Teléfono</Label>
               <Input
@@ -358,28 +385,32 @@ export function CreateOrderDialog({
                 onChange={(e) => setContactPhone(e.target.value)}
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="payment">Método de pago</Label>
-              <Input
-                id="payment"
-                placeholder="Nequi, efectivo, …"
-                value={paymentMethod}
-                onChange={(e) => setPaymentMethod(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="fee">Domicilio</Label>
-              <Input
-                id="fee"
-                type="number"
-                min={0}
-                inputMode="decimal"
-                value={deliveryFee}
-                onChange={(e) =>
-                  setDeliveryFee(Math.max(0, Number(e.target.value) || 0))
-                }
-              />
-            </div>
+            {!isPickup && (
+              <div className="space-y-1.5">
+                <Label htmlFor="payment">Método de pago</Label>
+                <Input
+                  id="payment"
+                  placeholder="Nequi, efectivo, …"
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value)}
+                />
+              </div>
+            )}
+            {!isPickup && (
+              <div className="space-y-1.5">
+                <Label htmlFor="fee">Domicilio</Label>
+                <Input
+                  id="fee"
+                  type="number"
+                  min={0}
+                  inputMode="decimal"
+                  value={deliveryFee}
+                  onChange={(e) =>
+                    setDeliveryFee(Math.max(0, Number(e.target.value) || 0))
+                  }
+                />
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="orderNotes">Notas del pedido</Label>
               <Input
@@ -396,10 +427,12 @@ export function CreateOrderDialog({
               <span className="text-muted-foreground">Subtotal</span>
               <span className="tabular-nums">{formatCOP(subtotal)}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Domicilio</span>
-              <span className="tabular-nums">{formatCOP(deliveryFee)}</span>
-            </div>
+            {!isPickup && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Domicilio</span>
+                <span className="tabular-nums">{formatCOP(deliveryFee)}</span>
+              </div>
+            )}
             <div className="flex justify-between font-medium border-t pt-1">
               <span>Total</span>
               <span className="tabular-nums">{formatCOP(total)}</span>

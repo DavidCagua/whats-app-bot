@@ -919,3 +919,60 @@ class TestOrderClosedHandoff:
         assert "cerrados" in msg.lower()
         # Active-cart tail mentions the cart is preserved.
         assert "guardado" in msg.lower() or "retomamos" in msg.lower()
+
+
+class TestOutOfZoneHandoff:
+    """
+    Out-of-zone delivery redirect: order agent hands off to CS with
+    ``handoff_context.reason="out_of_zone"`` plus city/phone. CS renders
+    a polished, deterministic message — no LLM, no hallucinated phone.
+    """
+
+    def test_out_of_zone_redirect_message(self):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch("app.agents.customer_service_agent.tracer"):
+            output = agent.execute(
+                message_body="quiero pedir a Ipiales",
+                wa_id="+573001234567", name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                handoff_context={
+                    "reason": "out_of_zone",
+                    "city": "Ipiales",
+                    "phone": "3239609582",
+                },
+            )
+
+        # Planner LLM must NOT have been called — deterministic path.
+        llm.invoke.assert_not_called()
+        msg = output["message"]
+        assert "Ipiales" in msg
+        assert "3239609582" in msg
+        # Should NOT re-trigger order flow.
+        assert output.get("handoff") in (None, {})
+
+    def test_out_of_zone_missing_phone_falls_back_to_generic(self):
+        agent = CustomerServiceAgent()
+        llm = MagicMock()
+        with patch.object(CustomerServiceAgent, "llm", llm), \
+             patch("app.agents.customer_service_agent.conversation_service.store_conversation_message"), \
+             patch("app.agents.customer_service_agent.tracer"):
+            output = agent.execute(
+                message_body="quiero pedir a Ipiales",
+                wa_id="+573001234567", name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                handoff_context={
+                    "reason": "out_of_zone",
+                    "city": "",
+                    "phone": "",
+                },
+            )
+
+        llm.invoke.assert_not_called()
+        msg = output["message"]
+        # Generic fallback when context is incomplete — still informative.
+        assert "cobertura" in msg.lower()

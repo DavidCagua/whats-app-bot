@@ -22,6 +22,7 @@ export type OrderEditData = {
   deliveryAddress: string | null
   contactPhone: string | null
   paymentMethod: string | null
+  fulfillmentType: "delivery" | "pickup"
   notes: string | null
   /** Whether the order currently has any promotion records attached. UI uses
    *  this to show a "promos will be cleared" notice. */
@@ -85,6 +86,7 @@ export async function getOrderForEdit(orderId: string): Promise<Result> {
       deliveryAddress: order.delivery_address ?? null,
       contactPhone: order.contact_phone ?? null,
       paymentMethod: order.payment_method ?? null,
+      fulfillmentType: order.fulfillment_type === "pickup" ? "pickup" : "delivery",
       notes: order.notes ?? null,
       hasPromotions,
     },

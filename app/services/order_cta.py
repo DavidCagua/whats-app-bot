@@ -44,41 +44,36 @@ from __future__ import annotations
 from typing import Optional
 
 
-def _format_money(amount) -> str:
-    """Colombian peso formatting: ``$28000`` → ``$28.000``."""
-    try:
-        return f"${int(amount):,}".replace(",", ".")
-    except (TypeError, ValueError):
-        return ""
-
-
 def _summary_block(delivery_status: dict) -> str:
-    """
-    One-shot recap rendered into the template's ``{{1}}`` variable.
-
-    Includes: name, address, phone, payment method, total. Each on its
-    own line with bold labels (WhatsApp markdown). Missing fields are
-    omitted rather than printed as "(no registrado)" — the caller only
-    triggers the CTA when ``all_present`` is True so this is mostly a
-    belt-and-suspenders.
-    """
+    # Twilio Content API rejects "\n" inside a variable value (error
+    # 21656), so we join fields with " | " and let the template body
+    # provide its own line breaks around {{1}}. Total is omitted on
+    # purpose — the cart total already appeared in the previous turn.
+    # Pickup variant collapses to "Nombre + Modo" — address / phone /
+    # pago don't apply since the customer is walking in.
+    ftype = (delivery_status.get("fulfillment_type") or "delivery").strip().lower()
     parts: list[str] = []
     name = (delivery_status.get("name") or "").strip()
+    notes = (delivery_status.get("notes") or "").strip()
+    if name:
+        parts.append(f"*Nombre:* {name}")
+    if ftype == "pickup":
+        parts.append("*Modo:* 🏃 Recoger en local")
+        if notes:
+            parts.append(f"*Notas:* {notes}")
+        return " | ".join(parts)
     address = (delivery_status.get("address") or "").strip()
     phone = (delivery_status.get("phone") or "").strip()
     payment = (delivery_status.get("payment_method") or "").strip()
-    total = delivery_status.get("total")
-    if name:
-        parts.append(f"*Nombre:* {name}")
     if address:
         parts.append(f"*Dirección:* {address}")
     if phone:
         parts.append(f"*Teléfono:* {phone}")
     if payment:
         parts.append(f"*Pago:* {payment}")
-    if total:
-        parts.append(f"*Total:* {_format_money(total)}")
-    return "\n".join(parts)
+    if notes:
+        parts.append(f"*Notas:* {notes}")
+    return " | ".join(parts)
 
 
 def cta_confirm_order_payload(

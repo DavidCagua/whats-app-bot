@@ -16,20 +16,51 @@ import re
 from typing import Optional
 
 
-# Pure greeting detection: message is ONLY a greeting token.
-# Any extra content (product, question mark, etc.) falls through
-# to the LLM router so the intent is classified normally.
+# Pure greeting detection: message is ONLY a sequence of one or more
+# greeting tokens (no product, no question, no substantive content).
+# Compound greetings ("hola buenas noches", "buenas qué más", "hola
+# qué tal") count — production trace 2026-05-09 showed the LLM-only
+# fallback misclassifying these into ``order``, so the deterministic
+# path now handles compounds too instead of relying on prompt fidelity.
+#
+# Order of alternation matters: longer multi-token tokens
+# (``buenas tardes``, ``buenos días``) MUST come before the shorter
+# single-word tokens that prefix them (``buenas``, ``buenos``), or
+# Python's leftmost-first matching would consume just the prefix.
+_GREETING_TOKEN = (
+    r"(?:"
+    r"hola+|"
+    r"buenas\s+tardes?|"
+    r"buenas\s+noches?|"
+    r"buenos?\s+d[ií]as?|"
+    r"buen\s+d[ií]a|"
+    r"qu[eé]\s+m[aá]s|"
+    r"qu[eé]\s+tal|"
+    r"qu[eé]\s+hubo|"
+    r"c[oó]mo\s+est[aá](?:s|n)?|"
+    r"buenas|"
+    r"hey+|"
+    r"ey+|"
+    r"saludos"
+    r")"
+)
 _PURE_GREETING_RE = re.compile(
     r"^\s*"
-    r"(hola+|buenas|buenos?\s+d[ií]as?|buen\s+d[ií]a|"
-    r"buenas\s+tardes?|buenas\s+noches?|hey|ey|saludos)"
-    r"[\s!¡.,]*$",
+    + _GREETING_TOKEN
+    + r"(?:[\s,!¡.?¿;:]+" + _GREETING_TOKEN + r"){0,3}"  # up to 3 more tokens
+    + r"[\s!¡.,?¿;:]*$",
     re.IGNORECASE,
 )
 
 
 def is_pure_greeting(message: Optional[str]) -> bool:
-    """Return True when the message is nothing but a greeting token."""
+    """Return True when the message is nothing but greeting token(s).
+
+    Single ("hola", "buenas tardes") and compound ("hola buenas noches",
+    "hey qué tal") forms both match. Anything substantive after the
+    greeting (a product, a question with content words, "un domicilio")
+    falls through to the LLM classifier as before.
+    """
     if not message:
         return False
     return bool(_PURE_GREETING_RE.match(message.strip()))

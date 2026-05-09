@@ -1,14 +1,15 @@
 ---
 name: debug-conversation
-description: Debug a WhatsApp bot conversation for a specific phone number — pulls the last conversation turns from Supabase, fetches matching Railway logs, and correlates user messages with executor/planner traces. Use when the user asks things like "why did the bot reply X to <number>", "check what happened with <number>", "debug this conversation", or pastes a WhatsApp transcript and asks for the server side.
+description: Debug a WhatsApp bot conversation for a specific phone number — pulls conversation turns from Supabase, structured planner/tool traces from LangSmith, and matching Railway logs, then correlates everything into a single timeline. Use when the user asks things like "why did the bot reply X to <number>", "check what happened with <number>", "debug this conversation", or pastes a WhatsApp transcript and asks for the server side.
 ---
 
 # debug-conversation
 
-End-to-end debugger for a single user's recent WhatsApp interaction. Given a phone number (or a transcript the user pastes), pull both sides of the story:
+End-to-end debugger for a single user's recent WhatsApp interaction. Given a phone number (or a transcript the user pastes), pull all three sides of the story:
 1. **What the DB saw** — conversation rows from Supabase.
-2. **What the server did** — Railway logs around the same window.
-3. **Correlate** — match user messages to planner intents, tool calls, and errors.
+2. **What the LLM did** — structured planner/tool traces from LangSmith.
+3. **What the server did** — Railway logs around the same window (everything outside the LangChain runtime).
+4. **Correlate** — match user messages to planner intents, tool calls, and errors.
 
 ## When to invoke
 
@@ -65,7 +66,39 @@ If no rows come back, try:
 - Dropping the `+` prefix (Meta path stores digits only)
 - Checking `customers` table for the phone's canonical form: `SELECT phone, wa_id FROM customers WHERE phone LIKE '%<last 7 digits>%';`
 
-### 2. Pull matching Railway logs
+### 2. Pull the LangSmith trace
+
+Use the LangSmith MCP (`mcp__langsmith__*`). LangSmith auto-traces every LangChain call (planner LLM, tools, sub-chains) when `LANGCHAIN_TRACING_V2=true` is set in the bot's env, so this is the *structured* view of what the LLM did — much faster than grepping Railway.
+
+The project name in LangSmith is **`whatsapp-bot`**.
+
+**Workflow:**
+1. `list_projects` — confirm `whatsapp-bot` exists and grab its ID.
+2. `fetch_runs` — filter by project + the time window matching step 1's conversation timestamps. Pull root runs first for a top-level view, then drill into interesting ones.
+3. For each interesting root run, fetch the full trace tree to see planner inputs, tool calls, and LLM outputs.
+
+**Filtering by user:**
+Ideally traces carry `wa_id` (or hashed wa_id) as run metadata. If they don't yet, fall back to:
+- Filter by time window only, then match by trace count vs. message count from step 1.
+- Search the run inputs for the user's message text — the planner receives the raw message in the prompt.
+
+If this becomes painful, instrument with `RunnableConfig(metadata={"wa_id": ..., "business_id": ...})` at the agent entrypoint so traces become filterable by user.
+
+**What to extract per turn:**
+- Root run status (success / error) and total latency
+- Planner LLM input (system prompt + recent history seen by the model)
+- Planner output — the structured intent + params (e.g. `UPDATE_CART_ITEM {...}`)
+- Tool calls — name, input, output, latency, error
+- Token counts (cost signal; oversized prompts show up here first)
+
+**Red flags:**
+- Run status `error` — open the failed span first; the exception type usually tells the story
+- A single LLM call > 5s — model congestion or an oversized prompt (check token count)
+- Tool call errors the agent recovered from silently — still a bug worth flagging
+- Planner picked an intent that doesn't match the user's apparent goal — copy the input prompt for review; it's often a system-prompt or context issue, not a model issue
+- Missing trace for a turn that exists in Supabase — the LangChain runtime didn't run; check Railway for an upstream failure (webhook/auth/debounce)
+
+### 3. Pull matching Railway logs
 
 Use `mcp__Railway__get-logs`. If you don't already know the project/service, first call `mcp__Railway__list-projects` → `mcp__Railway__list-services` to find the whats-app-bot deployment service.
 
@@ -91,26 +124,28 @@ Use `mcp__Railway__get-logs`. If you don't already know the project/service, fir
 - Any Python traceback
 - Gaps longer than a minute between a user message arriving and the reply sending — investigate LLM latency or a silent failure
 
-### 3. Correlate and report
+### 4. Correlate and report
 
 Build a compact timeline the user can scan. Format each turn like:
 
 ```
 [20:06:24] user → "para que a la picada no le pongan morcilla"
 [20:06:30] planner → UPDATE_CART_ITEM {product_name=PICADA, notes=sin morcilla}
+           (LangSmith run abc123, 2.1s, 1840 prompt / 84 completion tokens)
 [20:06:30] executor → cart re-opened (READY_TO_PLACE → ORDERING)
+[20:06:30] tool → update_cart_item(...) ✓
 [20:06:30] assistant ← "Listo, hemos actualizado tu pedido: 1x PICADA (sin morcilla)..."
            timing: 3.5s total, send 0.5s
 ```
 
-For each turn, note:
-- **User text** (from DB)
-- **Planner intent + params** (from logs)
-- **Executor trace** — bypass/disamb/cart re-open/state transitions
-- **Tool calls** — which tools ran, any errors
-- **Bot reply** (from DB)
-- **Timing** — total latency and any slow phases
-- **Errors** — Twilio failures, exceptions, missing rows
+For each turn, note (and prefer LangSmith for the LLM-side fields, Railway for the rest):
+- **User text** (Supabase)
+- **Planner intent + params** (LangSmith — the structured planner output) — fall back to Railway `[ORDER_AGENT] Planner intent=...` if LangSmith trace is missing
+- **Executor trace** — bypass/disamb/cart re-open/state transitions (Railway)
+- **Tool calls** — which tools ran, any errors (LangSmith for inputs/outputs/latency, Railway for orchestration context)
+- **Bot reply** (Supabase)
+- **Timing** — LLM time from LangSmith, send time from Railway
+- **Errors** — Twilio failures, exceptions, missing rows (Railway), planner exceptions / tool errors (LangSmith)
 
 End the report with a one-line diagnosis: what went wrong, or "flow looks healthy".
 
@@ -118,10 +153,11 @@ End the report with a one-line diagnosis: what went wrong, or "flow looks health
 
 - **Always use both wa_id formats** in the SQL `IN (...)` clause — `+<digits>` for Twilio, `<digits>` for Meta. The bot has both paths.
 - **Prefer local Bogotá time** in reports (`AT TIME ZONE 'America/Bogota'`) so timestamps match what the user sees on WhatsApp.
-- **Scope the log fetch** — Railway logs can be huge. Always pull a time slice, not the whole tail.
-- **Never dump raw log blobs** into the final reply. Extract relevant lines and paraphrase. The user wants the story, not the stack trace.
+- **Use the right tool for each question** — LangSmith for "what did the LLM/planner do" (structured, fast), Railway for "what did the rest of the server do" (everything outside LangChain), Supabase for "what did the user actually see". Don't grep Railway for planner intents if LangSmith has the trace.
+- **Scope the log fetch** — Railway logs can be huge. Always pull a time slice, not the whole tail. Same for `fetch_runs` — bound by time window.
+- **Never dump raw log blobs or trace JSON** into the final reply. Extract relevant lines and paraphrase. The user wants the story.
 - **Respect privacy** — redact name / address / exact phone when the user shares the session with someone else. The phone's last 4 digits are enough for reference.
-- **If something is missing**, say so explicitly ("no server logs for this turn — possibly dropped before reaching the webhook") instead of guessing.
+- **If something is missing**, say so explicitly. "No LangSmith trace for this turn but Railway shows the request landed" is a real signal — usually means the LangChain runtime crashed or was bypassed.
 
 ## Quick reference — key files the logs reference
 

@@ -1,6 +1,8 @@
 import { prisma } from "./prisma"
 import type { Prisma } from "@prisma/client"
 
+export type FulfillmentType = "delivery" | "pickup"
+
 export type OrderRow = {
   id: string
   created_at: string | null
@@ -12,6 +14,8 @@ export type OrderRow = {
   total_amount: number
   subtotal: number
   delivery_fee: number
+  fulfillment_type: FulfillmentType
+  notes: string | null
   status: string
   items: {
     id: string
@@ -75,8 +79,34 @@ export async function getOrdersForBusiness(
       total_amount: totalAmount,
       subtotal,
       delivery_fee: deliveryFee,
+      fulfillment_type: order.fulfillment_type === "pickup" ? "pickup" : "delivery",
+      notes: order.notes ?? null,
       status: order.status ?? "pending",
       items,
     }
   })
+}
+
+export type OrderBannerCounts = {
+  /** Orders still awaiting merchant confirmation. */
+  pending: number
+  /** Confirmed orders that haven't been delivered yet (confirmed + out_for_delivery). */
+  inFlight: number
+}
+
+export async function getOrderBannerCounts(
+  businessId: string
+): Promise<OrderBannerCounts> {
+  const [pending, inFlight] = await Promise.all([
+    prisma.orders.count({
+      where: { business_id: businessId, status: "pending" },
+    }),
+    prisma.orders.count({
+      where: {
+        business_id: businessId,
+        status: { in: ["confirmed", "out_for_delivery"] },
+      },
+    }),
+  ])
+  return { pending, inFlight }
 }

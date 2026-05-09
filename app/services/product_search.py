@@ -1078,6 +1078,21 @@ def search_products(
         else:
             scored_filtered = []
 
+        # Decisive-winner trim: drop matches that score below half of the
+        # top hit. Targets the "Burger Master" failure mode where
+        # phrase-tag/description matches (Ramona, score ~145) co-exist with
+        # incidental name-substring matches (Honey Burger, Mexican Burger,
+        # score ~30). The low-score rivals share a word with the top
+        # result by coincidence — listing them as "also participated"
+        # is wrong. With cutoff=0.5×top, equal-quality clusters stay
+        # together (a query like "queso" still surfaces every cheese
+        # product) but a clear leader stops dragging weak siblings along.
+        if len(scored_filtered) >= 2:
+            top_score = scored_filtered[0][0]
+            if top_score > 0:
+                cutoff = top_score * 0.5
+                scored_filtered = [s for s in scored_filtered if s[0] >= cutoff]
+
         ranked = [p for _, _, _, p in scored_filtered[:limit]]
 
         if unique:

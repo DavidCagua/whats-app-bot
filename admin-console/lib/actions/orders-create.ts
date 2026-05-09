@@ -21,6 +21,7 @@ export type CreateOrderInput = {
     | { whatsappId: string; name: string }
     | null
   items: CreateOrderItemInput[]
+  fulfillmentType?: "delivery" | "pickup"
   deliveryAddress?: string | null
   contactPhone?: string | null
   paymentMethod?: string | null
@@ -56,9 +57,15 @@ export async function createOrder(
     }
   }
 
-  const deliveryFee = Number.isFinite(input.deliveryFee)
-    ? Math.max(0, input.deliveryFee as number)
-    : 0
+  const fulfillmentType: "delivery" | "pickup" =
+    input.fulfillmentType === "pickup" ? "pickup" : "delivery"
+  const isPickup = fulfillmentType === "pickup"
+
+  const deliveryFee = isPickup
+    ? 0
+    : Number.isFinite(input.deliveryFee)
+      ? Math.max(0, input.deliveryFee as number)
+      : 0
 
   const business = await prisma.businesses.findUnique({
     where: { id: input.businessId },
@@ -161,9 +168,10 @@ export async function createOrder(
           status: "pending",
           total_amount: new Prisma.Decimal(totalAmount.toFixed(2)),
           notes: input.notes?.trim() || null,
-          delivery_address: input.deliveryAddress?.trim() || null,
+          fulfillment_type: fulfillmentType,
+          delivery_address: isPickup ? null : input.deliveryAddress?.trim() || null,
           contact_phone: input.contactPhone?.trim() || null,
-          payment_method: input.paymentMethod?.trim() || null,
+          payment_method: isPickup ? null : input.paymentMethod?.trim() || null,
           order_items: {
             create: input.items.map((i) => ({
               product_id: i.productId,

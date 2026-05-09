@@ -20,6 +20,7 @@ export type UpdateOrderInput = {
     | { whatsappId: string; name: string }
     | null
   items: UpdateOrderItemInput[]
+  fulfillmentType?: "delivery" | "pickup"
   deliveryAddress?: string | null
   contactPhone?: string | null
   paymentMethod?: string | null
@@ -66,9 +67,15 @@ export async function updateOrder(input: UpdateOrderInput): Promise<Result> {
     }
   }
 
-  const deliveryFee = Number.isFinite(input.deliveryFee)
-    ? Math.max(0, input.deliveryFee as number)
-    : 0
+  const fulfillmentType: "delivery" | "pickup" =
+    input.fulfillmentType === "pickup" ? "pickup" : "delivery"
+  const isPickup = fulfillmentType === "pickup"
+
+  const deliveryFee = isPickup
+    ? 0
+    : Number.isFinite(input.deliveryFee)
+      ? Math.max(0, input.deliveryFee as number)
+      : 0
 
   // Re-validate every product against this business — never trust the client.
   const productIds = Array.from(new Set(input.items.map((i) => i.productId)))
@@ -160,9 +167,10 @@ export async function updateOrder(input: UpdateOrderInput): Promise<Result> {
           total_amount: new Prisma.Decimal(totalAmount.toFixed(2)),
           promo_discount_amount: new Prisma.Decimal("0"),
           notes: input.notes?.trim() || null,
-          delivery_address: input.deliveryAddress?.trim() || null,
+          fulfillment_type: fulfillmentType,
+          delivery_address: isPickup ? null : input.deliveryAddress?.trim() || null,
           contact_phone: input.contactPhone?.trim() || null,
-          payment_method: input.paymentMethod?.trim() || null,
+          payment_method: isPickup ? null : input.paymentMethod?.trim() || null,
           updated_at: new Date(),
           order_items: {
             create: input.items.map((i) => ({

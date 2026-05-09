@@ -88,6 +88,35 @@ class TurnContext:
     order_state: str = "GREETING"
     has_active_cart: bool = False
     cart_summary: str = ""
+    # Delivery info captured for the in-progress order. Empty dict
+    # when nothing's been collected. Keys: name, address, phone,
+    # payment_method. Surfaced via render_for_prompt so every layer
+    # (router / order / CS) sees the same view of "what we already
+    # have on the customer" — prevents the order agent from
+    # redundantly re-saving and lets CS answer "what address did I
+    # give?" without round-tripping a tool call.
+    delivery_info: Dict[str, str] = field(default_factory=dict)
+    # True between a ready_to_confirm dispatch and the user's reply.
+    # Set by the order agent on CTA send; cleared on next-turn
+    # envelope != ready_to_confirm. Surfacing it to the router lets
+    # short affirmatives like "ok" / "dale" stay routed to order
+    # instead of being mis-classified.
+    awaiting_confirmation: bool = False
+    # 'delivery' (default) or 'pickup'. Persisted in
+    # ``order_context.fulfillment_type`` so it survives across turns and
+    # flows into ``orders.fulfillment_type`` on place_order. Default is
+    # delivery — pickup mode is set ONLY when the user explicitly says
+    # so ("lo recojo", "para recoger", "en el local"). Surfaced to every
+    # layer (router / order / CS) via render_for_prompt so the model
+    # doesn't have to re-derive current mode from history each turn.
+    fulfillment_type: str = "delivery"
+    # Order-level notes captured during the conversation: pickup time,
+    # callback requests, change/cash requests, "déjenlo en portería",
+    # etc. NOT product modifications (those live on each cart line).
+    # Flushed into ``orders.notes`` at place_order time. Surfaced to
+    # every layer so the model never re-asks for a note already on
+    # file.
+    order_notes: str = ""
     last_assistant_message: str = ""
     recent_history: Tuple[Tuple[str, str], ...] = ()
     has_recent_cancellable_order: bool = False
@@ -118,6 +147,10 @@ def build_turn_context(
     order_state = "GREETING"
     has_active_cart = False
     cart_summary = ""
+    delivery_info: Dict[str, str] = {}
+    awaiting_confirmation = False
+    fulfillment_type = "delivery"
+    order_notes = ""
     try:
         result = session_state_service.load(wa_id, str(business_id))
         session = (result or {}).get("session") or {}
@@ -135,6 +168,23 @@ def build_turn_context(
             cart_summary = "; ".join(lines)
             if total_str:
                 cart_summary = f"{cart_summary}. Subtotal: {total_str}"
+        # Pull saved delivery fields so every layer sees the same
+        # "what's already on file" view. Keep only non-empty strings
+        # so render_for_prompt can decide whether to print the line.
+        raw_di = order_context.get("delivery_info") or {}
+        if isinstance(raw_di, dict):
+            delivery_info = {
+                k: str(v).strip()
+                for k, v in raw_di.items()
+                if k in ("name", "address", "phone", "payment_method")
+                and isinstance(v, (str, int))
+                and str(v).strip()
+            }
+        awaiting_confirmation = bool(order_context.get("awaiting_confirmation"))
+        raw_ftype = (order_context.get("fulfillment_type") or "").strip().lower()
+        if raw_ftype in ("delivery", "pickup"):
+            fulfillment_type = raw_ftype
+        order_notes = (order_context.get("notes") or "").strip()
     except Exception as exc:
         logger.warning("[TURN_CONTEXT] session load failed: %s", exc)
 
@@ -193,6 +243,10 @@ def build_turn_context(
         order_state=order_state,
         has_active_cart=has_active_cart,
         cart_summary=cart_summary,
+        delivery_info=delivery_info,
+        awaiting_confirmation=awaiting_confirmation,
+        fulfillment_type=fulfillment_type,
+        order_notes=order_notes,
         last_assistant_message=last_assistant_message,
         recent_history=tuple(recent_history),
         has_recent_cancellable_order=has_recent_cancellable_order,
@@ -269,6 +323,55 @@ def render_for_prompt(ctx: TurnContext, include_last_assistant: bool = True) -> 
         lines.append(f"Carrito actual: {ctx.cart_summary}")
     else:
         lines.append("Carrito actual: vacío")
+    # Mode line: render only when the customer explicitly switched to
+    # pickup. The 'delivery' default doesn't need to clutter the
+    # context — every layer already treats delivery as the default
+    # behavior, and emitting "Modo: 🛵 Domicilio (default ...)" on
+    # every turn introduces noise that can bias the router toward
+    # "this user is mid-order" on greetings.
+    if (ctx.fulfillment_type or "delivery") == "pickup":
+        lines.append("Modo: 🏃 Recoger en local (pickup) — el cliente lo indicó explícitamente")
+    # Order-level notes already on file. Surfacing this stops the
+    # model from re-asking ("¿algo más para indicar?") when the user
+    # already gave a note, and lets it amend cleanly when the user
+    # changes their mind. Render only when present — the empty case
+    # adds no signal.
+    if ctx.order_notes:
+        lines.append(f"Notas del pedido (ya guardadas): \"{ctx.order_notes}\"")
+    # Delivery info already on file. Surfacing it to all layers stops
+    # the order agent from re-saving fields it already has, lets CS
+    # answer "what address did I give?" without a tool call, and gives
+    # the router a stronger signal that the user is mid-checkout.
+    if ctx.delivery_info:
+        di_parts = []
+        if ctx.delivery_info.get("name"):
+            di_parts.append(f"nombre={ctx.delivery_info['name']}")
+        if ctx.delivery_info.get("address"):
+            di_parts.append(f"dirección={ctx.delivery_info['address']}")
+        if ctx.delivery_info.get("phone"):
+            di_parts.append(f"teléfono={ctx.delivery_info['phone']}")
+        if ctx.delivery_info.get("payment_method"):
+            di_parts.append(f"pago={ctx.delivery_info['payment_method']}")
+        complete = all(
+            ctx.delivery_info.get(k)
+            for k in ("name", "address", "phone", "payment_method")
+        )
+        suffix = " (completos)" if complete else " (parciales)"
+        lines.append("Datos de entrega ya guardados" + suffix + ": " + " | ".join(di_parts))
+    # Empty case: omit the line entirely. "Datos de entrega: ninguno"
+    # adds no signal and biases the LLM toward "this user is mid-checkout"
+    # on greeting / chat turns where there's nothing to render.
+    # awaiting_confirmation: set after the order agent dispatched a
+    # ready_to_confirm prompt. Tells every layer "the next user
+    # message is responding to a confirm prompt" so short
+    # affirmatives ('ok', 'dale') stay routed to order and the order
+    # agent itself doesn't re-send a second card.
+    if ctx.awaiting_confirmation:
+        lines.append(
+            "Esperando confirmación del cliente: SÍ "
+            "(el bot ya envió la tarjeta/mensaje de confirmación; "
+            "una respuesta afirmativa significa colocar el pedido)"
+        )
     if ctx.has_recent_cancellable_order:
         lines.append("Pedido confirmado pendiente: sí (cancelable)")
     else:

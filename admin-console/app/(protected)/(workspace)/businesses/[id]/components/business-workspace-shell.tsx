@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { SwitcherBusiness } from "@/lib/workspace-businesses"
 import { BusinessSwitcher } from "./business-switcher"
+import { OrdersAttentionBanner } from "./orders-attention-banner"
 import logo from "@/app/logo.png"
 import { MODULES, type ModuleKey } from "@/lib/modules"
 import {
@@ -74,6 +75,7 @@ type BusinessWorkspaceShellProps = {
   isSuperAdmin: boolean
   /** Server action sign-out form (cannot call signOut from this client component). */
   signOutSlot: ReactNode
+  initialOrderCounts: { pending: number; inFlight: number }
   children: React.ReactNode
 }
 
@@ -86,6 +88,7 @@ export function BusinessWorkspaceShell({
   userEmail,
   isSuperAdmin,
   signOutSlot,
+  initialOrderCounts,
   children,
 }: BusinessWorkspaceShellProps) {
   const pathname = usePathname()
@@ -174,6 +177,12 @@ export function BusinessWorkspaceShell({
           <div className="flex h-14 items-center border-b px-4 md:px-6">
             <SidebarTrigger className={cn("-ml-1")} />
           </div>
+          {enabledModules.includes("orders") && (
+            <OrdersAttentionBanner
+              businessId={businessId}
+              initialCounts={initialOrderCounts}
+            />
+          )}
           <div className="flex-1 overflow-auto p-4 md:p-6">{children}</div>
         </main>
       </div>
