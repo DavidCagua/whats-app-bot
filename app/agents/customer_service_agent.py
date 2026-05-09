@@ -65,6 +65,7 @@ from ..orchestration.customer_service_flow import (
     RESULT_KIND_CHAT_FALLBACK,
     RESULT_KIND_INTERNAL_ERROR,
     RESULT_KIND_HANDOFF,
+    RESULT_KIND_DELIVERY_HANDOFF,
 )
 from ..database.conversation_service import conversation_service
 from ..services import business_info_service
@@ -321,11 +322,23 @@ class CustomerServiceAgent(BaseAgent):
 
     def _try_template_reply(self, exec_result: Dict[str, Any]) -> Optional[str]:
         """
-        Render a templated reply for the common simple case: GET_BUSINESS_INFO
-        where the field resolved cleanly. Returns None when the response
-        needs LLM generation.
+        Render a templated reply for cases where we want a deterministic,
+        zero-latency response with no LLM call. Returns None when the
+        response needs LLM generation.
         """
-        if exec_result.get("result_kind") != RESULT_KIND_BUSINESS_INFO:
+        result_kind = exec_result.get("result_kind")
+
+        # Delivery handoff: the executor already disabled the bot for
+        # this conversation. Render a fixed apology so the message
+        # cannot drift, hallucinate ETAs, or undermine the handoff.
+        if result_kind == RESULT_KIND_DELIVERY_HANDOFF:
+            return (
+                "Disculpa la demora con tu pedido. Voy a contactar al "
+                "domiciliario para verificar y te confirmamos cuanto antes "
+                "por aquí."
+            )
+
+        if result_kind != RESULT_KIND_BUSINESS_INFO:
             return None
         field = exec_result.get("field")
         value = exec_result.get("value")

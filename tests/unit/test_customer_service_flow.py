@@ -1,10 +1,16 @@
 """Unit tests for app/orchestration/customer_service_flow.py."""
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
 from app.orchestration import customer_service_flow as csf
+
+
+def _recent_iso(minutes_ago: int = 1) -> str:
+    """An ISO timestamp `minutes_ago` minutes in the past, UTC."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
 
 
 WA = "+573001234567"
@@ -123,10 +129,12 @@ class TestGetBusinessInfo:
 
 class TestGetOrderStatus:
     def test_existing_order(self):
+        # Recent created_at: stays under the delivery-handoff threshold,
+        # so the normal status path runs.
         order = {
             "id": "o1", "status": "pending", "total_amount": 25000,
             "delivery_address": "Cra 7", "payment_method": "nequi",
-            "notes": None, "created_at": "2026-04-18T12:00:00",
+            "notes": None, "created_at": _recent_iso(minutes_ago=1),
             "items": [{"quantity": 2, "unit_price": 12500}],
         }
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order):
@@ -149,6 +157,55 @@ class TestGetOrderStatus:
             result = _run(csf.INTENT_GET_ORDER_STATUS)
         assert result["result_kind"] == csf.RESULT_KIND_INTERNAL_ERROR
         assert result["success"] is False
+
+
+class TestDeliveryHandoff:
+    """50-min threshold escalates GET_ORDER_STATUS to a human handoff."""
+
+    def _aged_order(self, status: str, minutes_ago: int):
+        return {
+            "id": "o1", "status": status, "total_amount": 25000,
+            "delivery_address": "Cra 7", "payment_method": "nequi",
+            "notes": None, "created_at": _recent_iso(minutes_ago=minutes_ago),
+            "items": [{"quantity": 1, "unit_price": 25000}],
+        }
+
+    @pytest.mark.parametrize("status", ["pending", "confirmed", "out_for_delivery"])
+    def test_in_flight_past_threshold_triggers_handoff_and_disables_agent(self, status):
+        order = self._aged_order(status, minutes_ago=60)
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
+             patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
+            result = _run(csf.INTENT_GET_ORDER_STATUS)
+        assert result["result_kind"] == csf.RESULT_KIND_DELIVERY_HANDOFF
+        assert result["order"]["status"] == status
+        m_disable.assert_called_once_with(BIZ, WA, False)
+
+    @pytest.mark.parametrize("status", ["completed", "cancelled"])
+    def test_terminal_status_never_triggers_handoff(self, status):
+        order = self._aged_order(status, minutes_ago=120)
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
+             patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
+            result = _run(csf.INTENT_GET_ORDER_STATUS)
+        assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
+        m_disable.assert_not_called()
+
+    def test_under_threshold_does_not_trigger_handoff(self):
+        order = self._aged_order("confirmed", minutes_ago=10)
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
+             patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
+            result = _run(csf.INTENT_GET_ORDER_STATUS)
+        assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
+        m_disable.assert_not_called()
+
+    def test_disable_failure_still_returns_handoff(self):
+        # If the kill-switch write fails, we must still surface the
+        # apology message rather than fall back to a normal status reply.
+        order = self._aged_order("out_for_delivery", minutes_ago=70)
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
+             patch.object(csf.conversation_agent_service, "set_agent_enabled",
+                          side_effect=RuntimeError("db down")):
+            result = _run(csf.INTENT_GET_ORDER_STATUS)
+        assert result["result_kind"] == csf.RESULT_KIND_DELIVERY_HANDOFF
 
 
 class TestGetOrderStatusActiveCartHandoff:

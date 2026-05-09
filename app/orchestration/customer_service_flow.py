@@ -20,10 +20,13 @@ Result dict shape (returned to caller / response generator):
 """
 
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..database import order_lookup_service
 from ..database import order_modification_service
+from ..database.conversation_agent_service import conversation_agent_service
 from ..services import business_info_service
 from ..services import promotion_service
 from ..services.order_eta import estimate_remaining_minutes
@@ -35,6 +38,27 @@ from ..services.order_status_machine import InvalidStatusTransition
 
 
 logger = logging.getLogger(__name__)
+
+
+# Delivery handoff: when a customer asks for order status this many
+# minutes (or more) after placing the order and the order is still
+# in-flight, we apologize, hand off to a human, and disable the bot
+# for this conversation. Override via env for local testing.
+def _delivery_handoff_threshold_min() -> int:
+    raw = os.getenv("DELIVERY_HANDOFF_THRESHOLD_MIN")
+    if raw is None:
+        return 50
+    try:
+        value = int(raw)
+        return value if value > 0 else 50
+    except (TypeError, ValueError):
+        return 50
+
+
+# Order statuses that count as "in-flight" — i.e. the customer is
+# legitimately worried because the food hasn't arrived yet. Terminal
+# states (completed, cancelled) never trigger a handoff.
+_IN_FLIGHT_STATUSES = frozenset({"pending", "confirmed", "out_for_delivery"})
 
 
 # Intents (planner output)
@@ -71,6 +95,10 @@ RESULT_KIND_PROMO_NOT_RESOLVED = "promo_not_resolved"
 RESULT_KIND_PROMO_AMBIGUOUS = "promo_ambiguous"
 RESULT_KIND_CHAT_FALLBACK = "cs_chat_fallback"
 RESULT_KIND_INTERNAL_ERROR = "cs_internal_error"
+# Customer asked for order status >= 50 min after placing an in-flight
+# order. The agent renders a deterministic apology and disables itself
+# for this conversation; only staff can re-enable from the admin console.
+RESULT_KIND_DELIVERY_HANDOFF = "delivery_handoff"
 # Signal that the agent should hand off mid-turn. The agent's execute()
 # translates this into the `handoff` field of its AgentOutput so the
 # dispatcher picks up the next agent.
@@ -92,6 +120,35 @@ def _base_result(
     }
     result.update(extra)
     return result
+
+
+def _parse_iso_to_utc(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO 8601 timestamp string into a tz-aware UTC datetime."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _should_trigger_delivery_handoff(order: Dict[str, Any]) -> bool:
+    """
+    True iff the order is in-flight AND was placed >= threshold minutes
+    ago. Used to escalate "where is my food?" questions to human staff.
+    """
+    if not order:
+        return False
+    if order.get("status") not in _IN_FLIGHT_STATUSES:
+        return False
+    created_at = _parse_iso_to_utc(order.get("created_at"))
+    if created_at is None:
+        return False
+    elapsed_min = (datetime.now(timezone.utc) - created_at).total_seconds() / 60.0
+    return elapsed_min >= _delivery_handoff_threshold_min()
 
 
 def _clean_order_for_response(order: Dict[str, Any]) -> Dict[str, Any]:
@@ -283,6 +340,31 @@ def _handle_order_status(
             wa_id, business_id,
             RESULT_KIND_NO_ORDER,
         )
+
+    # Delivery handoff: customer is asking "where's my food?" and the
+    # order is well past the patience threshold. Disable the bot for
+    # this conversation so staff can take over from the admin console.
+    if _should_trigger_delivery_handoff(order):
+        threshold = _delivery_handoff_threshold_min()
+        try:
+            conversation_agent_service.set_agent_enabled(business_id, wa_id, False)
+            logger.warning(
+                "[CS_FLOW] delivery handoff triggered wa_id=%s business_id=%s "
+                "order_id=%s status=%s threshold_min=%d — bot disabled",
+                wa_id, business_id, order.get("id"), order.get("status"), threshold,
+            )
+        except Exception as exc:
+            logger.error(
+                "[CS_FLOW] delivery handoff: failed to disable agent "
+                "wa_id=%s business_id=%s: %s",
+                wa_id, business_id, exc, exc_info=True,
+            )
+        return _base_result(
+            wa_id, business_id,
+            RESULT_KIND_DELIVERY_HANDOFF,
+            order=_clean_order_for_response(order),
+        )
+
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_ORDER_STATUS,
