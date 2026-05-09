@@ -25,6 +25,7 @@ model businesses {
   conversation_agent_settings conversation_agent_settings[]
   conversation_sessions       conversation_sessions[]
   conversations               conversations[]
+  order_counters              order_counters[]
   orders                      orders[]
   products                    products[]
   promotions                  promotions[]
@@ -226,16 +227,29 @@ model orders {
   cancelled_at          DateTime?          @db.Timestamptz(6)
   promo_discount_amount Decimal            @default(0) @db.Decimal(12, 2)
   fulfillment_type      String             @default("delivery")
+  display_number        Int
+  display_date          DateTime           @db.Date
   order_items           order_items[]
   order_promotions      order_promotions[]
   businesses            businesses         @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   customers             customers?         @relation(fields: [customer_id], references: [id], onUpdate: NoAction)
 
+  @@unique([business_id, display_date, display_number], map: "orders_business_display_unique")
   @@index([business_id], map: "idx_orders_business_id")
   @@index([customer_id], map: "idx_orders_customer_id")
   @@index([status], map: "idx_orders_status")
   @@index([created_at], map: "idx_orders_created_at")
   @@index([fulfillment_type], map: "idx_orders_fulfillment_type")
+  @@index([business_id, display_date], map: "idx_orders_business_display_date")
+}
+
+model order_counters {
+  business_id  String     @db.Uuid
+  display_date DateTime   @db.Date
+  last_value   Int        @default(0)
+  businesses   businesses @relation(fields: [business_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([business_id, display_date])
 }
 
 model order_items {

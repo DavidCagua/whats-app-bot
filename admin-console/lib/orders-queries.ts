@@ -5,6 +5,8 @@ export type FulfillmentType = "delivery" | "pickup"
 
 export type OrderRow = {
   id: string
+  display_number: number
+  display_date: string
   created_at: string | null
   whatsapp_id: string | null
   customer_id: number | null
@@ -70,6 +72,8 @@ export async function getOrdersForBusiness(
     const deliveryFee = Math.max(0, totalAmount - subtotal)
     return {
       id: order.id,
+      display_number: order.display_number,
+      display_date: order.display_date.toISOString().slice(0, 10),
       created_at: order.created_at ? order.created_at.toISOString() : null,
       whatsapp_id: order.whatsapp_id ?? null,
       customer_id: order.customer_id ?? null,

@@ -6,6 +6,8 @@ import { canEditBusiness } from "./permissions"
 
 export type OrderEditData = {
   id: string
+  displayNumber: number
+  displayDate: string
   businessId: string
   status: string
   customer: {
@@ -69,6 +71,8 @@ export async function getOrderForEdit(orderId: string): Promise<Result> {
     success: true,
     data: {
       id: order.id,
+      displayNumber: order.display_number,
+      displayDate: order.display_date.toISOString().slice(0, 10),
       businessId: order.business_id,
       status: order.status ?? "pending",
       customer: {

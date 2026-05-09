@@ -8,6 +8,8 @@ import unicodedata
 import uuid
 from typing import Dict, List, Optional, Any
 
+from sqlalchemy import text as sa_text
+
 from .models import Product, Order, OrderItem, OrderPromotion, get_db_session
 from .customer_service import customer_service
 from ..services.order_status_machine import STATUS_PENDING
@@ -435,12 +437,39 @@ class ProductOrderService:
             effective_delivery_fee = 0.0 if ftype == "pickup" else float(delivery_fee)
             grand_total = subtotal + effective_delivery_fee
 
+            # Atomic per-business+day display number. The UPSERT row-lock
+            # serializes concurrent inserts so two orders can't grab the
+            # same number; the unique constraint on
+            # (business_id, display_date, display_number) is the safety
+            # net behind that. Bogotá is UTC-5 year-round (no DST), so
+            # ``AT TIME ZONE 'America/Bogota'`` is a stable date pin.
+            counter_row = db_session.execute(
+                sa_text(
+                    """
+                    INSERT INTO order_counters (business_id, display_date, last_value)
+                    VALUES (
+                        :business_id,
+                        (now() AT TIME ZONE 'America/Bogota')::date,
+                        1
+                    )
+                    ON CONFLICT (business_id, display_date)
+                    DO UPDATE SET last_value = order_counters.last_value + 1
+                    RETURNING display_date, last_value
+                    """
+                ),
+                {"business_id": business_id},
+            ).first()
+            display_date = counter_row[0]
+            display_number = int(counter_row[1])
+
             order = Order(
                 business_id=uuid.UUID(business_id),
                 customer_id=customer_id,
                 whatsapp_id=whatsapp_id,
                 status=STATUS_PENDING,
                 fulfillment_type=ftype,
+                display_number=display_number,
+                display_date=display_date,
                 total_amount=grand_total,
                 promo_discount_amount=promo_discount,
                 notes=notes,
@@ -478,7 +507,8 @@ class ProductOrderService:
             db_session.close()
 
             logger.info(
-                f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, "
+                f"[PRODUCT_ORDER] Created order {order_id} (#{display_number} {display_date}) "
+                f"for {whatsapp_id}, "
                 f"fulfillment_type={ftype}, subtotal={subtotal}, "
                 f"promo_discount={promo_discount}, "
                 f"delivery_fee={effective_delivery_fee}, total={grand_total}, "
@@ -487,6 +517,8 @@ class ProductOrderService:
             return {
                 "success": True,
                 "order_id": order_id,
+                "display_number": display_number,
+                "display_date": display_date.isoformat(),
                 "subtotal": subtotal,
                 "total": grand_total,
                 "promo_discount": promo_discount,

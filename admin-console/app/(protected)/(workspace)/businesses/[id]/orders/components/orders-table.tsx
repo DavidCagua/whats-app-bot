@@ -55,7 +55,7 @@ import {
   presetRange,
   shiftRangeByDays,
 } from "@/lib/orders-date-range"
-import { cn } from "@/lib/utils"
+import { cn, formatDisplayNumber } from "@/lib/utils"
 
 const PULSE_DURATION_MS = 5_000
 const TOAST_DURATION_MS = 8_000
@@ -497,8 +497,8 @@ export function OrdersTable({
                     recentIds.has(order.id) && "order-row-pulse"
                   )}
                 >
-                  <TableCell className="font-mono text-xs">
-                    {order.id.slice(0, 8)}
+                  <TableCell className="font-mono text-sm font-medium">
+                    {formatDisplayNumber(order.display_number)}
                   </TableCell>
 
                   <TableCell className="text-muted-foreground">

@@ -4,6 +4,7 @@ import { canAccessBusiness } from "@/lib/permissions"
 import { notFound, redirect } from "next/navigation"
 import { format } from "date-fns"
 import { PrintActions } from "./print-actions"
+import { formatDisplayNumber } from "@/lib/utils"
 import styles from "./print.module.css"
 
 interface PrintOrderPageProps {
@@ -104,7 +105,9 @@ export default async function PrintOrderPage({ params }: PrintOrderPageProps) {
 
           <div className={styles.row}>
             <span className={styles.label}>Pedido</span>
-            <span className={styles.value}>#{order.id.slice(0, 8)}</span>
+            <span className={styles.value}>
+              {formatDisplayNumber(order.display_number)}
+            </span>
           </div>
           <div className={styles.row}>
             <span className={styles.label}>Fecha</span>

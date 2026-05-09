@@ -1366,6 +1366,16 @@ def place_order(injected_business_context: Annotated[dict, InjectedToolArg]) -> 
 
         order_id = result.get("order_id", "")
 
+        # Human-facing #001-style id, allocated atomically by the
+        # service. Falls back to the UUID prefix only if the service
+        # ever returns without one (shouldn't happen post-migration).
+        display_number = result.get("display_number")
+        display_number_str = (
+            f"{int(display_number):03d}"
+            if display_number is not None
+            else order_id[:8].upper()
+        )
+
         # Reset session: clear order context, clear active agents, store last_order_id
         # Session stays alive so user can ask "¿cuánto demora?", "quiero otro pedido", etc.
         session_state_service.save(
@@ -1388,7 +1398,7 @@ def place_order(injected_business_context: Annotated[dict, InjectedToolArg]) -> 
         notes_line = f"📝 Notas: {order_notes}\n" if order_notes else ""
         if ftype == "pickup":
             return (
-                f"✅ ¡Pedido confirmado! #{order_id[:8].upper()}\n\n"
+                f"✅ ¡Pedido confirmado! #{display_number_str}\n\n"
                 f"{items_block}"
                 f"Subtotal: {_format_price(subtotal)}\n"
                 f"{promo_line}"

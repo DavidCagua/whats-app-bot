@@ -25,6 +25,7 @@ import { toast } from "sonner"
 import { useRouter } from "next/navigation"
 import { updateOrder } from "@/lib/actions/orders-update"
 import { getOrderForEdit } from "@/lib/orders-edit-data"
+import { formatDisplayNumber } from "@/lib/utils"
 import type {
   CustomerOption,
   ProductOption,
@@ -77,6 +78,7 @@ export function EditOrderDialog({
   const [newWhatsappId, setNewWhatsappId] = useState("")
   const [newCustomerName, setNewCustomerName] = useState("")
   const [items, setItems] = useState<ItemDraft[]>([emptyItem()])
+  const [displayNumber, setDisplayNumber] = useState<number | null>(null)
   const [fulfillmentType, setFulfillmentType] = useState<"delivery" | "pickup">(
     "delivery"
   )
@@ -124,6 +126,7 @@ export function EditOrderDialog({
             }))
           : [emptyItem()]
       )
+      setDisplayNumber(d.displayNumber)
       setFulfillmentType(d.fulfillmentType)
       setDeliveryAddress(d.deliveryAddress ?? "")
       setContactPhone(d.contactPhone ?? "")
@@ -212,7 +215,14 @@ export function EditOrderDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Editar pedido</DialogTitle>
+          <DialogTitle>
+            Editar pedido{" "}
+            {displayNumber !== null && (
+              <span className="font-mono text-muted-foreground">
+                {formatDisplayNumber(displayNumber)}
+              </span>
+            )}
+          </DialogTitle>
           <DialogDescription>
             Cambia ítems, cliente o datos de entrega. Los precios son los
             que escribas — sin promociones automáticas.

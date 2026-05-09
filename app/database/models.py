@@ -584,6 +584,12 @@ class Order(Base):
     whatsapp_id = Column(String(50), nullable=True)
     status = Column(order_status_enum, nullable=False, default='pending', server_default='pending', index=True)
     fulfillment_type = Column(Text, nullable=False, default='delivery', server_default='delivery', index=True)
+    # Human-facing counter — resets per business at Bogotá midnight. The
+    # UUID PK above stays the durable identity; this is what the cashier
+    # and customer say out loud ("pedido #001"). Allocated atomically
+    # against ``order_counters`` inside the create-order transaction.
+    display_number = Column(Integer, nullable=False)
+    display_date = Column(Date, nullable=False)
     total_amount = Column(Numeric(12, 2), nullable=False, default=0)
     notes = Column(Text, nullable=True)
     delivery_address = Column(Text, nullable=True)
@@ -608,6 +614,8 @@ class Order(Base):
             'whatsapp_id': self.whatsapp_id,
             'status': self.status,
             'fulfillment_type': self.fulfillment_type or 'delivery',
+            'display_number': self.display_number,
+            'display_date': self.display_date.isoformat() if self.display_date else None,
             'total_amount': float(self.total_amount) if self.total_amount else 0,
             'notes': self.notes,
             'delivery_address': self.delivery_address,
@@ -621,6 +629,22 @@ class Order(Base):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class OrderCounter(Base):
+    """Per-business+day allocator for ``orders.display_number``.
+
+    One row per (business, Bogotá-local date). The create-order path
+    UPSERTs this row with ``last_value = last_value + 1 RETURNING
+    last_value`` — the row-level lock during the UPSERT serializes
+    concurrent inserts so two orders can't grab the same number, with
+    no application-level retry logic.
+    """
+    __tablename__ = 'order_counters'
+
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), primary_key=True)
+    display_date = Column(Date, primary_key=True)
+    last_value = Column(Integer, nullable=False, default=0, server_default='0')
 
 
 class BusinessAvailability(Base):

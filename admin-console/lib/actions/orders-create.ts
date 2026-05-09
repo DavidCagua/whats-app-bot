@@ -160,12 +160,38 @@ export async function createOrder(
         })
       }
 
+      // Atomic per-business+day display number. The UPSERT row-lock
+      // serializes concurrent inserts so two orders can't grab the same
+      // number; the unique constraint on
+      // (business_id, display_date, display_number) is the safety net.
+      // Bogotá is UTC-5 year-round (no DST), so the timezone arithmetic
+      // is stable.
+      const counterRows = await tx.$queryRaw<
+        { display_date: Date; last_value: number }[]
+      >(Prisma.sql`
+        INSERT INTO order_counters (business_id, display_date, last_value)
+        VALUES (
+          ${input.businessId}::uuid,
+          (now() AT TIME ZONE 'America/Bogota')::date,
+          1
+        )
+        ON CONFLICT (business_id, display_date)
+        DO UPDATE SET last_value = order_counters.last_value + 1
+        RETURNING display_date, last_value
+      `)
+      const counter = counterRows[0]
+      if (!counter) {
+        throw new Error("counter_allocation_failed")
+      }
+
       const created = await tx.orders.create({
         data: {
           business_id: input.businessId,
           customer_id: resolvedCustomerId,
           whatsapp_id: resolvedWhatsappId,
           status: "pending",
+          display_number: counter.last_value,
+          display_date: counter.display_date,
           total_amount: new Prisma.Decimal(totalAmount.toFixed(2)),
           notes: input.notes?.trim() || null,
           fulfillment_type: fulfillmentType,
