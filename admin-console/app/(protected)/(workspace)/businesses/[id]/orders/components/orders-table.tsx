@@ -43,6 +43,11 @@ import type {
 } from "@/lib/orders-create-data"
 import { EditOrderDialog } from "./edit-order-dialog"
 import {
+  CancelOrderDialog,
+  type CancelDialogResult,
+} from "./cancel-order-dialog"
+import { formatStoredReason } from "@/lib/order-cancel-reasons"
+import {
   getAlertsEnabled,
   playChime,
   setAlertsEnabled as persistAlertsEnabled,
@@ -156,6 +161,7 @@ export function OrdersTable({
   const [updating, setUpdating] = useState<string | null>(null)
   const [range, setRange] = useState<DateRange>(initialRange)
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null)
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null)
   // Single shared "now" used by every in-flight row to render its elapsed
   // time. Single setInterval beats one per row.
   const [now, setNow] = useState(() => Date.now())
@@ -346,6 +352,64 @@ export function OrdersTable({
     // Re-enabling — re-unlock since the AudioContext may have suspended.
     await handleActivateAlerts()
   }, [alertsEnabled, handleActivateAlerts])
+
+  async function handleCancelConfirm(
+    orderId: string,
+    result: CancelDialogResult,
+  ): Promise<void> {
+    const order = orders.find((o) => o.id === orderId)
+    const cancellationReason = formatStoredReason({
+      reasonKey: result.reasonKey,
+      otherText: result.otherText,
+      notes: result.notes,
+    })
+    setUpdating(orderId)
+    pendingStatusRef.current.set(orderId, "cancelled")
+    setOrders((prev) =>
+      prev.map((o) => (o.id === orderId ? { ...o, status: "cancelled" } : o))
+    )
+    try {
+      const res = await updateOrderStatus(orderId, "cancelled", {
+        cancellationReason,
+      })
+      if (!res.success) throw new Error(res.error)
+
+      if (result.sendCustomerMessage && order?.whatsapp_id) {
+        try {
+          const sendRes = await fetch("/api/conversations/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              whatsappId: order.whatsapp_id,
+              businessId,
+              text: result.previewMessage,
+            }),
+          })
+          if (!sendRes.ok) {
+            toast.error(
+              "Pedido cancelado, pero no pudimos enviar el mensaje al cliente."
+            )
+          } else {
+            toast.success("Pedido cancelado y mensaje enviado")
+          }
+        } catch {
+          toast.error(
+            "Pedido cancelado, pero no pudimos enviar el mensaje al cliente."
+          )
+        }
+      } else {
+        toast.success("Pedido cancelado")
+      }
+    } catch (err) {
+      pendingStatusRef.current.delete(orderId)
+      toast.error(err instanceof Error ? err.message : "No se pudo cancelar")
+      // Re-throw so the dialog stays open for the operator to retry.
+      throw err
+    } finally {
+      pendingStatusRef.current.delete(orderId)
+      setUpdating(null)
+    }
+  }
 
   async function handleStatusChange(orderId: string, status: OrderStatus) {
     // Time-gate defense in case the Select's disabled attribute is
@@ -618,9 +682,16 @@ export function OrdersTable({
                   <TableCell>
                     <Select
                       value={order.status}
-                      onValueChange={(val) =>
+                      onValueChange={(val) => {
+                        // Cancellation requires a reason + customer
+                        // message confirmation — route through the
+                        // dialog instead of straight to the action.
+                        if (val === "cancelled") {
+                          setCancellingOrderId(order.id)
+                          return
+                        }
                         void handleStatusChange(order.id, val as OrderStatus)
-                      }
+                      }}
                       disabled={updating === order.id}
                     >
                       <SelectTrigger className="w-36 h-8">
@@ -708,6 +779,25 @@ export function OrdersTable({
         products={products}
         customers={customers}
       />
+
+      {cancellingOrderId &&
+        (() => {
+          const o = orders.find((x) => x.id === cancellingOrderId)
+          if (!o) return null
+          return (
+            <CancelOrderDialog
+              open={true}
+              onOpenChange={(next) => {
+                if (!next) setCancellingOrderId(null)
+              }}
+              displayNumber={o.display_number}
+              customerName={o.customer_name}
+              onConfirm={(result) =>
+                handleCancelConfirm(cancellingOrderId, result)
+              }
+            />
+          )
+        })()}
     </div>
   )
 }
