@@ -174,7 +174,21 @@ class SessionStateService:
                     val = state_update["booking_context"]
                     row.booking_context = {} if val is None else ({**(row.booking_context or {}), **val} if isinstance(val, dict) else row.booking_context or {})
                 if "agent_contexts" in state_update:
-                    row.agent_contexts = {**(row.agent_contexts or {}), **state_update["agent_contexts"]}
+                    # Two-level merge: top-level keys are agent names; each
+                    # agent's payload is a partial dict that should be merged
+                    # into its existing slot rather than replacing it. Without
+                    # this, an agent writing `{customer_service: {x: 1}}`
+                    # would wipe out a prior `{customer_service: {y: 2}}`.
+                    merged_ac = dict(row.agent_contexts or {})
+                    for agent_name, agent_state in (state_update["agent_contexts"] or {}).items():
+                        if isinstance(agent_state, dict):
+                            merged_ac[agent_name] = {
+                                **(merged_ac.get(agent_name) or {}),
+                                **agent_state,
+                            }
+                        else:
+                            merged_ac[agent_name] = agent_state
+                    row.agent_contexts = merged_ac
                 if "last_order_id" in state_update:
                     row.last_order_id = state_update["last_order_id"]
                 if "last_booking_id" in state_update:

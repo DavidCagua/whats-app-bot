@@ -13,16 +13,40 @@ def _recent_iso(minutes_ago: int = 1) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
 
 
+@pytest.fixture(autouse=True)
+def _stable_handoff_threshold(monkeypatch):
+    """
+    Pin the delivery-handoff threshold to 50 minutes for every test. Local
+    .env files often override DELIVERY_HANDOFF_THRESHOLD_MIN to 1 for manual
+    testing; without this fixture the threshold leaks into pytest and flips
+    "recent" orders into auto-handoff territory.
+    """
+    monkeypatch.setattr(csf, "_delivery_handoff_threshold_min", lambda: 50)
+
+
 WA = "+573001234567"
 BIZ = "biz-1"
 BIZ_CTX = {"business_id": BIZ, "business": {"name": "Biela", "settings": {"hours_text": "Lun-Vie 5PM"}}}
 
 
-def _run(intent, params=None, ctx=BIZ_CTX):
+def _run(intent, params=None, ctx=BIZ_CTX, session=None):
     return csf.execute_customer_service_intent(
         wa_id=WA, business_id=BIZ, business_context=ctx,
         intent=intent, params=params or {},
+        session=session,
     )
+
+
+def _session_with_prior_status_ask(order_id: str, count: int = 1):
+    """Session shape that simulates `count` prior GET_ORDER_STATUS turns for the order."""
+    return {
+        "agent_contexts": {
+            "customer_service": {
+                "last_status_order_id": order_id,
+                "last_status_ask_count": count,
+            }
+        }
+    }
 
 
 class TestGetBusinessInfo:
@@ -160,51 +184,99 @@ class TestGetOrderStatus:
 
 
 class TestDeliveryHandoff:
-    """50-min threshold escalates GET_ORDER_STATUS to a human handoff."""
+    """Handoff fires only on the SECOND status ask for the same order, past 50min."""
 
-    def _aged_order(self, status: str, minutes_ago: int):
+    def _aged_order(self, status: str, minutes_ago: int, order_id: str = "o1"):
         return {
-            "id": "o1", "status": status, "total_amount": 25000,
+            "id": order_id, "status": status, "total_amount": 25000,
             "delivery_address": "Cra 7", "payment_method": "nequi",
             "notes": None, "created_at": _recent_iso(minutes_ago=minutes_ago),
             "items": [{"quantity": 1, "unit_price": 25000}],
         }
 
     @pytest.mark.parametrize("status", ["pending", "confirmed", "out_for_delivery"])
-    def test_in_flight_past_threshold_triggers_handoff_and_disables_agent(self, status):
+    def test_second_ask_past_threshold_triggers_handoff_and_disables_agent(self, status):
         order = self._aged_order(status, minutes_ago=60)
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
+            result = _run(
+                csf.INTENT_GET_ORDER_STATUS,
+                session=_session_with_prior_status_ask("o1", count=1),
+            )
         assert result["result_kind"] == csf.RESULT_KIND_DELIVERY_HANDOFF
         assert result["order"]["status"] == status
-        m_disable.assert_called_once_with(BIZ, WA, False)
+        assert result["state_patch"]["last_status_order_id"] == "o1"
+        assert result["state_patch"]["last_status_ask_count"] == 2
+        m_disable.assert_called_once_with(
+            BIZ, WA, False, handoff_reason="delivery_handoff",
+        )
+
+    def test_first_ask_past_threshold_returns_status_not_handoff(self):
+        # No prior ask in session → first time the customer asks about this
+        # order. Even past 50min, we give a normal status reply and bump the
+        # counter so the NEXT ask escalates.
+        order = self._aged_order("out_for_delivery", minutes_ago=70)
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
+             patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
+            result = _run(csf.INTENT_GET_ORDER_STATUS)
+        assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
+        assert result["state_patch"]["last_status_order_id"] == "o1"
+        assert result["state_patch"]["last_status_ask_count"] == 1
+        m_disable.assert_not_called()
+
+    def test_counter_resets_for_new_order_id(self):
+        # The session remembers a prior ask for order "old", but the customer
+        # has since placed a new order "new". The new order is past 50min;
+        # the prior counter must NOT carry over to a different order id.
+        order = self._aged_order("out_for_delivery", minutes_ago=80, order_id="new")
+        with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
+             patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
+            result = _run(
+                csf.INTENT_GET_ORDER_STATUS,
+                session=_session_with_prior_status_ask("old", count=3),
+            )
+        assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
+        assert result["state_patch"]["last_status_order_id"] == "new"
+        assert result["state_patch"]["last_status_ask_count"] == 1
+        m_disable.assert_not_called()
 
     @pytest.mark.parametrize("status", ["completed", "cancelled"])
     def test_terminal_status_never_triggers_handoff(self, status):
         order = self._aged_order(status, minutes_ago=120)
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
+            result = _run(
+                csf.INTENT_GET_ORDER_STATUS,
+                session=_session_with_prior_status_ask("o1", count=5),
+            )
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
         m_disable.assert_not_called()
 
     def test_under_threshold_does_not_trigger_handoff(self):
+        # Even with many prior asks, an order under the threshold stays
+        # in normal status mode.
         order = self._aged_order("confirmed", minutes_ago=10)
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
+            result = _run(
+                csf.INTENT_GET_ORDER_STATUS,
+                session=_session_with_prior_status_ask("o1", count=4),
+            )
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
         m_disable.assert_not_called()
 
     def test_disable_failure_still_returns_handoff(self):
-        # If the kill-switch write fails, we must still surface the
-        # apology message rather than fall back to a normal status reply.
+        # If the kill-switch write fails on the qualifying ask, we must
+        # still surface the apology message rather than fall back to a
+        # normal status reply.
         order = self._aged_order("out_for_delivery", minutes_ago=70)
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled",
                           side_effect=RuntimeError("db down")):
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
+            result = _run(
+                csf.INTENT_GET_ORDER_STATUS,
+                session=_session_with_prior_status_ask("o1", count=1),
+            )
         assert result["result_kind"] == csf.RESULT_KIND_DELIVERY_HANDOFF
 
 
@@ -298,7 +370,9 @@ class TestSelectListedPromoSearchFallback:
 
     def _run_select(self, query, listed=None):
         session = {
-            "customer_service_context": {"last_listed_promos": listed or []},
+            "agent_contexts": {
+                "customer_service": {"last_listed_promos": listed or []},
+            },
         }
         return csf.execute_customer_service_intent(
             wa_id="+573001234567",

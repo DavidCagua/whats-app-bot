@@ -19,6 +19,9 @@ export type OrderRow = {
   fulfillment_type: FulfillmentType
   notes: string | null
   status: string
+  /** True when this order's conversation has been auto-handed off to
+   * a human (e.g. customer asked for status >50min after placement). */
+  awaiting_handoff: boolean
   items: {
     id: string
     quantity: number
@@ -56,6 +59,18 @@ export async function getOrdersForBusiness(
     },
   })
 
+  // One round-trip to fetch the set of whatsapp_ids currently in
+  // handoff for this business. Avoids per-order N+1 queries — the
+  // orders table can have hundreds of rows.
+  const handoffWaIds = new Set(
+    (
+      await prisma.conversation_agent_settings.findMany({
+        where: { business_id: businessId, handoff_reason: { not: null } },
+        select: { whatsapp_id: true },
+      })
+    ).map((r) => r.whatsapp_id)
+  )
+
   return orders.map((order) => {
     const totalAmount = Number(order.total_amount.toString())
     const items = order.order_items.map((oi) => ({
@@ -86,6 +101,7 @@ export async function getOrdersForBusiness(
       fulfillment_type: order.fulfillment_type === "pickup" ? "pickup" : "delivery",
       notes: order.notes ?? null,
       status: order.status ?? "pending",
+      awaiting_handoff: order.whatsapp_id ? handoffWaIds.has(order.whatsapp_id) : false,
       items,
     }
   })
@@ -96,12 +112,14 @@ export type OrderBannerCounts = {
   pending: number
   /** Confirmed orders that haven't been delivered yet (confirmed + out_for_delivery). */
   inFlight: number
+  /** Conversations the bot auto-handed off to a human (e.g. delivery follow-up). */
+  awaitingHandoff: number
 }
 
 export async function getOrderBannerCounts(
   businessId: string
 ): Promise<OrderBannerCounts> {
-  const [pending, inFlight] = await Promise.all([
+  const [pending, inFlight, awaitingHandoff] = await Promise.all([
     prisma.orders.count({
       where: { business_id: businessId, status: "pending" },
     }),
@@ -111,6 +129,9 @@ export async function getOrderBannerCounts(
         status: { in: ["confirmed", "out_for_delivery"] },
       },
     }),
+    prisma.conversation_agent_settings.count({
+      where: { business_id: businessId, handoff_reason: { not: null } },
+    }),
   ])
-  return { pending, inFlight }
+  return { pending, inFlight, awaitingHandoff }
 }

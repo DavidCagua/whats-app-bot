@@ -59,6 +59,26 @@ import { cn, formatDisplayNumber } from "@/lib/utils"
 
 const PULSE_DURATION_MS = 5_000
 const TOAST_DURATION_MS = 8_000
+const ELAPSED_TICK_MS = 30_000
+
+// In-flight statuses get "X min ago" framing — staff cares about how long
+// the order has been hanging. Terminal statuses (completed, cancelled) get
+// the concrete date because the elapsed time stops being actionable.
+const IN_FLIGHT_STATUSES = new Set(["pending", "confirmed", "out_for_delivery"])
+
+const formatElapsedSince = (iso: string, now: number): string => {
+  const startedAt = new Date(iso).getTime()
+  if (!Number.isFinite(startedAt)) return "—"
+  const diffMin = Math.max(0, Math.round((now - startedAt) / 60_000))
+  if (diffMin < 1) return "ahora"
+  if (diffMin < 60) return `${diffMin} min`
+  const hours = Math.floor(diffMin / 60)
+  const mins = diffMin % 60
+  if (hours < 24) return mins === 0 ? `${hours} h` : `${hours} h ${mins} min`
+  const days = Math.floor(hours / 24)
+  const remHours = hours % 24
+  return remHours === 0 ? `${days} d` : `${days} d ${remHours} h`
+}
 
 const formatAmount = (value: number) =>
   new Intl.NumberFormat("es-CO", {
@@ -135,6 +155,13 @@ export function OrdersTable({
   const [updating, setUpdating] = useState<string | null>(null)
   const [range, setRange] = useState<DateRange>(initialRange)
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null)
+  // Single shared "now" used by every in-flight row to render its elapsed
+  // time. Single setInterval beats one per row.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), ELAPSED_TICK_MS)
+    return () => clearInterval(id)
+  }, [])
   // Server snapshots overwrite local state, but only after a brief settle —
   // when the user changes filter, the URL update + server-rendered initialOrders
   // hand the new list down via props. The SSE stream then reconnects with the
@@ -459,7 +486,7 @@ export function OrdersTable({
         <TableHeader>
           <TableRow>
             <TableHead>ID</TableHead>
-            <TableHead>Fecha</TableHead>
+            <TableHead>Fecha / Edad</TableHead>
             <TableHead>Teléfono</TableHead>
             <TableHead>Nombre</TableHead>
             <TableHead>Dirección</TableHead>
@@ -494,7 +521,13 @@ export function OrdersTable({
                   key={order.id}
                   className={cn(
                     order.status === "pending" && "order-row-pending",
-                    recentIds.has(order.id) && "order-row-pulse"
+                    recentIds.has(order.id) && "order-row-pulse",
+                    // Auto-handoff: customer asked for status >50min after
+                    // placement and the bot escalated to a human. Light
+                    // red signals "act now" — distinct from the amber
+                    // attention banner so it stands out on this table.
+                    order.awaiting_handoff &&
+                      "bg-red-50 hover:bg-red-100 border-l-4 border-l-red-500 dark:bg-red-950/40 dark:hover:bg-red-950/60"
                   )}
                 >
                   <TableCell className="font-mono text-sm font-medium">
@@ -503,7 +536,9 @@ export function OrdersTable({
 
                   <TableCell className="text-muted-foreground">
                     {order.created_at
-                      ? format(new Date(order.created_at), "MMM d, yyyy HH:mm")
+                      ? IN_FLIGHT_STATUSES.has(order.status)
+                        ? formatElapsedSince(order.created_at, now)
+                        : format(new Date(order.created_at), "MMM d, yyyy HH:mm")
                       : "—"}
                   </TableCell>
                   <TableCell>

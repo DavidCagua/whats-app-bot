@@ -1128,6 +1128,12 @@ class CustomerServiceAgent(BaseAgent):
             "last_intent": intent,
             "last_result_kind": result_kind,
         }
+        # Executor-emitted state patch (e.g. per-order ask counter from
+        # _handle_order_status). Keys merge into customer_service_context
+        # so they persist across turns alongside last_intent / last_result_kind.
+        exec_state_patch = exec_result.get("state_patch") or {}
+        if isinstance(exec_state_patch, dict):
+            cs_ctx_update.update(exec_state_patch)
         # Persist the listed promo set so the next turn can resolve
         # "dame esa" / "la primera" via SELECT_LISTED_PROMO.
         if result_kind == RESULT_KIND_PROMOS_LIST:
@@ -1137,7 +1143,12 @@ class CustomerServiceAgent(BaseAgent):
             ]
 
         state_update = {
-            "customer_service_context": cs_ctx_update,
+            # CS state lives under agent_contexts["customer_service"] —
+            # the only sub-dict the ConversationSession model persists for
+            # per-agent state. Writing directly to a top-level
+            # `customer_service_context` key was silently dropped by
+            # session_state_service.save().
+            "agent_contexts": {"customer_service": cs_ctx_update},
             "active_agents": ["customer_service"],
         }
 

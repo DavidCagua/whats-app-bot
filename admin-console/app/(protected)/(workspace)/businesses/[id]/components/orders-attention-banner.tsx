@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils"
 type Counts = {
   pending: number
   inFlight: number
+  awaitingHandoff: number
 }
 
 type OrdersAttentionBannerProps = {
@@ -31,6 +32,7 @@ const parseDismissed = (raw: string | null): Counts | null => {
     return {
       pending: Number(parsed.pending) || 0,
       inFlight: Number(parsed.inFlight) || 0,
+      awaitingHandoff: Number(parsed.awaitingHandoff) || 0,
     }
   } catch {
     return null
@@ -99,15 +101,18 @@ export function OrdersAttentionBanner({
     window.dispatchEvent(new Event(DISMISS_EVENT))
   }
 
-  const nothingToShow = counts.pending === 0 && counts.inFlight === 0
+  const nothingToShow =
+    counts.pending === 0 && counts.inFlight === 0 && counts.awaitingHandoff === 0
   const dismissedCovers =
     dismissedAt !== null &&
     dismissedAt.pending >= counts.pending &&
-    dismissedAt.inFlight >= counts.inFlight
+    dismissedAt.inFlight >= counts.inFlight &&
+    dismissedAt.awaitingHandoff >= counts.awaitingHandoff
 
   if (nothingToShow || dismissedCovers) return null
 
   const ordersHref = `/businesses/${businessId}/orders`
+  const conversationsHref = `/businesses/${businessId}/conversations`
 
   return (
     <div
@@ -134,6 +139,22 @@ export function OrdersAttentionBanner({
           <Link href={ordersHref} className="hover:underline">
             <strong>{counts.inFlight}</strong>{" "}
             {counts.inFlight === 1 ? "pedido sin entregar" : "pedidos sin entregar"}
+          </Link>
+        )}
+        {(counts.pending > 0 || counts.inFlight > 0) && counts.awaitingHandoff > 0 && (
+          <span aria-hidden className="text-amber-900/40 dark:text-amber-100/40">
+            ·
+          </span>
+        )}
+        {counts.awaitingHandoff > 0 && (
+          <Link
+            href={conversationsHref}
+            className="font-semibold hover:underline text-amber-900 dark:text-amber-100"
+          >
+            <strong>{counts.awaitingHandoff}</strong>{" "}
+            {counts.awaitingHandoff === 1
+              ? "conversación esperando seguimiento"
+              : "conversaciones esperando seguimiento"}
           </Link>
         )}
       </div>

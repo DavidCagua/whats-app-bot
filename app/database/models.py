@@ -313,6 +313,11 @@ class ConversationAgentSetting(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     whatsapp_id = Column(String(50), nullable=False, index=True)
     agent_enabled = Column(Boolean, default=True, nullable=False, index=True)
+    # Why the bot is currently disabled. NULL when agent_enabled=True or
+    # when staff disabled it manually with no specific reason. Set to a
+    # short tag (e.g. "delivery_handoff") by automated escalation paths
+    # so the admin UI can render distinct colored treatments.
+    handoff_reason = Column(Text, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
@@ -322,6 +327,7 @@ class ConversationAgentSetting(Base):
             'business_id': str(self.business_id),
             'whatsapp_id': self.whatsapp_id,
             'agent_enabled': bool(self.agent_enabled),
+            'handoff_reason': self.handoff_reason,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -846,6 +852,67 @@ class OrderPromotion(Base):
             'pricing_mode': self.pricing_mode,
             'discount_applied': float(self.discount_applied) if self.discount_applied is not None else 0,
             'applied_at': self.applied_at.isoformat() if self.applied_at else None,
+        }
+
+
+class ConversationDailyAnalysis(Base):
+    """Daily post-mortem of a single (business, whatsapp_id) conversation.
+
+    One row per (business_id, whatsapp_id, analysis_date) — the unique
+    constraint makes the cron idempotent. ``category`` is the deterministic
+    bucket derived from existing tables; ``summary`` / ``drop_off_reason``
+    are filled in by the LLM only for ambiguous cases.
+    """
+    __tablename__ = 'conversation_daily_analyses'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    whatsapp_id = Column(String(50), nullable=False)
+    analysis_date = Column(Date, nullable=False)
+
+    # One of: 'automatic_completed', 'automatic_no_order',
+    #         'automatic_dropped_off', 'human_intervention', 'delivery_handoff'
+    category = Column(String(40), nullable=False)
+
+    converted_to_order = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    order_id = Column(UUID(as_uuid=True), ForeignKey('orders.id', ondelete='SET NULL'), nullable=True)
+    had_human_intervention = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    handoff_reason = Column(Text, nullable=True)
+
+    message_count = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    first_msg_at = Column(DateTime(timezone=True), nullable=True)
+    last_msg_at = Column(DateTime(timezone=True), nullable=True)
+
+    summary = Column(Text, nullable=True)
+    drop_off_reason = Column(Text, nullable=True)
+    model = Column(String(50), nullable=True)
+    analyzed_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('business_id', 'whatsapp_id', 'analysis_date',
+                         name='uq_daily_analysis_per_convo_per_day'),
+        Index('idx_conversation_daily_analyses_business_date', 'business_id', 'analysis_date'),
+        Index('idx_conversation_daily_analyses_category', 'category'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'whatsapp_id': self.whatsapp_id,
+            'analysis_date': self.analysis_date.isoformat() if self.analysis_date else None,
+            'category': self.category,
+            'converted_to_order': self.converted_to_order,
+            'order_id': str(self.order_id) if self.order_id else None,
+            'had_human_intervention': self.had_human_intervention,
+            'handoff_reason': self.handoff_reason,
+            'message_count': self.message_count,
+            'first_msg_at': self.first_msg_at.isoformat() if self.first_msg_at else None,
+            'last_msg_at': self.last_msg_at.isoformat() if self.last_msg_at else None,
+            'summary': self.summary,
+            'drop_off_reason': self.drop_off_reason,
+            'model': self.model,
+            'analyzed_at': self.analyzed_at.isoformat() if self.analyzed_at else None,
         }
 
 

@@ -75,7 +75,7 @@ type BusinessWorkspaceShellProps = {
   isSuperAdmin: boolean
   /** Server action sign-out form (cannot call signOut from this client component). */
   signOutSlot: ReactNode
-  initialOrderCounts: { pending: number; inFlight: number }
+  initialOrderCounts: { pending: number; inFlight: number; awaitingHandoff: number }
   children: React.ReactNode
 }
 

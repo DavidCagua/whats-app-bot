@@ -28,10 +28,13 @@ export async function GET(request: NextRequest) {
   const row = await prisma.conversation_agent_settings.findFirst({
     where: { business_id: businessId, whatsapp_id: whatsappId },
     orderBy: { updated_at: "desc" },
-    select: { agent_enabled: true },
+    select: { agent_enabled: true, handoff_reason: true },
   })
 
-  return NextResponse.json({ agentEnabled: row?.agent_enabled ?? true })
+  return NextResponse.json({
+    agentEnabled: row?.agent_enabled ?? true,
+    handoffReason: row?.handoff_reason ?? null,
+  })
 }
 
 export async function PATCH(request: NextRequest) {
@@ -75,10 +78,18 @@ export async function PATCH(request: NextRequest) {
     select: { id: true },
   })
 
+  // Re-enabling always clears the handoff reason so the colored
+  // treatments in the conversation list / orders table go back to
+  // normal once staff takes the conversation back.
+  const handoffReasonOnWrite = agentEnabled ? null : undefined
   if (existing?.id) {
     await prisma.conversation_agent_settings.update({
       where: { id: existing.id },
-      data: { agent_enabled: agentEnabled, updated_at: new Date() },
+      data: {
+        agent_enabled: agentEnabled,
+        ...(handoffReasonOnWrite === null ? { handoff_reason: null } : {}),
+        updated_at: new Date(),
+      },
     })
   } else {
     await prisma.conversation_agent_settings.create({

@@ -26,7 +26,10 @@ from typing import Any, Dict, List, Optional
 
 from ..database import order_lookup_service
 from ..database import order_modification_service
-from ..database.conversation_agent_service import conversation_agent_service
+from ..database.conversation_agent_service import (
+    conversation_agent_service,
+    HANDOFF_REASON_DELIVERY,
+)
 from ..services import business_info_service
 from ..services import promotion_service
 from ..services.order_eta import estimate_remaining_minutes
@@ -341,17 +344,47 @@ def _handle_order_status(
             RESULT_KIND_NO_ORDER,
         )
 
-    # Delivery handoff: customer is asking "where's my food?" and the
-    # order is well past the patience threshold. Disable the bot for
-    # this conversation so staff can take over from the admin console.
-    if _should_trigger_delivery_handoff(order):
+    # Per-order ask counter. The handoff only fires on the SECOND (or
+    # later) "where is my food?" question for the same order — staff
+    # don't want every customer who happens to ask once past minute 50
+    # to be hard-handed off to a human. Tracked in
+    # customer_service_context so it's per-conversation and resets when
+    # a new order is placed (different order id → counter resets).
+    agent_contexts = (session or {}).get("agent_contexts") or {}
+    cs_ctx = agent_contexts.get("customer_service") or {}
+    tracked_order_id = cs_ctx.get("last_status_order_id")
+    prior_count_raw = cs_ctx.get("last_status_ask_count") or 0
+    try:
+        prior_count = int(prior_count_raw)
+    except (TypeError, ValueError):
+        prior_count = 0
+    # Counter only carries forward if the user is still asking about the
+    # same order. Once the latest order id changes (new placement), this
+    # is the first ask for the new order.
+    effective_prior = prior_count if tracked_order_id == order.get("id") else 0
+    ask_number = effective_prior + 1
+    is_repeat_ask = effective_prior >= 1
+    new_state = {
+        "last_status_order_id": order.get("id"),
+        "last_status_ask_count": ask_number,
+    }
+
+    # Delivery handoff: only when this is at least the 2nd status ask
+    # AND the order has been in flight past the patience threshold. The
+    # first ask always gets a normal status reply so the customer hears
+    # something useful before we escalate to a human.
+    if is_repeat_ask and _should_trigger_delivery_handoff(order):
         threshold = _delivery_handoff_threshold_min()
         try:
-            conversation_agent_service.set_agent_enabled(business_id, wa_id, False)
+            conversation_agent_service.set_agent_enabled(
+                business_id, wa_id, False,
+                handoff_reason=HANDOFF_REASON_DELIVERY,
+            )
             logger.warning(
                 "[CS_FLOW] delivery handoff triggered wa_id=%s business_id=%s "
-                "order_id=%s status=%s threshold_min=%d — bot disabled",
-                wa_id, business_id, order.get("id"), order.get("status"), threshold,
+                "order_id=%s status=%s ask_number=%d threshold_min=%d — bot disabled",
+                wa_id, business_id, order.get("id"), order.get("status"),
+                ask_number, threshold,
             )
         except Exception as exc:
             logger.error(
@@ -363,12 +396,14 @@ def _handle_order_status(
             wa_id, business_id,
             RESULT_KIND_DELIVERY_HANDOFF,
             order=_clean_order_for_response(order),
+            state_patch=new_state,
         )
 
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_ORDER_STATUS,
         order=_clean_order_for_response(order),
+        state_patch=new_state,
     )
 
 
@@ -551,7 +586,8 @@ def _handle_select_listed_promo(
         to be more specific).
       - 0 matches → RESULT_KIND_PROMO_NOT_RESOLVED.
     """
-    cs_ctx = (session or {}).get("customer_service_context") or {}
+    agent_contexts = (session or {}).get("agent_contexts") or {}
+    cs_ctx = agent_contexts.get("customer_service") or {}
     listed = cs_ctx.get("last_listed_promos") or []
 
     promo_id: Optional[str] = None

@@ -76,8 +76,8 @@ class TestAgentExecuteTemplatePath:
         assert output["agent_type"] == "customer_service"
         assert "Lun-Vie 5PM a 10PM" in output["message"]
         assert output["state_update"]["active_agents"] == ["customer_service"]
-        assert output["state_update"]["customer_service_context"]["last_intent"] == "GET_BUSINESS_INFO"
-        assert output["state_update"]["customer_service_context"]["last_result_kind"] == csf.RESULT_KIND_BUSINESS_INFO
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_intent"] == "GET_BUSINESS_INFO"
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_result_kind"] == csf.RESULT_KIND_BUSINESS_INFO
 
     def test_address_uses_template(self):
         agent = CustomerServiceAgent()
@@ -230,7 +230,7 @@ class TestAgentExecuteLLMResponsePath:
             )
         assert llm.invoke.call_count == 2
         assert output["message"] == "No tengo pedidos tuyos recientes, parce."
-        assert output["state_update"]["customer_service_context"]["last_result_kind"] == csf.RESULT_KIND_NO_ORDER
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_result_kind"] == csf.RESULT_KIND_NO_ORDER
 
     def test_info_missing_path_calls_response_llm(self):
         agent = CustomerServiceAgent()
@@ -247,7 +247,7 @@ class TestAgentExecuteLLMResponsePath:
                 business_context=BIELA_CTX, conversation_history=[],
             )
         assert llm.invoke.call_count == 2
-        assert output["state_update"]["customer_service_context"]["last_result_kind"] == csf.RESULT_KIND_INFO_MISSING
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_result_kind"] == csf.RESULT_KIND_INFO_MISSING
         assert output["message"] == "No tengo ese dato exacto."
 
     def test_planner_exception_falls_back_to_chat(self):
@@ -264,7 +264,7 @@ class TestAgentExecuteLLMResponsePath:
                 wa_id="x", name="X",
                 business_context=BIELA_CTX, conversation_history=[],
             )
-        assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
         assert output["message"] == "Puedo ayudarte con horarios, dirección..."
 
 
@@ -404,8 +404,8 @@ class TestCancelOrderGuard:
         # Guard fired: NO order_modification_service.cancel_order should
         # have been called. We assert via the resulting last_intent and
         # last_result_kind: chat fallback, not cancellation.
-        assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
-        assert output["state_update"]["customer_service_context"]["last_result_kind"] != csf.RESULT_KIND_ORDER_CANCELLED
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_result_kind"] != csf.RESULT_KIND_ORDER_CANCELLED
 
     def test_cancel_order_with_placed_cancellable_order_proceeds(self):
         agent = CustomerServiceAgent()
@@ -446,8 +446,8 @@ class TestCancelOrderGuard:
             )
         # Guard did NOT fire — the cancel handler ran and produced
         # RESULT_KIND_ORDER_CANCELLED.
-        assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CANCEL_ORDER
-        assert output["state_update"]["customer_service_context"]["last_result_kind"] == csf.RESULT_KIND_ORDER_CANCELLED
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_intent"] == csf.INTENT_CANCEL_ORDER
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_result_kind"] == csf.RESULT_KIND_ORDER_CANCELLED
 
     def test_cancel_order_without_turn_ctx_does_not_block(self):
         """
@@ -473,7 +473,7 @@ class TestCancelOrderGuard:
                 business_context=BIELA_CTX,
                 conversation_history=[],
             )
-        assert output["state_update"]["customer_service_context"]["last_intent"] == csf.INTENT_CANCEL_ORDER
+        assert output["state_update"]["agent_contexts"]["customer_service"]["last_intent"] == csf.INTENT_CANCEL_ORDER
 
 
 class TestExplicitCancelKeywordHelper:
@@ -601,7 +601,7 @@ class TestCancelOrderRequiresExplicitKeyword:
             assert handoff.get("to") == "order"
             assert handoff.get("context", {}).get("reason") == "despedida_post_pedido_misroute"
         else:
-            ctx_out = output["state_update"]["customer_service_context"]
+            ctx_out = output["state_update"]["agent_contexts"]["customer_service"]
             assert ctx_out["last_intent"] == csf.INTENT_CUSTOMER_SERVICE_CHAT
             assert ctx_out["last_result_kind"] != csf.RESULT_KIND_ORDER_CANCELLED
 
@@ -646,7 +646,7 @@ class TestCancelOrderRequiresExplicitKeyword:
                 turn_ctx=ctx,
             )
         cancel_mock.assert_called_once()
-        ctx_out = output["state_update"]["customer_service_context"]
+        ctx_out = output["state_update"]["agent_contexts"]["customer_service"]
         assert ctx_out["last_intent"] == csf.INTENT_CANCEL_ORDER
         assert ctx_out["last_result_kind"] == csf.RESULT_KIND_ORDER_CANCELLED
 

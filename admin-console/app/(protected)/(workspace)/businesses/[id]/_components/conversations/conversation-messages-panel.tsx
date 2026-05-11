@@ -13,6 +13,7 @@ import {
   Square,
   ArrowLeft,
   ChevronDown,
+  AlertTriangle,
 } from "lucide-react"
 import { format, isToday, isYesterday, differenceInCalendarDays } from "date-fns"
 import { es } from "date-fns/locale"
@@ -151,6 +152,7 @@ export function ConversationMessagesPanel({
   const [isSending, setIsSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [agentEnabled, setAgentEnabled] = useState(thread.agent_enabled)
+  const [handoffReason, setHandoffReason] = useState<string | null>(thread.handoff_reason)
   const [isTogglingAgent, setIsTogglingAgent] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderError, setOlderError] = useState<string | null>(null)
@@ -270,6 +272,7 @@ export function ConversationMessagesPanel({
     if (prevThreadIdRef.current !== threadId) {
       setLocalMessages(thread.messages)
       setAgentEnabled(thread.agent_enabled)
+      setHandoffReason(thread.handoff_reason)
       prevThreadIdRef.current = threadId
       forceScrollToBottomRef.current = true
       isAtBottomRef.current = true
@@ -300,8 +303,15 @@ export function ConversationMessagesPanel({
     setLocalMessages((prev) => mergeMessages(prev, thread.messages))
     if (!isTogglingAgentRef.current) {
       setAgentEnabled(thread.agent_enabled)
+      setHandoffReason(thread.handoff_reason)
     }
-  }, [thread.whatsapp_id, thread.business_id, thread.messages, thread.agent_enabled])
+  }, [
+    thread.whatsapp_id,
+    thread.business_id,
+    thread.messages,
+    thread.agent_enabled,
+    thread.handoff_reason,
+  ])
 
   // Track at-bottom state and trigger lazy load when scrolling near top.
   // Only triggers fetchOlder on actual user-driven scroll events — never on
@@ -396,8 +406,13 @@ export function ConversationMessagesPanel({
   }, [localMessages, getViewport])
 
   const onToggleAgent = async (next: boolean) => {
-    const previous = agentEnabled
+    const previousEnabled = agentEnabled
+    const previousReason = handoffReason
     setAgentEnabled(next)
+    // Optimistic clear: re-enabling drops the handoff badge instantly so
+    // staff sees the colored treatment go away as soon as they flip the
+    // switch. Server clears the column too — see app/api/conversations/agent-enabled.
+    if (next) setHandoffReason(null)
     setIsTogglingAgent(true)
     try {
       const res = await fetch("/api/conversations/agent-enabled", {
@@ -411,7 +426,8 @@ export function ConversationMessagesPanel({
       })
       if (!res.ok) throw new Error("Failed to update")
     } catch {
-      setAgentEnabled(previous)
+      setAgentEnabled(previousEnabled)
+      setHandoffReason(previousReason)
     } finally {
       setIsTogglingAgent(false)
     }
@@ -640,6 +656,24 @@ export function ConversationMessagesPanel({
           </div>
         </div>
       </CardHeader>
+
+      {/* Auto-handoff warning: appears when the bot disabled itself
+          (e.g. customer asked for status >50min after placing an order).
+          Sits between the header and the messages so staff can't miss it. */}
+      {handoffReason === "delivery_handoff" && !agentEnabled && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 border-y border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100 sm:px-4 sm:text-sm"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
+          <div className="flex-1 leading-snug">
+            <strong>Seguimiento de domicilio pendiente.</strong> El cliente preguntó por el
+            estado del pedido y el bot pasó la conversación a un humano. Verifica
+            con el domiciliario y responde tú; cuando termines, vuelve a activar
+            el bot.
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="relative flex-1 min-h-0">

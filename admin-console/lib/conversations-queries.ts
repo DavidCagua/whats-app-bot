@@ -11,6 +11,10 @@ export type ConversationGroup = {
   last_timestamp: Date
   message_count: number
   whatsapp_number: string | null
+  /** Reason the bot is currently disabled, or null if it's active.
+   * "delivery_handoff" is set automatically by the customer-service
+   * flow when the 50-min order-status threshold trips. */
+  handoff_reason: string | null
 }
 
 export type ConversationMessageAttachment = {
@@ -46,6 +50,8 @@ export type ConversationThread = {
   phone_number: string | null
   /** Conversation-level agent enable flag (defaults to true). */
   agent_enabled: boolean
+  /** Reason the bot is currently disabled (e.g. "delivery_handoff"); null when enabled. */
+  handoff_reason: string | null
 }
 
 /**
@@ -143,7 +149,7 @@ export async function getConversations({
   const businessIds_to_fetch = [...new Set(rows.map((r) => r.business_id))]
   const whatsappIds_to_fetch = [...new Set(rows.map((r) => r.whatsapp_id))]
 
-  const [businesses, customers, whatsappNumbers] = await Promise.all([
+  const [businesses, customers, whatsappNumbers, handoffRows] = await Promise.all([
     prisma.businesses.findMany({
       where: { id: { in: businessIds_to_fetch } },
       select: { id: true, name: true },
@@ -156,12 +162,27 @@ export async function getConversations({
       where: { business_id: { in: businessIds_to_fetch } },
       select: { business_id: true, phone_number: true },
     }),
+    prisma.conversation_agent_settings.findMany({
+      where: {
+        business_id: { in: businessIds_to_fetch },
+        whatsapp_id: { in: whatsappIds_to_fetch },
+        handoff_reason: { not: null },
+      },
+      select: { business_id: true, whatsapp_id: true, handoff_reason: true },
+    }),
   ])
 
   const businessMap = new Map(businesses.map((b) => [b.id, b.name]))
   const customerMap = new Map(customers.map((c) => [c.whatsapp_id, c.name]))
   const whatsappNumberMap = new Map(
     whatsappNumbers.map((w) => [w.business_id, w.phone_number])
+  )
+  // Composite key (business_id|whatsapp_id) → reason. Filtered to non-null
+  // reasons so a "manual disable" doesn't decorate the row in the UI —
+  // those convos still appear normal until they auto-escalate.
+  const handoffKey = (b: string, w: string) => `${b}|${w}`
+  const handoffMap = new Map(
+    handoffRows.map((h) => [handoffKey(h.business_id, h.whatsapp_id), h.handoff_reason])
   )
 
   return rows.map((r) => ({
@@ -173,6 +194,7 @@ export async function getConversations({
     last_timestamp: r.last_timestamp,
     message_count: Number(r.message_count),
     whatsapp_number: whatsappNumberMap.get(r.business_id) || null,
+    handoff_reason: handoffMap.get(handoffKey(r.business_id, r.whatsapp_id)) ?? null,
   }))
 }
 
@@ -294,7 +316,7 @@ export async function getConversationThread({
   const agentRow = await prisma.conversation_agent_settings.findFirst({
     where: { business_id: businessId, whatsapp_id: whatsappId },
     orderBy: { updated_at: "desc" },
-    select: { agent_enabled: true },
+    select: { agent_enabled: true, handoff_reason: true },
   })
 
   const [business, customer] = await Promise.all([
@@ -319,6 +341,7 @@ export async function getConversationThread({
     phone_number_id,
     phone_number,
     agent_enabled: agentRow?.agent_enabled ?? true,
+    handoff_reason: agentRow?.handoff_reason ?? null,
   }
 }
 

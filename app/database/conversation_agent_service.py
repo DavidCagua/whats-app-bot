@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 from .models import ConversationAgentSetting, get_db_session
 
 
+# Reason tag the customer-service flow writes when the 50-min order-status
+# threshold disables the bot for delivery follow-up.
+HANDOFF_REASON_DELIVERY = "delivery_handoff"
+
+
 class ConversationAgentService:
     """Service for conversation-level agent settings."""
 
@@ -34,8 +39,20 @@ class ConversationAgentService:
             logging.error(f"[CONVERSATION_AGENT] Error reading setting: {e}")
             return True
 
-    def set_agent_enabled(self, business_id: str, whatsapp_id: str, agent_enabled: bool) -> Optional[dict]:
-        """Upsert setting for the conversation. Returns dict or None on failure."""
+    def set_agent_enabled(
+        self,
+        business_id: str,
+        whatsapp_id: str,
+        agent_enabled: bool,
+        handoff_reason: Optional[str] = None,
+    ) -> Optional[dict]:
+        """
+        Upsert setting for the conversation. Returns dict or None on failure.
+
+        ``handoff_reason`` is recorded only when ``agent_enabled`` is False.
+        Re-enabling always clears any prior reason so a stale tag doesn't
+        survive a manual flip from the admin console.
+        """
         try:
             session: Session = get_db_session()
             row = (
@@ -46,15 +63,18 @@ class ConversationAgentService:
                 )
                 .first()
             )
+            stored_reason = handoff_reason if not agent_enabled else None
             if row is None:
                 row = ConversationAgentSetting(
                     business_id=uuid.UUID(business_id),
                     whatsapp_id=whatsapp_id,
                     agent_enabled=bool(agent_enabled),
+                    handoff_reason=stored_reason,
                 )
                 session.add(row)
             else:
                 row.agent_enabled = bool(agent_enabled)
+                row.handoff_reason = stored_reason
             session.commit()
             result = row.to_dict()
             session.close()
@@ -65,4 +85,3 @@ class ConversationAgentService:
 
 
 conversation_agent_service = ConversationAgentService()
-
