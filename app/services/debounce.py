@@ -199,11 +199,14 @@ def requeue_aborted_text(abort_key: str, text: str) -> None:
     # Synthesizing a message id avoids logging `turn_id=-` and prevents
     # any dedup collision when the same text is requeued twice.
     synthetic_id = f"requeue-{uuid.uuid4().hex[:8]}-{int(time.time())}"
-    # No _skip_persist flag here anymore — persistence moved to the
-    # webhook receipt path (Option C, 2026-05-10) so the requeue text
-    # was already persisted when its original Twilio webhook landed.
-    # The flusher does not persist; nothing to skip.
+    # _skip_persist marks this entry as "do not persist as a new
+    # conversations row" — the original Twilio webhook already
+    # persisted the user message before the agent ran. Without this
+    # flag, the requeued text gets re-persisted on the next flush,
+    # producing duplicate `role='user'` rows for one Twilio inbound
+    # (the visible "user message duplicated in inbox" bug).
     payload = json.dumps({
+        "_skip_persist": True,
         "normalized_body": {
             "entry": [{"changes": [{"value": {
                 "contacts": [{"wa_id": phone}],
@@ -503,6 +506,21 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
                         phone, exc,
                     )
 
+        # Skip-persist if EVERY entry in this batch is a requeue (solo
+        # requeue or batched-requeues). When a fresh inbound is mixed
+        # in, persist normally — the new content needs a row, and the
+        # merged body covers it. The narrower fix (only-skip-on-solo)
+        # is what catches the production bug from 2026-05-09 without
+        # changing behavior for healthy turns.
+        skip_persist = bool(entries) and all(
+            e.get("_skip_persist") for e in entries
+        )
+        if skip_persist:
+            logging.warning(
+                "[DEBOUNCE] %s: solo requeue (%d entries) — skipping user-persist on this flush",
+                phone, len(entries),
+            )
+
         # ── Resolve business context inside the flusher ──────────────
         # Done here (not in the webhook thread) so the debounce window
         # isn't eaten by the ~3–5 s Supabase round trip. One lookup
@@ -532,6 +550,7 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
                     business_context=business_context,
                     abort_key=ab_key,
                     stale_turn=lock_result.waited,
+                    skip_persist=skip_persist,
                 ))
 
         # Counter decay is intentionally TTL-only (not reset on first

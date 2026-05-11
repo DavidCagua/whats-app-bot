@@ -8,7 +8,7 @@ import threading
 from flask import Blueprint, request, jsonify, current_app
 
 from .decorators.security import signature_required, twilio_signature_required, admin_api_key_required
-from .handlers.whatsapp_handler import process_whatsapp_message, persist_inbound_user_message
+from .handlers.whatsapp_handler import process_whatsapp_message
 from .utils.media_utils import convert_webm_to_ogg, upload_outbound_media_to_supabase
 from .utils.whatsapp_utils import (
     is_valid_whatsapp_message,
@@ -105,9 +105,6 @@ def handle_message():
 
                 if business_context:
                     logging.warning(f"[ROUTING] ✅ Routing to business: {business_context['business']['name']}")
-                    # Persist BEFORE the agent dispatch — 1:1 with the
-                    # Meta inbound, matches the Twilio path.
-                    persist_inbound_user_message(body, business_context=business_context)
                     processing_start = time.time()
                     process_whatsapp_message(body, business_context=business_context)
                     logging.warning(
@@ -115,7 +112,6 @@ def handle_message():
                     )
                 else:
                     logging.warning("[ROUTING] ⚠️ No business found for this number. Using default from .env")
-                    persist_inbound_user_message(body, business_context=None)
                     processing_start = time.time()
                     process_whatsapp_message(body, business_context=None)
                     logging.warning(
@@ -127,7 +123,6 @@ def handle_message():
                 import traceback
                 logging.error(f"[ROUTING] Traceback: {traceback.format_exc()}")
                 # Fallback to default business on error
-                persist_inbound_user_message(body, business_context=None)
                 processing_start = time.time()
                 process_whatsapp_message(body, business_context=None)
                 logging.warning(
@@ -195,33 +190,18 @@ def handle_twilio_message():
             daemon=True,
         ).start()
 
-    # ── Debounce BEFORE the agent dispatch ───────────────────────────
-    # The business lookup used to be deferred to the flusher to keep
-    # the debounce window from being eaten by a cold SQLAlchemy + table
-    # scan (~3–5 s). With the 300 s TTL cache on
-    # business_service.get_business_context_by_phone_number, lookups
-    # are ~ms on warm cache, so we now resolve here at webhook time —
-    # which lets us persist the user row at webhook time too
-    # (1:1 with Twilio inbound, no merge-time duplication). The flusher
-    # still re-resolves (also a cache hit) for the agent call.
+    # ── Debounce BEFORE business lookup ──────────────────────────────
+    # The business lookup takes ~3–5 s (cold SQLAlchemy session + a
+    # full-table scan of whatsapp_numbers). Doing it here would eat the
+    # entire 3 s debounce window before the first message is even
+    # buffered in Redis. Instead we key the buffer by (To, phone) —
+    # each business owns a unique Twilio number, so this preserves
+    # tenant isolation — and resolve the business context inside the
+    # flusher after the quiet window expires.
     to_number = form_data.get("To", "")
     normalized_body = normalize_twilio_to_meta(form_data)
     sender_wa_id = (form_data.get("From") or "").replace("whatsapp:", "").strip()
     logging.warning("[DEBUG] Valid Twilio message, processing...")
-
-    # Resolve business context + persist the inbound row before
-    # buffering. Persisting here (not at flush time) is what guarantees
-    # one Twilio webhook = one conversations row even when the flusher
-    # merges abort+requeue + fresh entries.
-    inbound_business_context = None
-    try:
-        inbound_business_context = resolve_twilio_business_context(to_number)
-        persist_inbound_user_message(
-            normalized_body,
-            business_context=inbound_business_context,
-        )
-    except Exception as exc:
-        logging.error(f"[TWILIO] webhook-time persist failed: {exc}")
 
     try:
         flask_app = current_app._get_current_object()
