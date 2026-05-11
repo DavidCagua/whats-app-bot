@@ -23,30 +23,109 @@ from app.utils.whatsapp_utils import (
 )
 
 
-def process_whatsapp_message(body, business_context=None, abort_key=None, stale_turn=False, skip_persist=False):
+def persist_inbound_user_message(
+    body,
+    business_context=None,
+    abort_key=None,
+):
+    """Persist the inbound user message + enqueue media job for attachments.
+
+    Called at webhook receipt time (BEFORE debounce buffering / agent
+    dispatch). Owning the persist here — not at flush time — guarantees
+    1:1 between Twilio inbound webhook and ``conversations.role='user'``
+    row, even when the flusher coalesces multiple webhook entries into
+    a single agent turn. Pre-Option-C, the flusher persisted the merged
+    body each time, so an abort + requeue + fresh-burst would produce
+    two rows where the second's text contained the first's as a prefix
+    (the production "Pago por transferencia" duplicate, 2026-05-10).
+
+    Returns the conv_id when an attachment row was created (so the
+    caller can enqueue / track the media worker), otherwise None. Errors
+    are swallowed — webhook ack must not be blocked by a persist hiccup.
     """
-    Process incoming WhatsApp message: parse, persist, optionally run agent and send reply.
-    Voice-only messages are persisted and enqueued; reply is sent later when transcript is ready.
+    try:
+        provider = "twilio" if (business_context or {}).get("provider") == "twilio" else "meta"
+        inbound = parse_inbound_message(body, provider)
+        if not inbound:
+            try:
+                value = body["entry"][0]["changes"][0]["value"]
+                wa_id = value["contacts"][0]["wa_id"]
+                msg = value["messages"][0]
+                message_body = (msg.get("text") or {}).get("body") or ""
+                inbound = {
+                    "from_wa_id": wa_id,
+                    "provider_message_id": msg.get("id") or "",
+                    "text": message_body,
+                    "attachments": [],
+                }
+            except (KeyError, IndexError, TypeError) as exc:
+                logging.error(f"[CONVERSATION] webhook-time parse failed: {exc}")
+                return None
+
+        wa_id = inbound["from_wa_id"]
+        message_body = (inbound.get("text") or "").strip()
+        attachments = inbound.get("attachments") or []
+        inferred_business_id = (business_context or {}).get("business_id")
+        inferred_whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
+
+        if attachments:
+            conv_id = conversation_service.store_conversation_message_with_attachments(
+                wa_id=wa_id,
+                message_text=message_body,
+                role="user",
+                attachments=attachments,
+                business_id=inferred_business_id,
+                whatsapp_number_id=inferred_whatsapp_number_id,
+            )
+            if conv_id is not None:
+                try:
+                    from app.workers.media_job import enqueue_media_job
+                    # Pass abort_key so the media job can set the
+                    # processing flag while it runs vision — concurrent
+                    # text messages arriving during the vision call hit
+                    # the existing abort+requeue path and coalesce
+                    # cleanly with the image turn.
+                    enqueue_media_job(conv_id, abort_key=abort_key)
+                except Exception as enq_e:
+                    logging.error(f"[CONVERSATION] media job enqueue failed: {enq_e}")
+            return conv_id
+
+        conversation_service.store_conversation_message(
+            wa_id=wa_id,
+            message=message_body,
+            role="user",
+            business_id=inferred_business_id,
+            whatsapp_number_id=inferred_whatsapp_number_id,
+        )
+        return None
+    except Exception as exc:
+        logging.error(f"[CONVERSATION] webhook-time persist failed: {exc}")
+        return None
+
+
+def process_whatsapp_message(body, business_context=None, abort_key=None, stale_turn=False):
+    """
+    Process incoming WhatsApp message: parse, optionally run agent and send reply.
+
+    Persistence is NOT done here — it moved to webhook time
+    (``persist_inbound_user_message``) so abort+requeue can't produce
+    duplicate user rows. This function only parses, dispatches the agent,
+    and sends the reply.
 
     Args:
         abort_key: Optional Redis key checked before sending — if set, a newer
             message arrived during processing and this response should be dropped.
         stale_turn: True when this message was queued behind another turn —
             the user sent it before seeing the bot's previous reply.
-        skip_persist: True when this invocation comes from the abort+requeue
-            path (debounce.requeue_aborted_text). The user message was
-            already persisted by the original webhook's first flush —
-            re-persisting here would create duplicate `role='user'` rows
-            for one Twilio inbound.
 
     Returns:
         bool: True iff the turn aborted (mid-turn abort signal or
             pre-send abort gate fired). The debounce flusher uses this
             to decide whether to reset the requeue-count backoff
-            counter — a turn that aborted should NOT reset the counter
-            (the counter exists precisely because of the abort). Defaults
-            to False on every non-agent path (early returns, voice-only,
-            attachments-only) so callers see the conservative answer.
+            counter — a turn that aborted should NOT reset the counter.
+            Defaults to False on every non-agent path (early returns,
+            voice-only, attachments-only) so callers see the
+            conservative answer.
     """
     overall_start = time.time()
     # Fresh per-turn memoization cache. Eliminates 2-4x redundant reads
@@ -71,55 +150,12 @@ def process_whatsapp_message(body, business_context=None, abort_key=None, stale_
                 }
             except (KeyError, IndexError, TypeError) as e:
                 logging.error(f"[MESSAGE] Invalid webhook body: {e}")
-                return
+                return False
 
         wa_id = inbound["from_wa_id"]
         message_body = (inbound.get("text") or "").strip()
         attachments = inbound.get("attachments") or []
         logging.warning(f"[DEBUG] Extracted wa_id: {wa_id}, text length: {len(message_body)}, attachments: {len(attachments)}")
-
-        inferred_business_id = (business_context or {}).get("business_id")
-        inferred_whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
-
-        try:
-            if skip_persist:
-                # Requeue path: text was already persisted by the original
-                # webhook's first flush. Skip persist + media-job re-enqueue
-                # (the original conv_id already has the media job queued).
-                logging.warning(
-                    "[CONVERSATION] %s: skip_persist=True (requeue path) — not re-storing user message",
-                    wa_id,
-                )
-            elif attachments:
-                conv_id = conversation_service.store_conversation_message_with_attachments(
-                    wa_id=wa_id,
-                    message_text=message_body,
-                    role="user",
-                    attachments=attachments,
-                    business_id=inferred_business_id,
-                    whatsapp_number_id=inferred_whatsapp_number_id,
-                )
-                if conv_id is not None:
-                    try:
-                        from app.workers.media_job import enqueue_media_job
-                        # Pass abort_key so the media job can set the
-                        # processing flag while it runs vision — concurrent
-                        # text messages (e.g. "la tiene?" arriving during
-                        # the vision call) hit the existing abort+requeue
-                        # path and coalesce cleanly with the image turn.
-                        enqueue_media_job(conv_id, abort_key=abort_key)
-                    except Exception as enq_e:
-                        logging.error(f"[CONVERSATION] Failed to enqueue media job: {enq_e}")
-            else:
-                conversation_service.store_conversation_message(
-                    wa_id=wa_id,
-                    message=message_body,
-                    role="user",
-                    business_id=inferred_business_id,
-                    whatsapp_number_id=inferred_whatsapp_number_id,
-                )
-        except Exception as e:
-            logging.error(f"[CONVERSATION] Failed to store inbound user message: {e}")
 
         has_audio = any((a.get("type") or "") == "audio" for a in attachments)
         has_image = any((a.get("type") or "") == "image" for a in attachments)
@@ -322,16 +358,16 @@ def run_agent_and_send_reply(wa_id: str, message_text: str, business_id: str) ->
         name, agent_allowed = _agent_gate_and_name(wa_id, business_context)
         if not agent_allowed:
             return False
-        ok = _run_agent_and_send(
+        send_ok, _was_aborted = _run_agent_and_send(
             wa_id=wa_id,
             message_body=message_text.strip(),
             name=name,
             business_context=business_context,
             message_id=None,
         )
-        if ok:
+        if send_ok:
             logging.warning("[VOICE_REPLY] Reply sent successfully for transcript")
-        return ok
+        return send_ok
     except Exception as e:
         logging.error(f"[VOICE_REPLY] Error: {e}", exc_info=True)
         return False

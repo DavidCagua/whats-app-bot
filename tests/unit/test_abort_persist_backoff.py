@@ -8,7 +8,7 @@ Coverage:
   _flush → process_whatsapp_message and the user-message persist is
   skipped on solo requeues. Mixed requeue+fresh flushes still persist
   so new content isn't lost.
-- Fix #2: v2 OrderAgentToolCalling checks the abort flag at the top of
+- Fix #2: v2 OrderAgent checks the abort flag at the top of
   each LLM iteration and short-circuits with __ABORTED__ + requeue.
 - Backoff (a): _compute_initial_window returns the exponential curve
   capped at the configured max.
@@ -25,20 +25,17 @@ from app.services import debounce
 
 
 # ---------------------------------------------------------------------------
-# Fix #1 — skip-persist flag on the requeue path
+# Fix #1 — persistence moved to webhook time (Option C, 2026-05-10)
 # ---------------------------------------------------------------------------
 
-class TestRequeueCarriesSkipPersistFlag:
-    """The synthetic envelope must include `_skip_persist=True` so the
-    handler can recognize the requeue path and avoid re-storing the
-    user message."""
+class TestRequeueEnvelopeHasNoPersistFlag:
+    """The synthetic requeue envelope must NOT carry a _skip_persist
+    flag anymore — persistence now happens at webhook receipt time,
+    so there's no flush-time persist call to skip. The flag would be
+    dead code; this test catches anyone re-adding it."""
 
-    def test_payload_includes_skip_persist_true(self):
+    def test_payload_omits_skip_persist_flag(self):
         r = MagicMock(name="redis")
-        # script_return=0 → the lock was already held by another flusher,
-        # so the won_flusher branch (which needs Flask app context) is
-        # skipped. Valid production scenario: requeue piggybacks on the
-        # in-flight flusher instead of spawning a new one.
         script = MagicMock(name="lua", return_value=0)
         r.register_script.return_value = script
         with patch.object(debounce, "_get_redis", return_value=r), \
@@ -47,33 +44,137 @@ class TestRequeueCarriesSkipPersistFlag:
                 "abort:whatsapp:+14155238886:+573001234567",
                 "Me envías la carta",
             )
-        # The Lua script gets the JSON payload as its first arg.
         args = script.call_args.kwargs.get("args") or []
         assert args, "Lua script not called with args"
         payload = json.loads(args[0])
-        assert payload.get("_skip_persist") is True, (
-            "synthetic requeue envelope missing _skip_persist=True"
+        assert "_skip_persist" not in payload, (
+            "_skip_persist flag should be gone — persist moved to webhook time"
         )
-        # Sanity: the normalized_body shape (and identity) is still intact
-        # so _flush's merge loop and identity-picker still work.
+        # Sanity: the normalized_body shape (and identity) is still intact.
         nb = payload["normalized_body"]
         contacts = nb["entry"][0]["changes"][0]["value"]["contacts"]
         assert contacts[0]["wa_id"] == "+573001234567"
 
 
-class TestProcessWhatsappMessageHonorsSkipPersist:
-    """The handler must NOT call store_conversation_message when
-    skip_persist=True."""
+class TestPersistInboundUserMessage:
+    """``persist_inbound_user_message`` owns the user-row write at
+    webhook receipt time. 1:1 with the Twilio/Meta inbound — no merge
+    coalesces multiple webhooks into a single row anymore, which was
+    the cause of the "Pago por transferencia" duplicate visible in
+    production 2026-05-10."""
 
-    _MIN_TWILIO_BODY = {
+    _MIN_BODY = {
         "entry": [{
             "changes": [{
                 "value": {
                     "contacts": [{"wa_id": "+573001234567"}],
                     "messages": [{
-                        "id": "requeue-abc-1",
+                        "id": "msg-1",
                         "type": "text",
-                        "text": {"body": "Me envías la carta"},
+                        "text": {"body": "Pago por transferencia"},
+                    }],
+                }
+            }]
+        }]
+    }
+
+    _BIZ_CTX = {
+        "business_id": "biela-test",
+        "whatsapp_number_id": "wn-1",
+        "business": {"name": "Biela"},
+    }
+
+    def test_text_message_persists_once(self):
+        from app.handlers import whatsapp_handler
+        with patch.object(
+            whatsapp_handler.conversation_service,
+            "store_conversation_message",
+        ) as store:
+            result = whatsapp_handler.persist_inbound_user_message(
+                self._MIN_BODY, business_context=self._BIZ_CTX,
+            )
+        assert result is None  # No attachment → no conv_id returned
+        store.assert_called_once()
+        kwargs = store.call_args.kwargs
+        assert kwargs.get("role") == "user"
+        assert kwargs.get("message") == "Pago por transferencia"
+        assert kwargs.get("wa_id") == "+573001234567"
+        assert kwargs.get("business_id") == "biela-test"
+
+    def test_attachment_message_uses_attachment_store_and_returns_conv_id(self):
+        from app.handlers import whatsapp_handler
+        body = {
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "contacts": [{"wa_id": "+573001234567"}],
+                        "messages": [{
+                            "id": "msg-2",
+                            "type": "image",
+                            "image": {"id": "media-1"},
+                        }],
+                    }
+                }]
+            }]
+        }
+        # parse_inbound_message must return an attachment for this to
+        # exercise the attachment branch — patch it directly so we
+        # don't need to thread Meta's media-URL fetch.
+        with patch.object(
+            whatsapp_handler, "parse_inbound_message",
+            return_value={
+                "from_wa_id": "+573001234567",
+                "provider_message_id": "msg-2",
+                "text": "",
+                "attachments": [{"type": "image", "url": "http://x/y.jpg"}],
+            },
+        ), patch.object(
+            whatsapp_handler.conversation_service,
+            "store_conversation_message_with_attachments",
+            return_value=42,
+        ) as store_attach, patch(
+            "app.workers.media_job.enqueue_media_job",
+        ) as enqueue:
+            result = whatsapp_handler.persist_inbound_user_message(
+                body, business_context=self._BIZ_CTX,
+                abort_key="abort:wa:+57:+573001234567",
+            )
+        assert result == 42
+        store_attach.assert_called_once()
+        # Media job got the conv_id + abort_key for in-flight abort signaling.
+        enqueue.assert_called_once_with(42, abort_key="abort:wa:+57:+573001234567")
+
+    def test_swallows_persist_exception_returns_none(self):
+        """Webhook ack must not be blocked by a DB hiccup. Failures
+        log + return None; caller proceeds normally."""
+        from app.handlers import whatsapp_handler
+        with patch.object(
+            whatsapp_handler.conversation_service,
+            "store_conversation_message",
+            side_effect=RuntimeError("db down"),
+        ):
+            result = whatsapp_handler.persist_inbound_user_message(
+                self._MIN_BODY, business_context=self._BIZ_CTX,
+            )
+        assert result is None
+
+
+class TestProcessWhatsappMessageNoLongerPersists:
+    """After Option C, process_whatsapp_message MUST NOT persist the
+    user row — that's owned by the webhook-time persist helper. If
+    something re-adds the persist call here, the duplicate-row bug
+    comes back the moment the flusher coalesces an abort+requeue with
+    fresh content."""
+
+    _MIN_BODY = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "contacts": [{"wa_id": "+573001234567"}],
+                    "messages": [{
+                        "id": "msg-1",
+                        "type": "text",
+                        "text": {"body": "hola"},
                     }],
                 }
             }]
@@ -81,13 +182,8 @@ class TestProcessWhatsappMessageHonorsSkipPersist:
     }
 
     def _patch_pipeline(self):
-        """Common patch stack: silence agent + customer + business
-        lookups so we exercise only the persist gate."""
         from contextlib import ExitStack
         stack = ExitStack()
-        stack.enter_context(patch(
-            "app.handlers.whatsapp_handler.conversation_manager"
-        ))
         stack.enter_context(patch(
             "app.handlers.whatsapp_handler.customer_service"
         ))
@@ -98,38 +194,40 @@ class TestProcessWhatsappMessageHonorsSkipPersist:
             "app.handlers.whatsapp_handler.conversation_agent_service"
         ))
         stack.enter_context(patch(
-            "app.handlers.whatsapp_handler.send_message"
+            "app.handlers.whatsapp_handler.send_message", return_value="ok"
         ))
         stack.enter_context(patch(
             "app.handlers.whatsapp_handler.turn_cache"
         ))
         return stack
 
-    def test_skip_persist_true_does_not_store(self):
+    def test_handler_does_not_persist_text(self):
         from app.handlers import whatsapp_handler
+        cm = MagicMock()
+        cm.process.return_value = "respuesta"
         with self._patch_pipeline(), \
-             patch.object(whatsapp_handler.conversation_service, "store_conversation_message") as store:
+             patch.object(whatsapp_handler, "conversation_manager", cm), \
+             patch.object(
+                 whatsapp_handler.conversation_service,
+                 "store_conversation_message",
+             ) as store_text, \
+             patch.object(
+                 whatsapp_handler.conversation_service,
+                 "store_conversation_message_with_attachments",
+             ) as store_attach:
             whatsapp_handler.process_whatsapp_message(
-                self._MIN_TWILIO_BODY,
-                business_context=None,
-                skip_persist=True,
+                self._MIN_BODY, business_context=None,
             )
-        store.assert_not_called()
+        store_text.assert_not_called()
+        store_attach.assert_not_called()
 
-    def test_skip_persist_false_still_stores(self):
+    def test_handler_signature_no_longer_accepts_skip_persist(self):
+        """skip_persist kwarg should be gone. If a caller passes it,
+        they should get a TypeError so the call site is updated."""
+        import inspect
         from app.handlers import whatsapp_handler
-        with self._patch_pipeline(), \
-             patch.object(whatsapp_handler.conversation_service, "store_conversation_message") as store:
-            whatsapp_handler.process_whatsapp_message(
-                self._MIN_TWILIO_BODY,
-                business_context=None,
-                skip_persist=False,
-            )
-        store.assert_called_once()
-        # Confirm the role + body are passed through.
-        kwargs = store.call_args.kwargs
-        assert kwargs.get("role") == "user"
-        assert kwargs.get("message") == "Me envías la carta"
+        sig = inspect.signature(whatsapp_handler.process_whatsapp_message)
+        assert "skip_persist" not in sig.parameters
 
 
 # ---------------------------------------------------------------------------
@@ -145,15 +243,15 @@ class TestV2AgentAbortWiring:
         return {"business_id": "biz-1", "business": {"name": "Biela", "settings": {}}}
 
     def test_abort_pre_iteration_short_circuits(self):
-        from app.agents.order_agent_tool_calling import OrderAgentToolCalling
+        from app.agents.order_agent import OrderAgent
         from app.orchestration.turn_context import TurnContext
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         llm = MagicMock()
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=TurnContext(),
              ), \
              patch(
@@ -186,10 +284,10 @@ class TestV2AgentAbortWiring:
 
     def test_no_abort_runs_normally(self):
         """check_abort=False → loop proceeds, LLM is invoked."""
-        from app.agents.order_agent_tool_calling import OrderAgentToolCalling
+        from app.agents.order_agent import OrderAgent
         from app.orchestration.turn_context import TurnContext
         from langchain_core.messages import AIMessage
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         # Single AIMessage with a respond(...) tool call → terminates loop cleanly.
         respond_call = {
             "name": "respond",
@@ -199,15 +297,15 @@ class TestV2AgentAbortWiring:
         }
         llm = MagicMock()
         llm.invoke.return_value = AIMessage(content="", tool_calls=[respond_call])
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=TurnContext(),
              ), \
              patch(
-                 "app.agents.order_agent_tool_calling.render_response",
+                 "app.agents.order_agent.render_response",
                  return_value={"type": "text", "body": "hola"},
              ), \
              patch(
