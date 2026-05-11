@@ -491,6 +491,13 @@ class Product(Base):
     category = Column(String(50), nullable=True, index=True)
     sku = Column(String(50), nullable=True)
     is_active = Column(Boolean, default=True, index=True)
+    # When TRUE, the product is hidden from every bot-facing discovery
+    # surface (search, category list, menu). It stays visible to lookups
+    # by ID — promo cart-add, order creation, and the admin promo picker
+    # — so a promotion can reference it without the bot offering it on
+    # its own. Pairs with ``is_active``: retired products use is_active=
+    # false; promo-only ones stay is_active=true, promo_only=true.
+    promo_only = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     tags = Column(ARRAY(Text), nullable=False, server_default="{}")
     product_metadata = Column("metadata", JSONB, nullable=False, server_default="{}")
     embedding = Column(Vector(1536), nullable=True)

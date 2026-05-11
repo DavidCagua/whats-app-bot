@@ -41,6 +41,7 @@ export type ProductInput = {
   sku?: string | null
   price: number
   category?: string | null
+  promo_only?: boolean
 }
 
 export type SerializedProduct = {
@@ -52,6 +53,7 @@ export type SerializedProduct = {
   category: string | null
   price: number
   is_active: boolean
+  promo_only: boolean
 }
 
 function serialize(p: {
@@ -63,6 +65,7 @@ function serialize(p: {
   category?: string | null
   price: { toString(): string }
   is_active: boolean | null
+  promo_only: boolean | null
 }): SerializedProduct {
   return {
     id: p.id,
@@ -73,6 +76,7 @@ function serialize(p: {
     category: p.category ?? null,
     price: Number(p.price.toString()),
     is_active: p.is_active ?? true,
+    promo_only: p.promo_only ?? false,
   }
 }
 
@@ -96,6 +100,7 @@ export async function createProduct(businessId: string, data: ProductInput) {
         sku: data.sku?.trim() || null,
         price: data.price,
         category: data.category?.trim() || null,
+        promo_only: data.promo_only ?? false,
       },
     })
     await regenerateProductMetadata(product.id)
@@ -138,6 +143,7 @@ export async function updateProduct(productId: string, data: Partial<ProductInpu
         ...(data.sku !== undefined ? { sku: data.sku?.trim() || null } : {}),
         ...(data.price !== undefined ? { price: data.price } : {}),
         ...(data.category !== undefined ? { category: data.category?.trim() || null } : {}),
+        ...(data.promo_only !== undefined ? { promo_only: data.promo_only } : {}),
         updated_at: new Date(),
       },
     })

@@ -55,6 +55,7 @@ export function ProductsManager({
   const [sku, setSku] = useState("")
   const [price, setPrice] = useState("")
   const [category, setCategory] = useState("")
+  const [promoOnly, setPromoOnly] = useState(false)
   const [statusTab, setStatusTab] = useState<"active" | "inactive">("active")
   const [searchQuery, setSearchQuery] = useState("")
   const [categoryFilter, setCategoryFilter] = useState<string>("all")
@@ -101,6 +102,7 @@ export function ProductsManager({
     setSku("")
     setPrice("")
     setCategory("")
+    setPromoOnly(false)
   }
 
   function openEdit(product: ProductRow) {
@@ -110,6 +112,7 @@ export function ProductsManager({
     setSku(product.sku ?? "")
     setPrice(String(product.price))
     setCategory(product.category ?? "")
+    setPromoOnly(product.promo_only)
   }
 
   async function handleSave() {
@@ -132,6 +135,7 @@ export function ProductsManager({
           sku: sku || null,
           price: parsedPrice,
           category: category || null,
+          promo_only: promoOnly,
         })
         if (!result.success) throw new Error(result.error)
         setProducts((prev) => [...prev, result.product])
@@ -143,6 +147,7 @@ export function ProductsManager({
           sku: sku || null,
           price: parsedPrice,
           category: category || null,
+          promo_only: promoOnly,
         })
         if (!result.success) throw new Error(result.error)
         const updated = result.product
@@ -250,7 +255,16 @@ export function ProductsManager({
             ) : (
               filtered.map((product) => (
                 <tr key={product.id} className="hover:bg-muted/30">
-                  <td className="px-4 py-3 font-medium">{product.name}</td>
+                  <td className="px-4 py-3 font-medium">
+                    <div className="flex items-center gap-2">
+                      <span>{product.name}</span>
+                      {product.promo_only ? (
+                        <Badge variant="outline" className="text-xs font-normal">
+                          Solo en promos
+                        </Badge>
+                      ) : null}
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-sm text-muted-foreground">
                     {product.category || "—"}
                   </td>
@@ -336,6 +350,23 @@ export function ProductsManager({
                 value={price}
                 onChange={(e) => setPrice(e.target.value)}
                 placeholder="0"
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="space-y-0.5 pr-3">
+                <Label htmlFor="promo-only-switch" className="text-sm">
+                  Solo en promociones
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  El bot no lo ofrecerá individualmente. Disponible solo cuando
+                  forme parte de una promo o combo.
+                </p>
+              </div>
+              <Switch
+                id="promo-only-switch"
+                checked={promoOnly}
+                onCheckedChange={setPromoOnly}
+                aria-label="Solo en promociones"
               />
             </div>
           </div>

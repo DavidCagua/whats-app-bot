@@ -512,6 +512,7 @@ def _trigram_candidates(
         FROM products
         WHERE business_id = :business_id
           AND is_active = TRUE
+          AND promo_only = FALSE
           AND similarity(lower(name), :query) > :threshold
         ORDER BY sim DESC
         LIMIT :lim
@@ -616,6 +617,7 @@ def _lexical_candidates(
         FROM products
         WHERE business_id = :business_id
           AND is_active = TRUE
+          AND promo_only = FALSE
           AND ({where_sql})
         LIMIT 100
     """
@@ -650,6 +652,7 @@ def _lexical_candidates(
             FROM products
             WHERE business_id = :business_id
               AND is_active = TRUE
+              AND promo_only = FALSE
               AND ({" OR ".join(all_plain)})
             LIMIT 100
         """
@@ -705,6 +708,7 @@ def _semantic_candidates(
         FROM products
         WHERE business_id = :business_id
           AND is_active = TRUE
+          AND promo_only = FALSE
           AND embedding IS NOT NULL
         ORDER BY embedding <=> CAST(:qvec AS vector)
         LIMIT :k

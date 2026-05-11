@@ -35,6 +35,7 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
     category: p.category ?? null,
     price: Number(p.price.toString()),
     is_active: p.is_active ?? true,
+    promo_only: p.promo_only ?? false,
   }))
 
   return (

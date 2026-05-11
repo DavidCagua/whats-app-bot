@@ -136,6 +136,7 @@ class ProductOrderService:
                 .filter(
                     Product.business_id == uuid.UUID(business_id),
                     Product.is_active == True,
+                    Product.promo_only == False,
                 )
                 .order_by(Product.category, Product.name)
             )
@@ -168,6 +169,7 @@ class ProductOrderService:
                 .filter(
                     Product.business_id == uuid.UUID(business_id),
                     Product.is_active == True,
+                    Product.promo_only == False,
                     Product.category.isnot(None),
                     Product.category != "",
                 )
