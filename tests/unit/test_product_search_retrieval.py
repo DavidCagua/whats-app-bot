@@ -124,10 +124,13 @@ def _stub_search(lexical=None, semantic=None, synonyms=None):
     for k, (p, sim) in (semantic or {}).items():
         semantic_map[p["id"]] = (p, sim)
 
-    def fake_lexical(_db, _biz, _tokens, _qn):
+    def fake_lexical(_db, _biz, _tokens, _qn, **_kwargs):
+        # **_kwargs absorbs the include_unavailable flag (and any future
+        # additions) so stub-based tests don't have to track signature
+        # churn on the real candidate helpers.
         return lexical_map
 
-    def fake_semantic(_db, _biz, _q, _limit):
+    def fake_semantic(_db, _biz, _q, _limit, **_kwargs):
         return semantic_map
 
     def fake_load_synonyms(_db, _biz):

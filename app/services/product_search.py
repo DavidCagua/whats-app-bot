@@ -491,6 +491,8 @@ def _trigram_candidates(
     business_id: str,
     query_norm: str,
     limit: int = 10,
+    *,
+    include_unavailable: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Fuzzy fallback using pg_trgm similarity on product names.
@@ -499,20 +501,27 @@ def _trigram_candidates(
     candidates — i.e. the user's query has a typo or misspelling that
     breaks substring matching but is close enough for trigram overlap.
 
+    When ``include_unavailable`` is True, ``is_active=False`` and
+    ``promo_only=True`` rows are included in the result set. The caller
+    is expected to inspect the returned dicts' ``is_active`` / ``promo_only``
+    fields and decide what to do (typically: mark them with an availability
+    tag so the LLM can surface the right user-facing message and the
+    add-to-cart tool can refuse).
+
     Returns {product_id: product_row_dict}, same shape as _lexical_candidates.
     """
     if not query_norm:
         return {}
 
     business_uuid = uuid.UUID(business_id)
-    sql = sql_text("""
+    avail_filter = "" if include_unavailable else "AND is_active = TRUE AND promo_only = FALSE"
+    sql = sql_text(f"""
         SELECT id, business_id, name, description, price, currency, category, sku,
-               is_active, tags, metadata,
+               is_active, promo_only, tags, metadata,
                similarity(lower(name), :query) AS sim
         FROM products
         WHERE business_id = :business_id
-          AND is_active = TRUE
-          AND promo_only = FALSE
+          {avail_filter}
           AND similarity(lower(name), :query) > :threshold
         ORDER BY sim DESC
         LIMIT :lim
@@ -545,6 +554,7 @@ def _trigram_candidates(
             "category": row["category"],
             "sku": row["sku"],
             "is_active": row["is_active"],
+            "promo_only": bool(row["promo_only"]),
             "tags": list(row["tags"] or []),
             "metadata": dict(row["metadata"] or {}),
         }
@@ -563,11 +573,18 @@ def _lexical_candidates(
     business_id: str,
     tokens_expanded: List[str],
     full_query_norm: str,
+    *,
+    include_unavailable: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Pull candidate products via a single SQL query that ORs all lexical
     conditions. Returns {product_id: product_row_dict} — dedup at the app
     layer so we don't double-count scores.
+
+    ``include_unavailable=True`` drops the ``is_active=TRUE AND
+    promo_only=FALSE`` filter so the caller can surface unavailable
+    products (with markers) for info questions while still blocking
+    them at add-to-cart.
     """
     if not tokens_expanded and not full_query_norm:
         return {}
@@ -611,13 +628,13 @@ def _lexical_candidates(
         return {}
 
     where_sql = " OR ".join(all_clauses)
+    avail_filter = "" if include_unavailable else "AND is_active = TRUE AND promo_only = FALSE"
     sql = f"""
         SELECT id, business_id, name, description, price, currency, category, sku,
-               is_active, tags, metadata, created_at, updated_at
+               is_active, promo_only, tags, metadata, created_at, updated_at
         FROM products
         WHERE business_id = :business_id
-          AND is_active = TRUE
-          AND promo_only = FALSE
+          {avail_filter}
           AND ({where_sql})
         LIMIT 100
     """
@@ -648,11 +665,10 @@ def _lexical_candidates(
         all_plain = or_clauses_plain + ([tag_clause] if tag_clause else [])
         sql = f"""
             SELECT id, business_id, name, description, price, currency, category, sku,
-                   is_active, tags, metadata, created_at, updated_at
+                   is_active, promo_only, tags, metadata, created_at, updated_at
             FROM products
             WHERE business_id = :business_id
-              AND is_active = TRUE
-              AND promo_only = FALSE
+              {avail_filter}
               AND ({" OR ".join(all_plain)})
             LIMIT 100
         """
@@ -679,6 +695,7 @@ def _lexical_candidates(
             "category": row["category"],
             "sku": row["sku"],
             "is_active": row["is_active"],
+            "promo_only": bool(row["promo_only"]),
             "tags": list(row["tags"] or []),
             "metadata": dict(row["metadata"] or {}),
         }
@@ -690,25 +707,30 @@ def _semantic_candidates(
     business_id: str,
     query: str,
     limit: int,
+    *,
+    include_unavailable: bool = False,
 ) -> Dict[str, Tuple[Dict[str, Any], float]]:
     """
     Fetch top-K nearest neighbors by embedding cosine distance.
     Returns {product_id: (product_dict, similarity_0_to_1)}.
     Empty dict if embeddings are unavailable.
+
+    ``include_unavailable=True`` drops the ``is_active=TRUE AND
+    promo_only=FALSE`` filter — see ``_lexical_candidates`` for rationale.
     """
     vec = embed_text(query)
     if not vec:
         return {}
 
     vec_lit = format_vector_literal(vec)
-    sql = sql_text("""
+    avail_filter = "" if include_unavailable else "AND is_active = TRUE AND promo_only = FALSE"
+    sql = sql_text(f"""
         SELECT id, business_id, name, description, price, currency, category, sku,
-               is_active, tags, metadata,
+               is_active, promo_only, tags, metadata,
                1 - (embedding <=> CAST(:qvec AS vector)) AS similarity
         FROM products
         WHERE business_id = :business_id
-          AND is_active = TRUE
-          AND promo_only = FALSE
+          {avail_filter}
           AND embedding IS NOT NULL
         ORDER BY embedding <=> CAST(:qvec AS vector)
         LIMIT :k
@@ -741,6 +763,7 @@ def _semantic_candidates(
             "category": row["category"],
             "sku": row["sku"],
             "is_active": row["is_active"],
+            "promo_only": bool(row["promo_only"]),
             "tags": list(row["tags"] or []),
             "metadata": dict(row["metadata"] or {}),
         }
@@ -917,6 +940,7 @@ def search_products(
     limit: int = 20,
     unique: bool = False,
     alpha: float = 1.0,
+    include_unavailable: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Hybrid lexical + tag + semantic product search.
@@ -929,6 +953,13 @@ def search_products(
             AmbiguousProductError when no clear winner exists. Used by
             add_to_cart / get_product_details paths.
         alpha: Weight on the semantic signal (0.0 disables embeddings entirely).
+        include_unavailable: If True, include products that are
+            ``is_active=False`` or ``promo_only=True``. The caller is
+            expected to read each row's ``is_active`` / ``promo_only``
+            flags and decide what to do (typically: tag with an
+            availability marker so the LLM can surface the right
+            user-facing message; refuse at add-to-cart). Default False
+            preserves the legacy filter (browse + cart paths).
 
     Returns:
         Ranked list of product dicts (high score first). Empty list if nothing matches.
@@ -962,7 +993,10 @@ def search_products(
                 tokens_expanded.append(s)
 
         try:
-            lexical = _lexical_candidates(db_session, business_id, tokens_expanded, query_norm)
+            lexical = _lexical_candidates(
+                db_session, business_id, tokens_expanded, query_norm,
+                include_unavailable=include_unavailable,
+            )
         except Exception as e:
             logger.warning("[PRODUCT_SEARCH] lexical phase failed: %s", e)
             try:
@@ -981,7 +1015,10 @@ def search_products(
 
         semantic_map: Dict[str, Tuple[Dict[str, Any], float]] = {}
         if alpha > 0 and not has_exact_lexical:
-            semantic_map = _semantic_candidates(db_session, business_id, query, limit * 2)
+            semantic_map = _semantic_candidates(
+                db_session, business_id, query, limit * 2,
+                include_unavailable=include_unavailable,
+            )
 
         merged: Dict[str, Dict[str, Any]] = dict(lexical)
         semantic_sim_by_id: Dict[str, float] = {}
@@ -996,7 +1033,10 @@ def search_products(
             # matching via pg_trgm, then an LLM last resort.
 
             # Fallback 1: pg_trgm similarity on product names
-            trigram_hits = _trigram_candidates(db_session, business_id, query_norm, limit=5)
+            trigram_hits = _trigram_candidates(
+                db_session, business_id, query_norm, limit=5,
+                include_unavailable=include_unavailable,
+            )
             if trigram_hits:
                 # Trigram already ranked by similarity. For unique=True
                 # with a single hit, return it directly — the normal

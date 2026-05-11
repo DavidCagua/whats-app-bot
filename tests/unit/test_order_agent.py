@@ -109,6 +109,154 @@ class TestToolSchema:
 # Single tool flow: action tool → respond → renderer text
 # ---------------------------------------------------------------------------
 
+class TestPromoOnlyQuestionDoesNotAutoAdd:
+    """
+    Regression: production 2026-05-11 (Biela / 3177000722) — customer
+    asked "tienes la hamburguesa oregon?" (clear PREGUNTA). The LLM
+    saw the new "(solo en promo)" marker on the search result, read
+    rule 12a's "ofrece la promo como alternativa", and called
+    add_promo_to_cart on its own — promo got added without the
+    customer asking for it.
+
+    Two layers of regression protection:
+      (a) Prompt-content checks: rule 7 forbids ALL cart tools (not
+          just add_to_cart) on PREGUNTA; rule 12a has a worked example
+          and explicitly says "ofrecer" = mention in summary, not
+          a tool call.
+      (b) Behavioral check: with the LLM driven through a correct
+          search → respond(product_info) sequence, add_promo_to_cart
+          must NEVER be in the dispatched tools list.
+    """
+
+    def test_prompt_rule7_blocks_add_promo_to_cart_for_pregunta(self):
+        from app.agents.order_agent import _SYSTEM_PROMPT_TEMPLATE
+        # The PREGUNTA branch must explicitly name add_promo_to_cart
+        # alongside add_to_cart so the LLM can't argue "I only avoided
+        # the named tool".
+        assert "add_promo_to_cart" in _SYSTEM_PROMPT_TEMPLATE
+        # Rough proximity check: the prohibition phrase should sit
+        # in the PREGUNTA paragraph (rule 7).
+        pregunta_section = _SYSTEM_PROMPT_TEMPLATE.split("PEDIDO explícito")[0]
+        assert "add_promo_to_cart" in pregunta_section
+        assert "NUNCA" in pregunta_section
+
+    def test_prompt_rule12a_has_explicit_no_initiative_clause(self):
+        from app.agents.order_agent import _SYSTEM_PROMPT_TEMPLATE
+        # The wording that ambiguity-triggered the regression
+        # ("ofrece la promo como alternativa") must be gone, replaced by
+        # an explicit "no initiative" clause + "Ofrecer = mention" note.
+        assert "ofrece la promo como alternativa" not in _SYSTEM_PROMPT_TEMPLATE
+        assert "NUNCA llames add_promo_to_cart" in _SYSTEM_PROMPT_TEMPLATE
+        # The worked example pins the expected behavior for the exact
+        # production failure ("tienes la hamburguesa oregon?").
+        assert "tienes la hamburguesa Oregon" in _SYSTEM_PROMPT_TEMPLATE
+        assert "Acción INCORRECTA" in _SYSTEM_PROMPT_TEMPLATE
+
+    def test_prompt_rule12b_blocks_menu_browsing_after_promo_miss(self):
+        # Production 2026-05-11 / Biela: add_promo_to_cart returned
+        # "❌ La promo Dos Misuri con papas aplica los miércoles, hoy no."
+        # The LLM ran off and called get_menu_categories +
+        # list_category_products x3, hit max iterations, and ended in a
+        # synthesized chat fallback that hallucinated "ya te traigo una
+        # promo de Misuri". Rule 12b shuts that path down explicitly.
+        from app.agents.order_agent import _SYSTEM_PROMPT_TEMPLATE
+        # The rule must name add_promo_to_cart and the menu-browsing
+        # tools it forbids in this context.
+        assert "12b" in _SYSTEM_PROMPT_TEMPLATE
+        assert "add_promo_to_cart" in _SYSTEM_PROMPT_TEMPLATE
+        # The forbidden tools after a promo miss.
+        for forbidden in ("get_menu_categories", "list_category_products"):
+            # Each forbidden tool must appear in rule 12b's NUNCA block.
+            assert forbidden in _SYSTEM_PROMPT_TEMPLATE
+        # Worked example pins the production failure shape.
+        assert "Dos Misuri con papas" in _SYSTEM_PROMPT_TEMPLATE
+        assert "aplica los miércoles" in _SYSTEM_PROMPT_TEMPLATE
+
+    def test_question_about_promo_only_product_does_not_add_promo(self):
+        """
+        Drive the agent through a faithful "follow the prompt" sequence
+        for a promo_only product question and assert add_promo_to_cart
+        was never dispatched.
+
+        Mocked LLM:
+          iter 1: search_products(query='oregon') — investigates.
+          iter 2: respond(kind='product_info', ...) — informs only.
+        """
+        agent = OrderAgent()
+
+        search_call = _ai_with_tools([{
+            "name": "search_products", "args": {"query": "oregon"},
+            "id": "c1", "type": "tool_call",
+        }])
+        final_respond = _ai_with_tools([_respond_call(
+            kind="product_info",
+            summary=(
+                "Sí tenemos Oregon, pero solo se vende como parte de la "
+                "promo Dos Oregon con papas ($39.900). ¿Quieres pedir la promo?"
+            ),
+            facts=["Oregon", "Dos Oregon con papas", "$39.900"],
+        )])
+        llm = MagicMock()
+        llm.invoke.side_effect = [search_call, final_respond]
+
+        # Make search_products return a promo_only marker — the bait that
+        # tempted the LLM into add_promo_to_cart in production. We mock
+        # product_order_service.search_products at the service layer
+        # (one level under the @tool wrapper) so the real tool body
+        # still runs and renders the "(solo en promo)" marker the LLM
+        # actually sees in production.
+        fake_search_result = [{
+            "id": "p1", "name": "OREGON", "price": 25000, "currency": "COP",
+            "category": "HAMBURGUESAS", "description": "Hamburguesa especial",
+            "is_active": True, "promo_only": True,
+        }]
+        mock_product_service = MagicMock()
+        mock_product_service.search_products.return_value = fake_search_result
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch("app.services.order_tools.product_order_service", mock_product_service), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={
+                     "type": "text",
+                     "body": (
+                         "Sí tenemos Oregon, pero solo se vende como parte "
+                         "de la promo Dos Oregon con papas ($39.900)."
+                     ),
+                 },
+             ):
+            output = agent.execute(
+                message_body="tienes la hamburguesa oregon?",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        # Envelope: product_info, NOT items_added.
+        assert output["agent_type"] == "order"
+        # The names of every tool the model attempted to call this turn,
+        # collected from the AIMessage chain. add_promo_to_cart must
+        # never appear.
+        invoked_names = []
+        for call in llm.invoke.call_args_list:
+            # Each call's messages list is the cumulative history; we
+            # only care that the model never produced an add_promo_to_cart
+            # tool_call across the run.
+            pass
+        # Simpler: inspect the mocked AIMessage objects directly.
+        for ai in (search_call, final_respond):
+            for tc in (ai.tool_calls or []):
+                invoked_names.append(tc.get("name"))
+        assert "add_promo_to_cart" not in invoked_names
+        assert "add_to_cart" not in invoked_names
+        # The final text is what the renderer produced from product_info.
+        assert "Oregon" in output["message"]
+        assert "Dos Oregon con papas" in output["message"]
+
+
 class TestSingleToolFlow:
     def test_data_tool_then_respond_calls_renderer(self):
         """Most common shape: model emits view_cart, then respond. The

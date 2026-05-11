@@ -189,6 +189,8 @@ class ProductOrderService:
         product_id: Optional[str] = None,
         product_name: Optional[str] = None,
         business_id: Optional[str] = None,
+        *,
+        include_unavailable: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Get a single product by ID or by name.
@@ -196,18 +198,20 @@ class ProductOrderService:
         For ID lookup: direct DB fetch.
         For name lookup: delegates to the hybrid search module with unique=True,
         which raises AmbiguousProductError if there's no clear winner.
+
+        ``include_unavailable=True`` lets the lookup return rows that are
+        ``is_active=False`` or ``promo_only=True``. The caller is
+        expected to inspect those flags and decide what to do (e.g. the
+        search/details tools surface a marker so the LLM can communicate
+        the restriction; add_to_cart still refuses).
         """
         try:
             if product_id:
                 db_session = get_db_session()
-                product = (
-                    db_session.query(Product)
-                    .filter(
-                        Product.id == uuid.UUID(product_id),
-                        Product.is_active == True,
-                    )
-                    .first()
-                )
+                q = db_session.query(Product).filter(Product.id == uuid.UUID(product_id))
+                if not include_unavailable:
+                    q = q.filter(Product.is_active == True)
+                product = q.first()
                 result = product.to_dict() if product else None
                 db_session.close()
                 return result
@@ -217,6 +221,7 @@ class ProductOrderService:
                     query=product_name.strip(),
                     limit=5,
                     unique=True,
+                    include_unavailable=include_unavailable,
                 )
                 return results[0] if results else None
             return None
@@ -232,6 +237,8 @@ class ProductOrderService:
         query: str,
         limit: int = 20,
         unique: bool = False,
+        *,
+        include_unavailable: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Search products by name, description, category, tags, and semantic
@@ -252,6 +259,7 @@ class ProductOrderService:
                 query=query.strip(),
                 limit=limit,
                 unique=unique,
+                include_unavailable=include_unavailable,
             )
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error searching products: {e}")

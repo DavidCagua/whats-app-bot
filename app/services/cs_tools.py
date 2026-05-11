@@ -575,9 +575,19 @@ def get_promos(
         active_lines = "\n".join(_render(p, i) for i, p in enumerate(promos, start=1))
         message = f"Estas son nuestras promos activas hoy:\n{active_lines}"
         if upcoming:
-            up_names = ", ".join(p.get("name") or "" for p in upcoming if p.get("name"))
-            if up_names:
-                message += f"\n\nTambién hay otras esta semana: {up_names}."
+            # Include the day each upcoming promo applies so the customer
+            # knows when to come back. Bare "También hay Dos Misuri con
+            # papas" is misleading — it reads like the promo is available
+            # somewhere this week without saying which day.
+            up_bits = []
+            for p in upcoming:
+                name = (p.get("name") or "").strip()
+                if not name:
+                    continue
+                label = (p.get("schedule_label") or "").strip()
+                up_bits.append(f"{name} ({label})" if label else name)
+            if up_bits:
+                message += f"\n\nTambién hay otras esta semana: {', '.join(up_bits)}."
         message += "\n\nSi quieres alguna, dime cuál."
         return _final(message)
 

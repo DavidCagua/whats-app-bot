@@ -198,6 +198,46 @@ def list_promos_for_listing(
     return {"active_now": active_now, "upcoming": upcoming}
 
 
+def find_promos_containing_product(
+    business_id: str,
+    product_id: str,
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Return promos whose components reference ``product_id``, split into
+    two buckets: active right now vs. upcoming this week.
+
+    Used by the order tools to explain ``promo_only`` products: "Solo se
+    vende como parte de [promo X]". When no promo is active right now,
+    the caller can fall back to the next-active day from the upcoming
+    bucket (same shape as ``list_promos_for_listing``).
+
+    Returns:
+        {
+          "active":   [<promo_dict>, ...],
+          "upcoming": [<promo_dict + next_active_day>, ...],
+        }
+        Empty lists when the product isn't a component of any promo.
+    """
+    if not business_id or not product_id:
+        return {"active": [], "upcoming": []}
+
+    buckets = list_promos_for_listing(
+        business_id, when=when, timezone_name=timezone_name,
+    )
+    target = str(product_id)
+
+    def _contains(promo: Dict[str, Any]) -> bool:
+        components = promo.get("components") or []
+        return any(str(c.get("product_id")) == target for c in components)
+
+    return {
+        "active": [p for p in (buckets.get("active_now") or []) if _contains(p)],
+        "upcoming": [p for p in (buckets.get("upcoming") or []) if _contains(p)],
+    }
+
+
 def get_promotion(business_id: str, promotion_id: str) -> Optional[Dict[str, Any]]:
     """Fetch one promo by id, scoped to business. Returns None if absent."""
     if not business_id or not promotion_id:
@@ -288,8 +328,16 @@ def find_promo_by_query(
     if pass2:
         return pass2
 
-    pass3 = [p for p in promos if any(t in name_lower(p) for t in tokens)]
-    return pass3
+    # pass3 ("any token") is intentionally restricted to SINGLE-TOKEN
+    # queries. With multi-token queries it silently substitutes one
+    # promo for another that happens to share a boilerplate word
+    # (production 2026-05-11 / Biela: query "Dos Misuri con papas"
+    # returned "Dos Oregon con papas" because both share "dos" / "papas",
+    # and Misuri was schedule-filtered out). Single-token queries like
+    # "honey" or "lunes" still benefit and remain unambiguous.
+    if len(tokens) == 1:
+        return [p for p in promos if tokens[0] in name_lower(p)]
+    return []
 
 
 def match_and_apply(

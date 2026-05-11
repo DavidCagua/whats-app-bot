@@ -163,6 +163,62 @@ class TestSelectListedPromoTool:
         assert parsed["promo_id"] == "p1"
 
 
+class TestGetPromosTool:
+    """
+    `get_promos` lists active promos and, when there are upcoming ones
+    this week, names them too. The upcoming entries must include the
+    day each promo applies — without it, the customer reads "Dos Misuri
+    con papas" without context and can't tell whether it applies today
+    or some other day. Production 2026-05-11 / Biela: "También hay
+    Dos Misuri con papas" misled the customer into asking for Misuri
+    the same day.
+    """
+
+    def _patch_buckets(self, active, upcoming):
+        from app.orchestration.customer_service_flow import _summarize_promo_for_listing
+        # _handle_get_promos goes through promotion_service.list_promos_for_listing
+        # and then summarizes each entry. We mock the underlying service
+        # so the summarizer (which builds schedule_label from days_of_week)
+        # runs end-to-end.
+        return patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            return_value={"active_now": active, "upcoming": upcoming},
+        )
+
+    def test_active_plus_upcoming_includes_day_for_upcoming(self):
+        active = [
+            {
+                "id": "p1", "name": "Dos Oregon con papas",
+                "fixed_price": 39900, "days_of_week": [1, 7],
+            },
+        ]
+        upcoming = [
+            {
+                "id": "p2", "name": "Dos Misuri con papas",
+                "fixed_price": 39900,
+                "days_of_week": [3],  # Wednesday
+                "next_active_day": 3,
+            },
+        ]
+        ictx = _tool_ctx()
+        token = cs_tools.set_tool_context(ictx)
+        try:
+            with self._patch_buckets(active, upcoming):
+                result = cs_tools.get_promos.invoke({
+                    "injected_business_context": ictx,
+                })
+        finally:
+            cs_tools.reset_tool_context(token)
+        text = cs_tools.parse_final(result)
+        assert text is not None
+        # Active promo present.
+        assert "Dos Oregon con papas" in text
+        # Upcoming line names the day so the customer knows when.
+        assert "Dos Misuri con papas (miércoles)" in text or (
+            "Dos Misuri con papas" in text and "miércoles" in text
+        )
+
+
 # ── Agent fast-paths ───────────────────────────────────────────────────
 
 

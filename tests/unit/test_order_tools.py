@@ -524,6 +524,190 @@ class TestHelpers:
 
 
 # ---------------------------------------------------------------------------
+# Availability helpers (_product_availability / _search_listing_marker /
+# _detail_availability_note / _format_unavailable_for_cart)
+# ---------------------------------------------------------------------------
+
+class TestAvailabilityHelpers:
+    """
+    Promo-only and operator-disabled products should be findable (so info
+    questions answer) but blocked at add-to-cart. The four helpers below
+    drive that UX. Production trigger: customers asking ingredients of a
+    promo_only product got "no encontré" — and disabled products went
+    silent instead of saying "no disponible por ahora".
+    """
+
+    def test_product_availability_classifies_correctly(self):
+        from app.services.order_tools import _product_availability
+        assert _product_availability({"is_active": True, "promo_only": False}) == "available"
+        assert _product_availability({"is_active": True, "promo_only": True}) == "promo_only"
+        assert _product_availability({"is_active": False, "promo_only": False}) == "inactive"
+        # Missing keys default to available (preserves test fixtures without flags).
+        assert _product_availability({}) == "available"
+        # is_active=False wins even if promo_only=True (operator pulled it).
+        assert _product_availability({"is_active": False, "promo_only": True}) == "inactive"
+
+    def test_search_listing_marker_is_short(self):
+        from app.services.order_tools import _search_listing_marker
+        assert _search_listing_marker({"is_active": True, "promo_only": False}) == ""
+        assert _search_listing_marker({"is_active": True, "promo_only": True}) == " (solo en promo)"
+        assert _search_listing_marker({"is_active": False, "promo_only": False}) == " (no disponible por ahora)"
+
+    def test_detail_note_promo_only_with_active_promo_names_the_promo(self):
+        from app.services.order_tools import _detail_availability_note
+        prod = {"id": "p1", "name": "Oregon", "is_active": True, "promo_only": True}
+        buckets = {
+            "active": [{"name": "Dos Oregon con papas", "fixed_price": 39900}],
+            "upcoming": [],
+        }
+        with patch(
+            "app.services.promotion_service.find_promos_containing_product",
+            return_value=buckets,
+        ):
+            note = _detail_availability_note(prod, "biz", None)
+        assert "Dos Oregon con papas" in note
+        assert "$39.900" in note
+        assert "Solo se vende" in note
+
+    def test_detail_note_promo_only_with_only_upcoming_surfaces_the_day(self):
+        from app.services.order_tools import _detail_availability_note
+        prod = {"id": "p1", "name": "Oregon", "is_active": True, "promo_only": True}
+        buckets = {
+            "active": [],
+            "upcoming": [{"name": "Combo Lunes", "next_active_day": 1}],
+        }
+        with patch(
+            "app.services.promotion_service.find_promos_containing_product",
+            return_value=buckets,
+        ):
+            note = _detail_availability_note(prod, "biz", None)
+        assert "Combo Lunes" in note
+        assert "lunes" in note
+
+    def test_detail_note_inactive_is_neutral(self):
+        from app.services.order_tools import _detail_availability_note
+        prod = {"id": "p2", "name": "Oregon Especial", "is_active": False, "promo_only": False}
+        note = _detail_availability_note(prod, "biz", None)
+        assert "no está disponible por ahora" in note
+        # Should NOT speculate about promos / timing.
+        assert "promo" not in note.lower()
+
+    def test_detail_note_available_returns_empty(self):
+        from app.services.order_tools import _detail_availability_note
+        prod = {"id": "p3", "name": "Barracuda", "is_active": True, "promo_only": False}
+        assert _detail_availability_note(prod, "biz", None) == ""
+
+    def test_cart_refusal_promo_only_with_active_promo_invites_to_promo(self):
+        from app.services.order_tools import _format_unavailable_for_cart
+        prod = {"id": "p1", "name": "Oregon", "is_active": True, "promo_only": True}
+        buckets = {
+            "active": [{"name": "Dos Oregon con papas", "fixed_price": 39900}],
+            "upcoming": [],
+        }
+        with patch(
+            "app.services.promotion_service.find_promos_containing_product",
+            return_value=buckets,
+        ):
+            msg = _format_unavailable_for_cart(prod, "biz", None)
+        assert msg.startswith("❌")
+        assert "*Oregon*" in msg
+        assert "Dos Oregon con papas" in msg
+        assert "$39.900" in msg
+        assert "promo" in msg.lower()
+
+    def test_cart_refusal_promo_only_no_active_uses_upcoming_day(self):
+        from app.services.order_tools import _format_unavailable_for_cart
+        prod = {"id": "p1", "name": "Oregon", "is_active": True, "promo_only": True}
+        buckets = {
+            "active": [],
+            "upcoming": [{"name": "Combo Lunes", "next_active_day": 1}],
+        }
+        with patch(
+            "app.services.promotion_service.find_promos_containing_product",
+            return_value=buckets,
+        ):
+            msg = _format_unavailable_for_cart(prod, "biz", None)
+        assert "*Oregon*" in msg
+        assert "Combo Lunes" in msg
+        assert "lunes" in msg
+
+    def test_cart_refusal_inactive_is_neutral(self):
+        from app.services.order_tools import _format_unavailable_for_cart
+        prod = {"id": "p2", "name": "Oregon Especial", "is_active": False, "promo_only": False}
+        msg = _format_unavailable_for_cart(prod, "biz", None)
+        assert msg.startswith("❌")
+        assert "*Oregon Especial*" in msg
+        assert "no está disponible por ahora" in msg
+        # No promo speculation for inactive products.
+        assert "promo" not in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# add_to_cart refusal paths for promo_only / inactive products
+# ---------------------------------------------------------------------------
+
+class TestAddToCartUnavailableRefusal:
+    """add_to_cart must refuse promo_only and inactive products with a
+    specific message instead of generic NOT_FOUND, so the LLM can echo
+    the redirect (promo X, or "currently unavailable") to the customer."""
+
+    def test_promo_only_product_is_refused_with_promo_redirect(self, fake_session):
+        mock_product_service = MagicMock()
+        mock_product_service.get_product.return_value = {
+            "id": "p1", "name": "OREGON", "price": 25000, "currency": "COP",
+            "is_active": True, "promo_only": True,
+        }
+        buckets = {
+            "active": [{"name": "Dos Oregon con papas", "fixed_price": 39900}],
+            "upcoming": [],
+        }
+        with patch("app.services.order_tools.product_order_service", mock_product_service), \
+             patch("app.services.order_tools.session_state_service", fake_session), \
+             patch(
+                 "app.services.promotion_service.find_promos_containing_product",
+                 return_value=buckets,
+             ):
+            from app.services.order_tools import add_to_cart
+            result = add_to_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_id": "",
+                "product_name": "oregon",
+                "quantity": 1,
+                "notes": "",
+            })
+        assert result.startswith("❌")
+        assert "*OREGON*" in result
+        assert "Dos Oregon con papas" in result
+        # Cart must NOT have been mutated.
+        session = fake_session.load(FAKE_WA_ID, FAKE_BUSINESS_ID)
+        items = session["session"]["order_context"].get("items", [])
+        assert items == []
+
+    def test_inactive_product_is_refused_neutrally(self, fake_session):
+        mock_product_service = MagicMock()
+        mock_product_service.get_product.return_value = {
+            "id": "p2", "name": "OREGON ESPECIAL", "price": 30000, "currency": "COP",
+            "is_active": False, "promo_only": False,
+        }
+        with patch("app.services.order_tools.product_order_service", mock_product_service), \
+             patch("app.services.order_tools.session_state_service", fake_session):
+            from app.services.order_tools import add_to_cart
+            result = add_to_cart.invoke({
+                "injected_business_context": _make_ctx(),
+                "product_id": "",
+                "product_name": "oregon especial",
+                "quantity": 1,
+                "notes": "",
+            })
+        assert result.startswith("❌")
+        assert "*OREGON ESPECIAL*" in result
+        assert "no está disponible por ahora" in result
+        session = fake_session.load(FAKE_WA_ID, FAKE_BUSINESS_ID)
+        items = session["session"]["order_context"].get("items", [])
+        assert items == []
+
+
+# ---------------------------------------------------------------------------
 # _format_promo_miss_message — no-match branch of add_promo_to_cart
 # ---------------------------------------------------------------------------
 
@@ -559,6 +743,73 @@ class TestFormatPromoMissMessage:
         assert "Honey Combo" in result
         assert "15% off" in result
         assert "¿Te interesa alguna?" in result
+
+    def test_query_naming_upcoming_promo_surfaces_that_promo_with_day(self):
+        # Production trigger: Monday, customer asks for "misuri", Misuri
+        # promo applies Wednesday. The miss path must NAME the Misuri
+        # promo and the day, NOT list Oregon as "what we have" — that
+        # was hiding the real answer and tempting the LLM to substitute.
+        buckets = {
+            "active_now": [
+                {"id": "p1", "name": "Dos Oregon con papas", "fixed_price": 39900},
+            ],
+            "upcoming": [
+                {"id": "p2", "name": "Dos Misuri con papas", "next_active_day": 3},
+            ],
+        }
+        with patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            return_value=buckets,
+        ):
+            from app.services.order_tools import _format_promo_miss_message
+            result = _format_promo_miss_message("biz", "misuri", None)
+        # Names the upcoming promo + the day.
+        assert "Dos Misuri con papas" in result
+        assert "miércoles" in result
+        # Does NOT advertise Oregon in the same line.
+        assert "Oregon" not in result
+
+    def test_query_naming_upcoming_works_for_full_phrase(self):
+        # "Dos Misuri con papas" (what add_promo_to_cart actually receives
+        # from the LLM after fuzzy-matching) must also hit the upcoming
+        # branch — the substring check must tolerate the full phrase.
+        buckets = {
+            "active_now": [
+                {"id": "p1", "name": "Dos Oregon con papas", "fixed_price": 39900},
+            ],
+            "upcoming": [
+                {"id": "p2", "name": "Dos Misuri con papas", "next_active_day": 3},
+            ],
+        }
+        with patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            return_value=buckets,
+        ):
+            from app.services.order_tools import _format_promo_miss_message
+            result = _format_promo_miss_message("biz", "Dos Misuri con papas", None)
+        assert "Dos Misuri con papas" in result
+        assert "miércoles" in result
+
+    def test_query_not_matching_upcoming_falls_through_to_active_list(self):
+        # "pegoretti" doesn't name any promo (upcoming or active) — the
+        # existing active-list branch must still fire so the customer
+        # learns what IS available today.
+        buckets = {
+            "active_now": [
+                {"id": "p1", "name": "Dos Oregon con papas", "fixed_price": 39900},
+            ],
+            "upcoming": [
+                {"id": "p2", "name": "Dos Misuri con papas", "next_active_day": 3},
+            ],
+        }
+        with patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            return_value=buckets,
+        ):
+            from app.services.order_tools import _format_promo_miss_message
+            result = _format_promo_miss_message("biz", "pegoretti", None)
+        assert "Dos Oregon con papas" in result
+        assert "$39.900" in result
 
     def test_returns_upcoming_message_when_nothing_active_today(self):
         buckets = {

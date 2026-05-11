@@ -63,6 +63,151 @@ _DAY_NAMES_ES = {
 }
 
 
+def _product_availability(product: Dict) -> str:
+    """
+    Classify a product row by availability. Returns one of:
+      - "available"   — sellable directly (default)
+      - "promo_only"  — exists but only via a promo bundle
+      - "inactive"    — currently disabled by the operator
+    """
+    if not product:
+        return "available"
+    if product.get("is_active") is False:
+        return "inactive"
+    if product.get("promo_only") is True:
+        return "promo_only"
+    return "available"
+
+
+def _search_listing_marker(product: Dict) -> str:
+    """
+    Compact suffix used when listing multiple search hits. Kept short so
+    a search result of 5 items stays readable.
+    """
+    state = _product_availability(product)
+    if state == "promo_only":
+        return " (solo en promo)"
+    if state == "inactive":
+        return " (no disponible por ahora)"
+    return ""
+
+
+def _detail_availability_note(
+    product: Dict,
+    business_id: str,
+    timezone_name: Optional[str],
+) -> str:
+    """
+    Longer explanatory marker used by get_product_details (single
+    product view). For promo_only products it names the active promo
+    (or the upcoming day) so the customer knows the path to obtain it.
+
+    Returns empty string when the product is fully available.
+    """
+    state = _product_availability(product)
+    if state == "available":
+        return ""
+    if state == "inactive":
+        return "\n\nℹ️ Este producto no está disponible por ahora."
+    # promo_only: look up the containing promo(s).
+    try:
+        buckets = promotion_service.find_promos_containing_product(
+            business_id=business_id,
+            product_id=str(product.get("id") or ""),
+            timezone_name=timezone_name,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ORDER_TOOL] find_promos_containing_product failed for %s: %s",
+            product.get("id"), exc,
+        )
+        return "\n\nℹ️ Este producto solo se vende como parte de una promo."
+    active = buckets.get("active") or []
+    upcoming = buckets.get("upcoming") or []
+    if active:
+        p = active[0]
+        name = p.get("name") or "una promo"
+        if p.get("fixed_price") is not None:
+            price = _format_price(p["fixed_price"])
+            return f"\n\nℹ️ Solo se vende como parte de la promo *{name}* ({price})."
+        return f"\n\nℹ️ Solo se vende como parte de la promo *{name}*."
+    if upcoming:
+        p = upcoming[0]
+        name = p.get("name") or "una promo"
+        day = _DAY_NAMES_ES.get(int(p.get("next_active_day") or 0))
+        if day:
+            return (
+                f"\n\nℹ️ Solo se vende como parte de la promo *{name}*, "
+                f"que aplica el {day}."
+            )
+        return f"\n\nℹ️ Solo se vende como parte de la promo *{name}*."
+    return (
+        "\n\nℹ️ Este producto solo se vende en promos; "
+        "por ahora ninguna está activa."
+    )
+
+
+def _format_unavailable_for_cart(
+    product: Dict,
+    business_id: str,
+    timezone_name: Optional[str],
+) -> str:
+    """
+    Compose the add_to_cart refusal message for an unavailable product.
+    Mirrors `_detail_availability_note` but framed as a refusal +
+    redirect rather than a description suffix.
+    """
+    name = product.get("name") or "Ese producto"
+    state = _product_availability(product)
+    if state == "inactive":
+        return f"❌ *{name}* no está disponible por ahora."
+    # promo_only
+    try:
+        buckets = promotion_service.find_promos_containing_product(
+            business_id=business_id,
+            product_id=str(product.get("id") or ""),
+            timezone_name=timezone_name,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ORDER_TOOL] find_promos_containing_product failed for %s: %s",
+            product.get("id"), exc,
+        )
+        return (
+            f"❌ *{name}* solo se vende como parte de una promo. "
+            "¿Quieres ver las promos disponibles?"
+        )
+    active = buckets.get("active") or []
+    upcoming = buckets.get("upcoming") or []
+    if active:
+        p = active[0]
+        promo_name = p.get("name") or "una promo"
+        if p.get("fixed_price") is not None:
+            price = _format_price(p["fixed_price"])
+            return (
+                f"❌ *{name}* solo se vende como parte de la promo "
+                f"*{promo_name}* ({price}). ¿Te interesa la promo?"
+            )
+        return (
+            f"❌ *{name}* solo se vende como parte de la promo "
+            f"*{promo_name}*. ¿Te interesa la promo?"
+        )
+    if upcoming:
+        p = upcoming[0]
+        promo_name = p.get("name") or "una promo"
+        day = _DAY_NAMES_ES.get(int(p.get("next_active_day") or 0))
+        if day:
+            return (
+                f"❌ *{name}* solo va en promos. La próxima con ese "
+                f"producto es *{promo_name}*, aplica el {day}."
+            )
+        return f"❌ *{name}* solo va en promos. La próxima es *{promo_name}*."
+    return (
+        f"❌ *{name}* solo se vende en promos y por ahora ninguna "
+        "está activa con ese producto."
+    )
+
+
 def _format_promo_miss_message(
     business_id: str,
     query: str,
@@ -90,6 +235,33 @@ def _format_promo_miss_message(
 
     active = buckets.get("active_now") or []
     upcoming = buckets.get("upcoming") or []
+
+    # First branch: the customer specifically named an UPCOMING promo
+    # (substring match on the promo's name). Honor that — saying
+    # "no encontré" while listing other active promos is misleading
+    # because the requested promo exists, just not today. Production
+    # 2026-05-11 / Biela: query "Misuri" on Monday was answered with the
+    # Oregon list, hiding that Misuri applies on Wednesday.
+    q_lower = (query or "").lower().strip()
+    if q_lower and upcoming:
+        for p in upcoming:
+            name = (p.get("name") or "").lower()
+            if not name:
+                continue
+            if q_lower in name or any(
+                tok in name for tok in q_lower.split() if len(tok) >= 4
+            ):
+                day = _DAY_NAMES_ES.get(int(p.get("next_active_day") or 0))
+                promo_name = p.get("name") or "esa promo"
+                if day:
+                    return (
+                        f"❌ La promo *{promo_name}* aplica los {day}, hoy no. "
+                        "¿Quieres ver las promos disponibles hoy?"
+                    )
+                return (
+                    f"❌ La promo *{promo_name}* no aplica hoy. "
+                    "¿Quieres ver las disponibles?"
+                )
 
     def _line(p: Dict, idx: int) -> str:
         name = p.get("name") or ""
@@ -487,7 +659,14 @@ def search_products(query: str, *, injected_business_context: Annotated[dict, In
         if not query or not query.strip():
             return "❌ Indica el término de búsqueda."
 
-        products = product_order_service.search_products(business_id=business_id, query=query.strip())
+        # include_unavailable=True so info questions still find promo_only
+        # and inactive products. Each line gets a short marker the LLM
+        # can echo so the customer learns the restriction. add_to_cart
+        # is the layer that still refuses to add unavailable items.
+        products = product_order_service.search_products(
+            business_id=business_id, query=query.strip(),
+            include_unavailable=True,
+        )
 
         if not products:
             return f"❌ No hay productos que coincidan con '{query}'."
@@ -496,7 +675,7 @@ def search_products(query: str, *, injected_business_context: Annotated[dict, In
         lines = []
         for p in products:
             price_str = _format_price(p.get("price", 0), p.get("currency", "COP"))
-            line = f"• {p['name']} - {price_str}"
+            line = f"• {p['name']} - {price_str}{_search_listing_marker(p)}"
             if include_desc:
                 desc = (p.get("description") or "").strip()
                 if desc:
@@ -532,10 +711,15 @@ def get_product_details(product_id: str = "", product_name: str = "", *, injecte
         if not product_id and not (product_name and product_name.strip()):
             return "❌ Indica el nombre o ID del producto que deseas."
 
+        # include_unavailable=True so ingredient / "what's in X" questions
+        # still answer for promo_only and inactive products. The
+        # availability note below explains the path to obtain the product
+        # (or that it's not available right now). add_to_cart refuses.
         product = product_order_service.get_product(
             product_id=product_id.strip() if product_id else None,
             product_name=product_name.strip() if product_name else None,
             business_id=business_id,
+            include_unavailable=True,
         )
 
         if not product:
@@ -543,7 +727,10 @@ def get_product_details(product_id: str = "", product_name: str = "", *, injecte
 
         price_str = _format_price(product.get("price", 0), product.get("currency", "COP"))
         desc = product.get("description") or ""
-        return f"**{product['name']}** - {price_str}\n" + (f"{desc}" if desc else "")
+        tz_name = promotion_service.timezone_from_business_context(injected_business_context)
+        avail_note = _detail_availability_note(product, business_id, tz_name)
+        body = f"**{product['name']}** - {price_str}\n" + (f"{desc}" if desc else "")
+        return body + avail_note
     except AmbiguousProductError:
         raise
     except Exception as e:
@@ -574,11 +761,21 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         if quantity < 1:
             return "❌ La cantidad debe ser al menos 1."
 
+        # include_unavailable=True so we can return a precise refusal
+        # ("only in promo X" / "currently unavailable") instead of the
+        # generic ProductNotFoundError. The flags get checked right
+        # after — unavailable products never reach the cart write.
         product = None
         if product_id:
-            product = product_order_service.get_product(product_id=product_id, business_id=business_id)
+            product = product_order_service.get_product(
+                product_id=product_id, business_id=business_id,
+                include_unavailable=True,
+            )
         elif product_name and product_name.strip():
-            product = product_order_service.get_product(product_name=product_name, business_id=business_id)
+            product = product_order_service.get_product(
+                product_name=product_name, business_id=business_id,
+                include_unavailable=True,
+            )
 
         if not product:
             # Raise instead of returning a string so the multi-item
@@ -588,6 +785,13 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
             # swallowed silently in the multi-item path, dropping
             # unmatchable items without telling the user.
             raise ProductNotFoundError(query=(product_name or product_id or "").strip())
+
+        # Block promo_only / inactive products from direct add. We found
+        # the product so we can give a specific reason instead of a
+        # generic not-found.
+        if _product_availability(product) != "available":
+            tz_name = promotion_service.timezone_from_business_context(injected_business_context)
+            return _format_unavailable_for_cart(product, business_id, tz_name)
 
         price = float(product.get("price", 0))
         pid = product["id"]
