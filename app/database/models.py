@@ -885,6 +885,7 @@ class ConversationDailyAnalysis(Base):
 
     summary = Column(Text, nullable=True)
     drop_off_reason = Column(Text, nullable=True)
+    has_issues = Column(Boolean, nullable=False, default=False, server_default=text('false'))
     model = Column(String(50), nullable=True)
     analyzed_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
@@ -911,6 +912,7 @@ class ConversationDailyAnalysis(Base):
             'last_msg_at': self.last_msg_at.isoformat() if self.last_msg_at else None,
             'summary': self.summary,
             'drop_off_reason': self.drop_off_reason,
+            'has_issues': self.has_issues,
             'model': self.model,
             'analyzed_at': self.analyzed_at.isoformat() if self.analyzed_at else None,
         }
