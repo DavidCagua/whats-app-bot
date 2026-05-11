@@ -598,8 +598,8 @@ class TestEstimateRemainingMinutesPickup:
 
 class TestPromptSurfacesPickupRules:
     def test_modos_block_present_for_every_business(self):
-        from app.agents.order_agent import _format_business_info_for_prompt
-        rendered = _format_business_info_for_prompt({
+        from app.services.business_info_service import format_business_info_for_prompt
+        rendered = format_business_info_for_prompt({
             "business_id": "biela",
             "business": {"name": "Biela", "settings": {}},
         })

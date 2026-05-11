@@ -665,3 +665,142 @@ def _delivery_time_default() -> str:
 def supported_fields() -> List[str]:
     """Return the list of canonical field keys the planner may emit."""
     return list(ALL_FIELDS)
+
+
+def format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
+    """Format address, phone, hours, payment methods, fulfillment rules,
+    and out-of-zone redirects for the order agent's system prompt and
+    the response renderer's business-voice block.
+
+    Lives in this module (not on the agent) because both the order
+    agent and the response renderer need it, and it reads from the
+    same business settings + availability tables this module already
+    owns. Moved here from the legacy order_agent module during v1
+    removal so the helper outlives the planner/executor pipeline.
+    """
+    if not business_context or not business_context.get("business"):
+        return "Información del negocio: (no configurada)."
+    raw_settings = business_context["business"].get("settings")
+    # Support both dict and None; JSONB can sometimes be dict-like
+    settings = dict(raw_settings) if raw_settings is not None else {}
+    if not isinstance(settings, dict):
+        settings = {}
+    address = (settings.get("address") or settings.get("Address") or "").strip()
+    phone = (settings.get("phone") or "").strip()
+    city = (settings.get("city") or "").strip()
+    state = (settings.get("state") or "").strip()
+    country = (settings.get("country") or "").strip()
+    business_id = business_context.get("business_id")
+    parts: List[str] = []
+    if address:
+        parts.append(f"Dirección: {address}")
+    if city or state or country:
+        loc = ", ".join(filter(None, [city, state, country]))
+        if loc:
+            parts.append(f"Ciudad/país: {loc}")
+    if phone:
+        parts.append(f"Teléfono: {phone}")
+    if business_id:
+        try:
+            # Lazy import to avoid a circular dep with the database
+            # layer at module-load time.
+            from ..database.booking_service import booking_service
+            rules = booking_service.get_availability(str(business_id))
+            if rules:
+                day_names = {
+                    0: "Domingo",
+                    1: "Lunes",
+                    2: "Martes",
+                    3: "Miércoles",
+                    4: "Jueves",
+                    5: "Viernes",
+                    6: "Sábado",
+                }
+                hour_lines = []
+                for rule in sorted(rules, key=lambda x: x.get("day_of_week", 0)):
+                    day_label = day_names.get(rule.get("day_of_week", -1), "Día")
+                    if not rule.get("is_active", True):
+                        hour_lines.append(f"  {day_label}: cerrado")
+                        continue
+                    hour_lines.append(
+                        f"  {day_label}: {rule.get('open_time', '')} - {rule.get('close_time', '')}"
+                    )
+                if hour_lines:
+                    parts.append("Horarios:\n" + "\n".join(hour_lines))
+        except Exception:
+            pass
+    # One clear line for location questions: address if set, else city/state/country
+    location_parts: List[str] = []
+    if address:
+        location_parts.append(address)
+    if city or state or country:
+        location_parts.append(", ".join(filter(None, [city, state, country])))
+    if location_parts:
+        parts.append("Ubicación (para preguntas 'dónde están'): " + " ".join(location_parts))
+    payment_methods = settings.get("payment_methods") or []
+    if isinstance(payment_methods, list):
+        cleaned_methods = [str(m).strip() for m in payment_methods if str(m).strip()]
+        if cleaned_methods:
+            parts.append(
+                "Métodos de pago aceptados: "
+                + ", ".join(cleaned_methods)
+                + ". Cuando el cliente indique su método de pago, EMPAREJA su "
+                "texto contra esta lista de forma flexible (case-insensitive, "
+                "fragmentos, abreviaturas, errores de tipeo razonables) y pasa "
+                "el NOMBRE CANÓNICO de la lista al campo `payment_method` de "
+                "submit_delivery_info. Ejemplos: 'breb' o 'bre' → 'Llave BreB'; "
+                "'efe' o 'cash' → 'efectivo'; 'transf' o 'transferencia bancaria' "
+                "→ 'transferencia'; 'nequi' (cualquier capitalización) → 'Nequi'. "
+                "Solo OMITE el campo `payment_method` cuando el cliente mencione "
+                "EXPLÍCITAMENTE un método que claramente NO está en la lista "
+                "(ej. PayPal, tarjeta de crédito) y no haya overlap razonable con "
+                "ningún canónico — entonces emite delivery_info_collected con la "
+                "lista canónica en facts para que el cliente elija."
+            )
+    ai_prompt = (settings.get("ai_prompt") or "").strip()
+    if ai_prompt:
+        parts.append("IMPORTANTE: Reglas y contexto del negocio (usa para preguntas sobre combos, hamburguesas con papas, etc.):\n" + ai_prompt)
+    # Universal pickup-vs-delivery rules. Surfaced for every business —
+    # not behind a per-business flag — so the model has one consistent
+    # mental model. Default is delivery; pickup is set only when the
+    # customer explicitly signals it. Switching is symmetric.
+    parts.append(
+        "Modos de cumplimiento disponibles:\n"
+        "- 🛵 Domicilio (default): se requiere nombre, dirección, teléfono y medio de pago.\n"
+        "- 🏃 Recoger en local (pickup): se requiere SOLO el nombre. El número de WhatsApp "
+        "cubre el teléfono y el pago se hace en el local.\n"
+        "El modo activo está visible en \"Modo:\" del bloque ESTADO Y HISTORIAL DEL TURNO. "
+        "El cliente comienza en domicilio por default. Cambia a pickup ÚNICAMENTE cuando el "
+        "cliente lo indique explícitamente con frases como: \"lo recojo\", \"paso a recoger\", "
+        "\"para recoger\", \"en sitio\", \"en el local\", \"para llevar\", \"recogida\". "
+        "En ese caso llama submit_delivery_info(fulfillment_type='pickup', name=<si lo dijo>) "
+        "— NO pidas dirección ni medio de pago. Cambia de vuelta a domicilio si el cliente "
+        "dice \"no, mejor domicilio\", \"envíenmelo\", \"para domicilio\" pasando "
+        "submit_delivery_info(fulfillment_type='delivery')."
+    )
+    out_of_zone = settings.get("out_of_zone_delivery_contacts") or []
+    if isinstance(out_of_zone, list) and out_of_zone:
+        rows: List[str] = []
+        for entry in out_of_zone:
+            if not isinstance(entry, dict):
+                continue
+            city = (entry.get("city") or "").strip()
+            phone = (entry.get("phone") or "").strip()
+            if city and phone:
+                rows.append(f"- {city} → contacto: {phone}")
+        if rows:
+            parts.append(
+                "Zonas FUERA de cobertura de domicilio (NO atendemos pedidos a estas ciudades; "
+                "el cliente debe escribir al número listado):\n"
+                + "\n".join(rows)
+                + "\n\nSi el cliente pide hacer un pedido o domicilio a una de estas "
+                "ciudades (lo dice en la dirección, en el destino, o explícitamente "
+                "'a Ipiales', 'para X', 'envíen a Y'), NO recolectes datos de entrega "
+                "ni intentes crear el pedido. Llama "
+                "respond(kind='out_of_scope', summary='out_of_zone:<ciudad>', "
+                "facts=['city:<ciudad>', 'phone:<numero>']) — el sistema redirigirá "
+                "al cliente al número correspondiente."
+            )
+    if not parts:
+        return "Información del negocio: (no configurada)."
+    return "Información del negocio:\n" + "\n".join(parts)

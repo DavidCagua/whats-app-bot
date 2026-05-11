@@ -290,8 +290,8 @@ def _render_cart_prelude(
     biz = (business_context or {}).get("business") or {}
     biz_name = (biz.get("name") or "el restaurante").strip()
     try:
-        from ..agents.order_agent import _format_business_info_for_prompt
-        biz_info = _format_business_info_for_prompt(business_context) or ""
+        from .business_info_service import format_business_info_for_prompt
+        biz_info = format_business_info_for_prompt(business_context) or ""
     except Exception:
         biz_info = ""
 
@@ -579,8 +579,8 @@ def _render_text(
     biz = (business_context or {}).get("business") or {}
     biz_name = (biz.get("name") or "el restaurante").strip()
     try:
-        from ..agents.order_agent import _format_business_info_for_prompt
-        biz_info = _format_business_info_for_prompt(business_context) or ""
+        from .business_info_service import format_business_info_for_prompt
+        biz_info = format_business_info_for_prompt(business_context) or ""
     except Exception:
         biz_info = ""
 
