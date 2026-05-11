@@ -52,6 +52,78 @@ def _format_price(price: float, currency: str = "COP") -> str:
     """Format price for display."""
     return f"${int(price):,}".replace(",", ".")
 
+
+# Used by the add_promo_to_cart miss path to name upcoming-promo days
+# in Spanish ("X aplica el viernes"). Mirrors the dict in
+# customer_service_flow but duplicated here to avoid a cross-module
+# private-name import.
+_DAY_NAMES_ES = {
+    1: "lunes", 2: "martes", 3: "miércoles", 4: "jueves",
+    5: "viernes", 6: "sábado", 7: "domingo",
+}
+
+
+def _format_promo_miss_message(
+    business_id: str,
+    query: str,
+    timezone_name: Optional[str],
+) -> str:
+    """
+    Compose the no-match reply for ``add_promo_to_cart``. Surfaces the
+    business's current promos (and upcoming this week) so the customer
+    learns what IS available in one turn instead of having to ask again.
+
+    Three shapes by availability:
+      - active promos exist → list them and invite the customer to pick.
+      - only upcoming this week → name them with the day they apply.
+      - nothing at all → offer the menu instead.
+    """
+    try:
+        buckets = promotion_service.list_promos_for_listing(
+            business_id, timezone_name=timezone_name,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ORDER_TOOL] list_promos_for_listing failed in promo-miss path: %s", exc,
+        )
+        return f"❌ No encontré una promo activa que coincida con '{query}'."
+
+    active = buckets.get("active_now") or []
+    upcoming = buckets.get("upcoming") or []
+
+    def _line(p: Dict, idx: int) -> str:
+        name = p.get("name") or ""
+        if p.get("fixed_price") is not None:
+            return f"{idx}. {name} — {_format_price(p['fixed_price'])}"
+        if p.get("discount_amount") is not None:
+            return f"{idx}. {name} — descuento {_format_price(p['discount_amount'])}"
+        if p.get("discount_pct") is not None:
+            return f"{idx}. {name} — {int(p['discount_pct'])}% off"
+        return f"{idx}. {name}"
+
+    if active:
+        lines = "\n".join(_line(p, i) for i, p in enumerate(active, start=1))
+        return (
+            f"❌ No encontré una promo de '{query}'. Hoy tenemos:\n"
+            f"{lines}\n\n¿Te interesa alguna?"
+        )
+
+    if upcoming:
+        parts: List[str] = []
+        for p in upcoming[:5]:
+            name = p.get("name") or ""
+            day = _DAY_NAMES_ES.get(int(p.get("next_active_day") or 0))
+            parts.append(f"{name} ({day})" if day else name)
+        return (
+            f"❌ No tenemos una promo de '{query}' activa hoy. "
+            f"Esta semana viene: {', '.join(parts)}."
+        )
+
+    return (
+        f"❌ No encontré una promo de '{query}'. Por ahora no tenemos "
+        "promos activas. ¿Te ayudo con el menú?"
+    )
+
 # Terms that suggest the user is asking by ingredient (include description in search result for LLM).
 _INGREDIENT_LIKE_WORDS = frozenset({
     "queso", "pollo", "carne", "tocineta", "cebolla", "salsa", "jamón", "jamón",
@@ -1475,7 +1547,12 @@ def add_promo_to_cart(
                 business_id, promo_query, timezone_name=tz_name,
             )
             if not matches:
-                return f"❌ No encontré una promo activa que coincida con '{promo_query}'."
+                # Surface active/upcoming so the customer learns what IS
+                # available in this turn (single-turn miss path) instead
+                # of having to ask "what promos do you have?" separately.
+                return _format_promo_miss_message(
+                    business_id, promo_query, tz_name,
+                )
             if len(matches) > 1:
                 names = ", ".join(p["name"] for p in matches[:5])
                 return f"❌ Varias promos coinciden ({names}). Pídela por nombre exacto."

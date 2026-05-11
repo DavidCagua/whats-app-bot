@@ -571,6 +571,82 @@ class TestRouterDeterministicPriceOfProduct:
         assert result.segments is None
 
 
+class TestRouterDeterministicPromoAdd:
+    """
+    Regression: production observation 2026-05-11 (Biela / 3177000722) —
+    "una promo de oregon" was misrouted to customer_service → get_promos
+    → "Si quieres alguna, dime cuál" (list-and-ask), instead of straight
+    to order → add_promo_to_cart. The Spanish article-noun construction
+    is imperative ("give me a promo of oregon") but the LLM saw the
+    promo keyword without an explicit verb and defaulted to inquiry.
+
+    Pre-classifier short-circuits the LLM: imperative trigger + promo
+    keyword + identifier (no interrogative cue) → order.
+    """
+
+    @pytest.fixture
+    def biela_lookup_set(self):
+        return frozenset({"oregon", "honey", "burger", "barracuda"})
+
+    def _route(self, message, lookup):
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=lookup,
+        ), patch("app.orchestration.router._get_llm_classifier") as llm_factory:
+            return router.route(message, BIELA_CONTEXT, "David"), llm_factory
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "una promo de oregon",
+            "un combo familiar",
+            "una oferta del lunes",
+            "dame una promo de honey",
+            "quiero el combo lunes",
+            "regalame una promo de oregon",
+            "una promo del honey",
+        ],
+    )
+    def test_imperative_promo_with_identifier_short_circuits_to_order(
+        self, msg, biela_lookup_set,
+    ):
+        result, llm_factory = self._route(msg, biela_lookup_set)
+        assert result.segments == [(router.DOMAIN_ORDER, msg)]
+        # Crucially: the LLM router was never built/called.
+        llm_factory.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # interrogative: clearly an info question
+            "qué promos tienen?",
+            "tienes alguna promo?",
+            "tienen promo del lunes?",
+            "hay alguna promo",
+            "qué combos manejan",
+            # no identifier: ambiguous, let the LLM decide
+            "una promo",
+            # no imperative head: fragment, let the LLM decide
+            "promo de oregon",
+            # question mark: even with imperative-looking form, it's a question
+            "una promo de oregon?",
+        ],
+    )
+    def test_inquiries_and_fragments_fall_through_to_llm(
+        self, msg, biela_lookup_set,
+    ):
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "customer_service", "text": "x"}]}'
+        )
+        with patch(
+            "app.orchestration.router.catalog_cache.get_router_lookup_set",
+            return_value=biela_lookup_set,
+        ), patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route(msg, BIELA_CONTEXT, "David")
+        mock_llm.invoke.assert_called_once()
+        assert result.segments == [(router.DOMAIN_CUSTOMER_SERVICE, "x")]
+
+
 class TestRouterStuckArticleSplitter:
     """
     Regression: production observation 2026-05-05 (Biela / 3177000722) —

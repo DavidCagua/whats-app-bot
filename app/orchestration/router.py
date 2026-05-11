@@ -227,6 +227,16 @@ Reglas de desambiguación (claves):
   Y no nombra ningún producto específico del catálogo).
 - "dame la promo del honey" / "agrega esa promo" / "quiero el combo lunes" → order
   (acción sobre el carrito; el order agent resuelve la promo y la agrega).
+- ARTÍCULO + promo/oferta/combo + IDENTIFICADOR, SIN palabra interrogativa, es una
+  solicitud IMPERATIVA equivalente a "dame una X" — en español colombiano el verbo
+  se omite en este patrón. Clasifica como order:
+    "una promo de oregon" → order
+    "un combo familiar" → order
+    "una oferta del lunes" → order
+    "una promo del honey" → order
+  Solo es customer_service cuando hay palabra interrogativa explícita ("qué", "cuál",
+  "hay", "tienen", "manejan") o cuando NO hay identificador específico
+  ("una promo" sola, sin nombre / día / qualifier).
 - "cuánto vale la barracuda?" / "una picada qué valor?" / "qué precio tiene la honey?" → order
   (pregunta sobre el precio/valor de un PRODUCTO NOMBRADO — eso es navegación del menú,
   NO información del negocio). Discriminador clave: ¿el cliente nombró un producto del
@@ -645,6 +655,94 @@ def _deterministic_price_of_product(
     return False
 
 
+# Imperative cues that turn "X promo de Y" into "give me X promo of Y".
+# Both Spanish article-noun shorthand ("una promo de oregon") and explicit
+# verbs ("dame", "quiero", "agrega") count.
+_PROMO_IMPERATIVE_TRIGGERS = frozenset({
+    "una", "un", "uno",
+    "dame", "deme", "quiero", "queremos",
+    "ponme", "ponnos",
+    "agregame", "agrega", "agregue", "agreguen",
+    "añade", "añademe", "anade", "anademe",
+    "incluye", "incluyeme",
+    "regalame", "regala",
+})
+_PROMO_KEYWORDS = frozenset({
+    "promo", "promos", "promocion", "promociones",
+    "combo", "combos",
+    "oferta", "ofertas",
+})
+# Tokens that signal an inquiry ("do you have a promo of X?") rather
+# than an imperative add. Their presence anywhere in the message
+# disqualifies the deterministic match — let the LLM handle it.
+_PROMO_INTERROGATIVE_BLOCKERS = frozenset({
+    "que", "cual", "cuales",
+    "como", "cuanto", "cuanta", "cuantos", "cuantas",
+    "cuando", "donde",
+    "hay", "tienen", "tienes", "manejan", "ofrecen",
+    "existe", "existen", "sirven", "aplican", "aplica",
+})
+_PROMO_STOPWORDS = frozenset({
+    "de", "del", "la", "el", "los", "las",
+    "un", "una", "uno",
+    "y", "o",
+    "porfa", "porfis", "porfavor", "favor", "por",
+    "please",
+})
+
+
+def _deterministic_promo_add(
+    message_body: str,
+    business_context: Optional[dict],
+) -> bool:
+    """
+    Return True iff the message is unambiguously an imperative
+    "add this promo" with a specific identifier — e.g. "una promo de
+    oregon", "un combo familiar", "quiero la oferta del lunes".
+
+    Targets the gap the LLM classifier kept missing: Colombian Spanish
+    drops the verb in article-noun constructions ("una X de Y" = "dame
+    una X de Y"), and the router used to send these to customer_service
+    because they look superficially like info questions. Production
+    observation 2026-05-11 (Biela / 3177000722): "una promo de oregon"
+    was routed to CS → get_promos → list-and-ask, instead of straight
+    to order → add_promo_to_cart.
+
+    Heuristic (intentionally conservative — false negatives are fine,
+    they fall through to the LLM):
+      - No "?"/"¿" anywhere (questions are inquiries, not commands).
+      - No interrogative blocker token ("qué", "hay", "tienen", ...).
+      - A promo keyword (promo|combo|oferta + plurals/variants) appears
+        in the message.
+      - An imperative trigger (article or verb) appears BEFORE the
+        promo keyword.
+      - At least one identifier-like token (non-stopword) appears
+        AFTER the promo keyword.
+    """
+    text = (message_body or "").strip()
+    if not text:
+        return False
+    if "?" in text or "¿" in text:
+        return False
+    tokens = _tokenize_for_router(text)
+    if not tokens:
+        return False
+    if any(t in _PROMO_INTERROGATIVE_BLOCKERS for t in tokens):
+        return False
+    try:
+        idx = next(i for i, t in enumerate(tokens) if t in _PROMO_KEYWORDS)
+    except StopIteration:
+        return False
+    head = tokens[:idx]
+    if not any(t in _PROMO_IMPERATIVE_TRIGGERS for t in head):
+        return False
+    after = tokens[idx + 1:]
+    meaningful = [t for t in after if t not in _PROMO_STOPWORDS]
+    if not meaningful:
+        return False
+    return True
+
+
 def _recognize_full_product_name(
     message_body: str,
     business_context: Optional[dict],
@@ -796,7 +894,20 @@ def route(
                     recognized_product=recognized_product,
                 )
 
-    # 4. Multi-word product-name short-circuit. The catalog confirms
+    # 4. Imperative promo-add short-circuit. "una promo de oregon" /
+    # "un combo familiar" / "quiero la oferta del lunes" — Colombian
+    # article-noun-imperative or explicit-verb add. The LLM kept
+    # mis-classifying these as customer_service (info question) because
+    # the verb is implicit. Force order so add_promo_to_cart resolves
+    # and adds in one step.
+    if _deterministic_promo_add(message_body, business_context):
+        logger.info("[ROUTER] deterministic promo-add hit → order")
+        return RouterResult(
+            segments=[(DOMAIN_ORDER, message_body)],
+            recognized_product=recognized_product,
+        )
+
+    # 5. Multi-word product-name short-circuit. The catalog confirms
     # the user named a specific product (≥ 2 tokens, ≥ 5 chars
     # normalized). Force order routing — the order planner picks it
     # up via ``recognized_product``.

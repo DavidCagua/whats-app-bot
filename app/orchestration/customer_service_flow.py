@@ -1,21 +1,22 @@
 """
-Customer service flow: executor for the customer service agent.
+Customer service flow: handlers that back the CS agent's tools.
 
-Parallel to order_flow.py but much simpler — all intents here are
-READ-ONLY. No cart mutation, no order creation, no schema writes.
+Parallel to order_flow.py but much simpler — every operation here is
+READ-ONLY except cancel_order. No cart mutation, no order creation.
 
-Structure:
-    INTENT_* constants            — labels the planner may emit
-    RESULT_KIND_* constants       — routing signal for response generator
-    execute_customer_service_intent(...) — main entry point
+Each ``_handle_*`` function is invoked from a ``@tool`` wrapper in
+``app/services/cs_tools.py``. The wrapper extracts per-turn context
+(wa_id, business_id, business_context, session), calls the handler,
+and renders the returned dict into the FINAL/HANDOFF sentinel the
+agent dispatch loop understands.
 
-Result dict shape (returned to caller / response generator):
+Result dict shape (returned to the calling tool):
     {
       "result_kind": str,
       "success": bool,
       "business_id": str,
       "wa_id": str,
-      # plus intent-specific payload fields
+      # plus handler-specific payload fields
     }
 """
 
@@ -64,27 +65,8 @@ def _delivery_handoff_threshold_min() -> int:
 _IN_FLIGHT_STATUSES = frozenset({"pending", "confirmed", "out_for_delivery"})
 
 
-# Intents (planner output)
-INTENT_GET_BUSINESS_INFO = "GET_BUSINESS_INFO"
-INTENT_GET_ORDER_STATUS = "GET_ORDER_STATUS"
-INTENT_GET_ORDER_HISTORY = "GET_ORDER_HISTORY"
-INTENT_CANCEL_ORDER = "CANCEL_ORDER"
-INTENT_GET_PROMOS = "GET_PROMOS"
-INTENT_SELECT_LISTED_PROMO = "SELECT_LISTED_PROMO"
-INTENT_CUSTOMER_SERVICE_CHAT = "CUSTOMER_SERVICE_CHAT"
-
-VALID_INTENTS = {
-    INTENT_GET_BUSINESS_INFO,
-    INTENT_GET_ORDER_STATUS,
-    INTENT_GET_ORDER_HISTORY,
-    INTENT_CANCEL_ORDER,
-    INTENT_GET_PROMOS,
-    INTENT_SELECT_LISTED_PROMO,
-    INTENT_CUSTOMER_SERVICE_CHAT,
-}
-
-
-# Result kinds — drives response generator branching
+# Result kinds — handlers tag their return dicts so the tool wrapper
+# in app/services/cs_tools.py can render the right FINAL/HANDOFF sentinel.
 RESULT_KIND_BUSINESS_INFO = "business_info"
 RESULT_KIND_INFO_MISSING = "info_missing"
 RESULT_KIND_ORDER_STATUS = "order_status"
@@ -179,70 +161,7 @@ def _clean_order_for_response(order: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def execute_customer_service_intent(
-    *,
-    wa_id: str,
-    business_id: str,
-    business_context: Optional[Dict[str, Any]],
-    intent: str,
-    params: Dict[str, Any],
-    session: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Deterministic executor for customer service intents.
-
-    Backend is single source of truth; response generator receives
-    structured data and does not re-parse tool strings.
-
-    `session` is read-only (passed through from agent_executor). Used
-    to resolve ambiguous intents like "qué tengo en mi pedido?" where
-    the router may have routed here but the user's active cart means
-    the correct owner is the order agent — emit a handoff result.
-    """
-    intent = (intent or "").upper().strip()
-    params = params or {}
-
-    if intent not in VALID_INTENTS:
-        logger.warning("[CS_FLOW] unknown intent %r — falling back to chat", intent)
-        intent = INTENT_CUSTOMER_SERVICE_CHAT
-
-    try:
-        if intent == INTENT_GET_BUSINESS_INFO:
-            return _handle_business_info(wa_id, business_id, business_context, params, session)
-
-        if intent == INTENT_GET_ORDER_STATUS:
-            return _handle_order_status(wa_id, business_id, session)
-
-        if intent == INTENT_GET_ORDER_HISTORY:
-            return _handle_order_history(wa_id, business_id, params)
-
-        if intent == INTENT_CANCEL_ORDER:
-            return _handle_cancel_order(wa_id, business_id)
-
-        if intent == INTENT_GET_PROMOS:
-            return _handle_get_promos(wa_id, business_id, business_context)
-
-        if intent == INTENT_SELECT_LISTED_PROMO:
-            return _handle_select_listed_promo(wa_id, business_id, params, session)
-
-        # CUSTOMER_SERVICE_CHAT fallback.
-        return _base_result(
-            wa_id, business_id,
-            RESULT_KIND_CHAT_FALLBACK,
-            available_fields=business_info_service.supported_fields(),
-        )
-
-    except Exception as exc:
-        logger.error("[CS_FLOW] executor failed for intent=%s: %s", intent, exc, exc_info=True)
-        return _base_result(
-            wa_id, business_id,
-            RESULT_KIND_INTERNAL_ERROR,
-            success=False,
-            error=str(exc),
-        )
-
-
-# ── Intent handlers ────────────────────────────────────────────────
+# ── Handlers (invoked by app/services/cs_tools.py tool wrappers) ──────
 
 def _handle_business_info(
     wa_id: str,

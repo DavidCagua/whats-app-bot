@@ -449,10 +449,12 @@ def _handle_promo_screenshot(wa_id: str, business_id: str, extracted: dict) -> N
         # SELECT_LISTED_PROMO → handoff to order/ADD_PROMO_TO_CART.
         try:
             session_state_service.save(wa_id, business_id, {
-                "customer_service_context": {
-                    "last_intent": "GET_PROMOS",
-                    "last_result_kind": "promos_list",
-                    "last_listed_promos": [{"id": promo["id"], "name": promo["name"]}],
+                "agent_contexts": {
+                    "customer_service": {
+                        "last_listed_promos": [
+                            {"id": promo["id"], "name": promo["name"]},
+                        ],
+                    },
                 },
             })
         except Exception as exc:

@@ -1,4 +1,11 @@
-"""Unit tests for app/orchestration/customer_service_flow.py."""
+"""
+Unit tests for app/orchestration/customer_service_flow.py.
+
+The CS agent calls these handlers via @tool wrappers in
+app/services/cs_tools.py; these tests target the handlers directly so we
+keep coverage of the business logic regardless of how the agent layer
+dispatches them.
+"""
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -6,6 +13,15 @@ from unittest.mock import patch
 import pytest
 
 from app.orchestration import customer_service_flow as csf
+
+
+# Intent labels used only by these tests (the legacy CS planner emitted
+# them; the agent no longer does). Kept local so we don't reintroduce
+# them as module-level exports.
+INTENT_GET_BUSINESS_INFO = "GET_BUSINESS_INFO"
+INTENT_GET_ORDER_STATUS = "GET_ORDER_STATUS"
+INTENT_GET_ORDER_HISTORY = "GET_ORDER_HISTORY"
+INTENT_SELECT_LISTED_PROMO = "SELECT_LISTED_PROMO"
 
 
 def _recent_iso(minutes_ago: int = 1) -> str:
@@ -30,11 +46,21 @@ BIZ_CTX = {"business_id": BIZ, "business": {"name": "Biela", "settings": {"hours
 
 
 def _run(intent, params=None, ctx=BIZ_CTX, session=None):
-    return csf.execute_customer_service_intent(
-        wa_id=WA, business_id=BIZ, business_context=ctx,
-        intent=intent, params=params or {},
-        session=session,
-    )
+    """
+    Dispatch to the handler that backs ``intent``. Mirrors the routing
+    the legacy ``execute_customer_service_intent`` did, so existing test
+    bodies keep working unchanged.
+    """
+    params = params or {}
+    if intent == INTENT_GET_BUSINESS_INFO:
+        return csf._handle_business_info(WA, BIZ, ctx, params, session)
+    if intent == INTENT_GET_ORDER_STATUS:
+        return csf._handle_order_status(WA, BIZ, session)
+    if intent == INTENT_GET_ORDER_HISTORY:
+        return csf._handle_order_history(WA, BIZ, params)
+    if intent == INTENT_SELECT_LISTED_PROMO:
+        return csf._handle_select_listed_promo(WA, BIZ, params, session)
+    raise AssertionError(f"unknown intent in test: {intent!r}")
 
 
 def _session_with_prior_status_ask(order_id: str, count: int = 1):
@@ -51,26 +77,26 @@ def _session_with_prior_status_ask(order_id: str, count: int = 1):
 
 class TestGetBusinessInfo:
     def test_found_field_returns_business_info_result(self):
-        result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"})
+        result = _run(INTENT_GET_BUSINESS_INFO, {"field": "hours"})
         assert result["result_kind"] == csf.RESULT_KIND_BUSINESS_INFO
         assert result["success"] is True
         assert result["field"] == "hours"
         assert result["value"] == "Lun-Vie 5PM"
 
     def test_unknown_field_returns_info_missing(self):
-        result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "floor_plan"})
+        result = _run(INTENT_GET_BUSINESS_INFO, {"field": "floor_plan"})
         assert result["result_kind"] == csf.RESULT_KIND_INFO_MISSING
         assert result["field"] == "floor_plan"
         assert "hours" in result["available_fields"]
 
     def test_missing_field_in_params_returns_info_missing(self):
-        result = _run(csf.INTENT_GET_BUSINESS_INFO, {})
+        result = _run(INTENT_GET_BUSINESS_INFO, {})
         assert result["result_kind"] == csf.RESULT_KIND_INFO_MISSING
         assert result["field"] is None
 
     def test_field_not_configured_returns_info_missing(self):
         ctx = {"business_id": BIZ, "business": {"name": "X", "settings": {}}}
-        result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"}, ctx=ctx)
+        result = _run(INTENT_GET_BUSINESS_INFO, {"field": "hours"}, ctx=ctx)
         assert result["result_kind"] == csf.RESULT_KIND_INFO_MISSING
 
     def test_hours_response_prepends_open_status_when_open(self):
@@ -92,7 +118,7 @@ class TestGetBusinessInfo:
                 "now_local": None,
             },
         ):
-            result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"})
+            result = _run(INTENT_GET_BUSINESS_INFO, {"field": "hours"})
         assert result["result_kind"] == csf.RESULT_KIND_BUSINESS_INFO
         value = result["value"]
         assert "Sí, estamos abiertos" in value
@@ -123,7 +149,7 @@ class TestGetBusinessInfo:
                 "now_local": now_tue_1445,
             },
         ):
-            result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"})
+            result = _run(INTENT_GET_BUSINESS_INFO, {"field": "hours"})
         value = result["value"]
         assert "Por ahora estamos cerrados" in value
         assert "Hoy abrimos a las 5:00 PM" in value
@@ -144,7 +170,7 @@ class TestGetBusinessInfo:
                 "now_local": None,
             },
         ):
-            result = _run(csf.INTENT_GET_BUSINESS_INFO, {"field": "hours"})
+            result = _run(INTENT_GET_BUSINESS_INFO, {"field": "hours"})
         value = result["value"]
         assert value == "Lun-Vie 5PM"  # the BIZ_CTX settings fallback
         assert "estamos abiertos" not in value
@@ -162,7 +188,7 @@ class TestGetOrderStatus:
             "items": [{"quantity": 2, "unit_price": 12500}],
         }
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order):
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
+            result = _run(INTENT_GET_ORDER_STATUS)
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
         assert result["order"]["status"] == "pending"
         assert result["order"]["total_amount"] == 25000
@@ -170,17 +196,14 @@ class TestGetOrderStatus:
 
     def test_no_order_found(self):
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=None):
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
+            result = _run(INTENT_GET_ORDER_STATUS)
         assert result["result_kind"] == csf.RESULT_KIND_NO_ORDER
 
-    def test_lookup_exception_returns_internal_error(self):
-        with patch.object(
-            csf.order_lookup_service, "get_latest_order",
-            side_effect=RuntimeError("boom"),
-        ):
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
-        assert result["result_kind"] == csf.RESULT_KIND_INTERNAL_ERROR
-        assert result["success"] is False
+    # test_lookup_exception_returns_internal_error removed: the catch-all
+    # that translated handler exceptions into RESULT_KIND_INTERNAL_ERROR
+    # lived in the deleted execute_customer_service_intent dispatcher.
+    # Exception handling now lives in the agent's tool dispatch loop
+    # ([customer_service_agent.py] try/except around tool_fn.invoke).
 
 
 class TestDeliveryHandoff:
@@ -200,7 +223,7 @@ class TestDeliveryHandoff:
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
             result = _run(
-                csf.INTENT_GET_ORDER_STATUS,
+                INTENT_GET_ORDER_STATUS,
                 session=_session_with_prior_status_ask("o1", count=1),
             )
         assert result["result_kind"] == csf.RESULT_KIND_DELIVERY_HANDOFF
@@ -218,7 +241,7 @@ class TestDeliveryHandoff:
         order = self._aged_order("out_for_delivery", minutes_ago=70)
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
-            result = _run(csf.INTENT_GET_ORDER_STATUS)
+            result = _run(INTENT_GET_ORDER_STATUS)
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
         assert result["state_patch"]["last_status_order_id"] == "o1"
         assert result["state_patch"]["last_status_ask_count"] == 1
@@ -232,7 +255,7 @@ class TestDeliveryHandoff:
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
             result = _run(
-                csf.INTENT_GET_ORDER_STATUS,
+                INTENT_GET_ORDER_STATUS,
                 session=_session_with_prior_status_ask("old", count=3),
             )
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
@@ -246,7 +269,7 @@ class TestDeliveryHandoff:
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
             result = _run(
-                csf.INTENT_GET_ORDER_STATUS,
+                INTENT_GET_ORDER_STATUS,
                 session=_session_with_prior_status_ask("o1", count=5),
             )
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
@@ -259,7 +282,7 @@ class TestDeliveryHandoff:
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=order), \
              patch.object(csf.conversation_agent_service, "set_agent_enabled") as m_disable:
             result = _run(
-                csf.INTENT_GET_ORDER_STATUS,
+                INTENT_GET_ORDER_STATUS,
                 session=_session_with_prior_status_ask("o1", count=4),
             )
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_STATUS
@@ -274,7 +297,7 @@ class TestDeliveryHandoff:
              patch.object(csf.conversation_agent_service, "set_agent_enabled",
                           side_effect=RuntimeError("db down")):
             result = _run(
-                csf.INTENT_GET_ORDER_STATUS,
+                INTENT_GET_ORDER_STATUS,
                 session=_session_with_prior_status_ask("o1", count=1),
             )
         assert result["result_kind"] == csf.RESULT_KIND_DELIVERY_HANDOFF
@@ -284,11 +307,7 @@ class TestGetOrderStatusActiveCartHandoff:
     """The 'mi pedido' ambiguity: CS should defer to order when cart is active."""
 
     def _run_with_session(self, session):
-        return csf.execute_customer_service_intent(
-            wa_id=WA, business_id=BIZ, business_context=BIZ_CTX,
-            intent=csf.INTENT_GET_ORDER_STATUS, params={},
-            session=session,
-        )
+        return csf._handle_order_status(WA, BIZ, session)
 
     def test_active_cart_triggers_handoff_to_order(self):
         session = {"order_context": {"items": [{"name": "Barracuda", "quantity": 1}]}}
@@ -325,7 +344,7 @@ class TestGetOrderHistory:
             {"id": "o2", "status": "pending", "total_amount": 15000, "items": []},
         ]
         with patch.object(csf.order_lookup_service, "get_order_history", return_value=raw):
-            result = _run(csf.INTENT_GET_ORDER_HISTORY)
+            result = _run(INTENT_GET_ORDER_HISTORY)
         assert result["result_kind"] == csf.RESULT_KIND_ORDER_HISTORY
         assert len(result["orders"]) == 2
         # Clean shape
@@ -333,14 +352,14 @@ class TestGetOrderHistory:
 
     def test_no_history_returns_no_order(self):
         with patch.object(csf.order_lookup_service, "get_order_history", return_value=[]):
-            result = _run(csf.INTENT_GET_ORDER_HISTORY)
+            result = _run(INTENT_GET_ORDER_HISTORY)
         assert result["result_kind"] == csf.RESULT_KIND_NO_ORDER
 
     def test_limit_clamped_to_20(self):
         with patch.object(
             csf.order_lookup_service, "get_order_history", return_value=[],
         ) as m:
-            _run(csf.INTENT_GET_ORDER_HISTORY, {"limit": 999})
+            _run(INTENT_GET_ORDER_HISTORY, {"limit": 999})
         m.assert_called_once()
         _, kwargs = m.call_args
         assert kwargs["limit"] == 20
@@ -349,7 +368,7 @@ class TestGetOrderHistory:
         with patch.object(
             csf.order_lookup_service, "get_order_history", return_value=[],
         ) as m:
-            _run(csf.INTENT_GET_ORDER_HISTORY, {"limit": "abc"})
+            _run(INTENT_GET_ORDER_HISTORY, {"limit": "abc"})
         _, kwargs = m.call_args
         assert kwargs["limit"] == 5
 
@@ -374,13 +393,8 @@ class TestSelectListedPromoSearchFallback:
                 "customer_service": {"last_listed_promos": listed or []},
             },
         }
-        return csf.execute_customer_service_intent(
-            wa_id="+573001234567",
-            business_id="biz-1",
-            business_context={"business_id": "biz-1", "business": {"name": "X", "settings": {}}},
-            intent=csf.INTENT_SELECT_LISTED_PROMO,
-            params={"query": query},
-            session=session,
+        return csf._handle_select_listed_promo(
+            "+573001234567", "biz-1", {"query": query}, session,
         )
 
     def test_unresolved_query_hands_off_to_order_when_no_promo_keyword(self):
@@ -434,12 +448,7 @@ class TestSelectListedPromoSearchFallback:
         assert result["result_kind"] == csf.RESULT_KIND_PROMO_NOT_RESOLVED
 
 
-class TestChatFallback:
-    def test_explicit_chat_returns_fallback(self):
-        result = _run(csf.INTENT_CUSTOMER_SERVICE_CHAT)
-        assert result["result_kind"] == csf.RESULT_KIND_CHAT_FALLBACK
-        assert "hours" in result["available_fields"]
-
-    def test_unknown_intent_falls_back_to_chat(self):
-        result = _run("NOT_A_REAL_INTENT")
-        assert result["result_kind"] == csf.RESULT_KIND_CHAT_FALLBACK
+# TestChatFallback removed: the chat-fallback branch lived in the old
+# execute_customer_service_intent dispatcher. The LLM now handles chat
+# turns directly by emitting prose without a tool call — there's no
+# handler-level fallback to test.

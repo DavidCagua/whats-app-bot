@@ -521,3 +521,86 @@ class TestHelpers:
     # Case: _is_ingredient_like_query — "queso azul" → True, "barracuda" → False
     # Case: _cart_from_session — returns correct structure when session is empty
     # Case: _cart_from_session — returns items, total, delivery_info from session
+
+
+# ---------------------------------------------------------------------------
+# _format_promo_miss_message — no-match branch of add_promo_to_cart
+# ---------------------------------------------------------------------------
+
+class TestFormatPromoMissMessage:
+    """
+    When `add_promo_to_cart` can't resolve a query, the tool used to
+    return just "❌ No encontré...". The enhanced helper now surfaces
+    what IS available (active today + upcoming this week) so the
+    customer learns alternatives in the same turn.
+
+    Production trigger: 2026-05-11 (Biela / 3177000722) — customer asked
+    for "una promo de oregon" with no active match and the bot only
+    said "no encontré", forcing a follow-up turn for what's available.
+    """
+
+    def test_returns_active_list_when_active_promos_exist(self):
+        buckets = {
+            "active_now": [
+                {"id": "p1", "name": "Dos Oregon con papas", "fixed_price": 39900},
+                {"id": "p2", "name": "Honey Combo", "discount_pct": 15},
+            ],
+            "upcoming": [],
+        }
+        with patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            return_value=buckets,
+        ):
+            from app.services.order_tools import _format_promo_miss_message
+            result = _format_promo_miss_message("biz", "pegoretti", None)
+        assert "pegoretti" in result
+        assert "Dos Oregon con papas" in result
+        assert "$39.900" in result
+        assert "Honey Combo" in result
+        assert "15% off" in result
+        assert "¿Te interesa alguna?" in result
+
+    def test_returns_upcoming_message_when_nothing_active_today(self):
+        buckets = {
+            "active_now": [],
+            "upcoming": [
+                {"id": "p3", "name": "Combo Lunes", "next_active_day": 1},
+                {"id": "p4", "name": "2x1 Viernes", "next_active_day": 5},
+            ],
+        }
+        with patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            return_value=buckets,
+        ):
+            from app.services.order_tools import _format_promo_miss_message
+            result = _format_promo_miss_message("biz", "oregon", None)
+        assert "oregon" in result
+        assert "Combo Lunes" in result
+        assert "lunes" in result
+        assert "2x1 Viernes" in result
+        assert "viernes" in result
+
+    def test_returns_no_promos_message_when_nothing_at_all(self):
+        buckets = {"active_now": [], "upcoming": []}
+        with patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            return_value=buckets,
+        ):
+            from app.services.order_tools import _format_promo_miss_message
+            result = _format_promo_miss_message("biz", "oregon", None)
+        assert "oregon" in result
+        assert "no tenemos" in result.lower()
+        assert "menú" in result.lower()
+
+    def test_promotion_service_failure_falls_back_to_simple_message(self):
+        # If list_promos_for_listing raises, the helper must still return
+        # SOMETHING — the original "no encontré" line — instead of
+        # blowing up the whole tool call.
+        with patch(
+            "app.services.promotion_service.list_promos_for_listing",
+            side_effect=RuntimeError("db down"),
+        ):
+            from app.services.order_tools import _format_promo_miss_message
+            result = _format_promo_miss_message("biz", "oregon", None)
+        assert "oregon" in result
+        assert "No encontré" in result

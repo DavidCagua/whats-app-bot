@@ -67,9 +67,12 @@ class TestHandlePromoScreenshot:
         # "sí" is unambiguous → SELECT_LISTED_PROMO → handoff to order.
         assert "agregue" in body.lower() or "agrego" in body.lower()
 
-        # last_listed_promos persisted into the same slot CS PROMOS_LIST uses.
+        # last_listed_promos persisted into the same slot CS PROMOS_LIST uses
+        # (agent_contexts.customer_service — the only sub-dict the
+        # ConversationSession model actually merges; the prior shape
+        # `customer_service_context` was a silent-drop bug).
         assert len(saved_state) == 1
-        cs_ctx = saved_state[0]["customer_service_context"]
+        cs_ctx = saved_state[0]["agent_contexts"]["customer_service"]
         assert cs_ctx["last_listed_promos"] == [
             {"id": "promo-123", "name": "2 Honey Burger con papas"}
         ]
