@@ -8,7 +8,7 @@ Coverage:
   _flush → process_whatsapp_message and the user-message persist is
   skipped on solo requeues. Mixed requeue+fresh flushes still persist
   so new content isn't lost.
-- Fix #2: v2 OrderAgentToolCalling checks the abort flag at the top of
+- Fix #2: v2 OrderAgent checks the abort flag at the top of
   each LLM iteration and short-circuits with __ABORTED__ + requeue.
 - Backoff (a): _compute_initial_window returns the exponential curve
   capped at the configured max.
@@ -145,15 +145,15 @@ class TestV2AgentAbortWiring:
         return {"business_id": "biz-1", "business": {"name": "Biela", "settings": {}}}
 
     def test_abort_pre_iteration_short_circuits(self):
-        from app.agents.order_agent_tool_calling import OrderAgentToolCalling
+        from app.agents.order_agent import OrderAgent
         from app.orchestration.turn_context import TurnContext
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         llm = MagicMock()
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=TurnContext(),
              ), \
              patch(
@@ -186,10 +186,10 @@ class TestV2AgentAbortWiring:
 
     def test_no_abort_runs_normally(self):
         """check_abort=False → loop proceeds, LLM is invoked."""
-        from app.agents.order_agent_tool_calling import OrderAgentToolCalling
+        from app.agents.order_agent import OrderAgent
         from app.orchestration.turn_context import TurnContext
         from langchain_core.messages import AIMessage
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         # Single AIMessage with a respond(...) tool call → terminates loop cleanly.
         respond_call = {
             "name": "respond",
@@ -199,15 +199,15 @@ class TestV2AgentAbortWiring:
         }
         llm = MagicMock()
         llm.invoke.return_value = AIMessage(content="", tool_calls=[respond_call])
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=TurnContext(),
              ), \
              patch(
-                 "app.agents.order_agent_tool_calling.render_response",
+                 "app.agents.order_agent.render_response",
                  return_value={"type": "text", "body": "hola"},
              ), \
              patch(
@@ -476,3 +476,108 @@ class TestProcessWhatsappMessageReturnsAbortFlag:
                 abort_key="abort:whatsapp:+1:+57300",
             )
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Per-entry persist at flush time (Option A, 2026-05-11)
+# ---------------------------------------------------------------------------
+
+class TestPersistBufferedEntry:
+    """``persist_buffered_entry`` writes one user row per buffered
+    entry. Called by the flusher; the handler is told to skip its
+    own persist. This is what closes the mixed-batch dup ("Pago por
+    transferencia" production bug, 2026-05-10) without putting DB
+    writes on the webhook hot path (Option C, reverted 2026-05-11
+    after Supabase pooler timeouts hung the handler 137s)."""
+
+    _BIZ_CTX = {
+        "business_id": "biela-test",
+        "whatsapp_number_id": "wn-1",
+        "business": {"name": "Biela"},
+    }
+
+    def _envelope(self, text: str, msg_id: str = "msg-1") -> dict:
+        return {
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "contacts": [{"wa_id": "+573001234567"}],
+                        "messages": [{
+                            "id": msg_id,
+                            "type": "text",
+                            "text": {"body": text},
+                        }],
+                    }
+                }]
+            }]
+        }
+
+    def test_text_entry_persists_one_row(self):
+        from app.handlers import whatsapp_handler
+        with patch.object(
+            whatsapp_handler.conversation_service,
+            "store_conversation_message",
+        ) as store:
+            result = whatsapp_handler.persist_buffered_entry(
+                self._envelope("Pago por transferencia"),
+                business_context=self._BIZ_CTX,
+            )
+        assert result is None
+        store.assert_called_once()
+        kwargs = store.call_args.kwargs
+        assert kwargs.get("role") == "user"
+        assert kwargs.get("message") == "Pago por transferencia"
+        assert kwargs.get("wa_id") == "+573001234567"
+        assert kwargs.get("business_id") == "biela-test"
+
+    def test_attachment_entry_uses_attachment_store_and_enqueues_media(self):
+        from app.handlers import whatsapp_handler
+        body = {
+            "entry": [{
+                "changes": [{
+                    "value": {
+                        "contacts": [{"wa_id": "+573001234567"}],
+                        "messages": [{
+                            "id": "msg-2",
+                            "type": "image",
+                            "image": {"id": "media-1"},
+                        }],
+                    }
+                }]
+            }]
+        }
+        with patch.object(
+            whatsapp_handler, "parse_inbound_message",
+            return_value={
+                "from_wa_id": "+573001234567",
+                "provider_message_id": "msg-2",
+                "text": "",
+                "attachments": [{"type": "image", "url": "http://x/y.jpg"}],
+            },
+        ), patch.object(
+            whatsapp_handler.conversation_service,
+            "store_conversation_message_with_attachments",
+            return_value=42,
+        ), patch(
+            "app.workers.media_job.enqueue_media_job",
+        ) as enqueue:
+            result = whatsapp_handler.persist_buffered_entry(
+                body, business_context=self._BIZ_CTX,
+                abort_key="abort:wa:+57:+573001234567",
+            )
+        assert result == 42
+        enqueue.assert_called_once_with(42, abort_key="abort:wa:+57:+573001234567")
+
+    def test_swallows_persist_exception(self):
+        """A single bad entry must not block the rest of the flush."""
+        from app.handlers import whatsapp_handler
+        with patch.object(
+            whatsapp_handler.conversation_service,
+            "store_conversation_message",
+            side_effect=RuntimeError("db blip"),
+        ):
+            result = whatsapp_handler.persist_buffered_entry(
+                self._envelope("hola"),
+                business_context=self._BIZ_CTX,
+            )
+        assert result is None

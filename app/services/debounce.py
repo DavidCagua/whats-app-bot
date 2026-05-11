@@ -506,32 +506,33 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
                         phone, exc,
                     )
 
-        # Skip-persist if EVERY entry in this batch is a requeue (solo
-        # requeue or batched-requeues). When a fresh inbound is mixed
-        # in, persist normally — the new content needs a row, and the
-        # merged body covers it. The narrower fix (only-skip-on-solo)
-        # is what catches the production bug from 2026-05-09 without
-        # changing behavior for healthy turns.
-        skip_persist = bool(entries) and all(
-            e.get("_skip_persist") for e in entries
-        )
-        if skip_persist:
-            logging.warning(
-                "[DEBOUNCE] %s: solo requeue (%d entries) — skipping user-persist on this flush",
-                phone, len(entries),
-            )
-
         # ── Resolve business context inside the flusher ──────────────
         # Done here (not in the webhook thread) so the debounce window
         # isn't eaten by the ~3–5 s Supabase round trip. One lookup
-        # serves the whole coalesced batch.
+        # serves the whole coalesced batch — used for both per-entry
+        # persist and the agent dispatch below.
         from ..utils.twilio_utils import resolve_twilio_business_context
         business_context = resolve_twilio_business_context(to_number)
 
-        # ── Hand off through existing turn_lock inside an app context ─
-        # Background threads don't inherit Flask's app context; push one
-        # explicitly so current_app / current_app.config work in send_message.
-        from ..handlers.whatsapp_handler import process_whatsapp_message  # avoid circular
+        # ── Per-entry persist (Option A, 2026-05-11) ─────────────────
+        # Achieves 1:1 between Twilio inbound webhook and
+        # conversations.role='user' row even when this flush coalesces
+        # multiple entries. The flusher then merges them for the agent
+        # so the bot still replies once on the full thread.
+        #
+        # Why not at webhook time (Option C)? Tried 2026-05-10 and
+        # reverted: synchronous business lookup + persist in the
+        # webhook thread hung the handler for >130s when Supabase's
+        # pooler had connection-timeout blips, breaking prod. Doing
+        # it here keeps DB writes off the hot path.
+        #
+        # Entries with ``_skip_persist=True`` are the requeue path —
+        # they were already persisted on their original webhook's
+        # first flush. Re-persisting would re-create the dup.
+        from ..handlers.whatsapp_handler import (
+            persist_buffered_entry,
+            process_whatsapp_message,
+        )  # avoid circular
         from .turn_lock import wa_id_turn_lock
 
         # Set processing flag so new arrivals can signal an abort.
@@ -542,15 +543,41 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
         except Exception:
             pass
 
+        persisted_count = 0
+        skipped_count = 0
+        for entry in entries:
+            if entry.get("_skip_persist"):
+                skipped_count += 1
+                continue
+            try:
+                persist_buffered_entry(
+                    entry.get("normalized_body") or {},
+                    business_context=business_context,
+                    abort_key=ab_key,
+                )
+                persisted_count += 1
+            except Exception as exc:
+                logging.warning(
+                    "[DEBOUNCE] %s: per-entry persist failed: %s",
+                    phone, exc,
+                )
+        if persisted_count or skipped_count:
+            logging.warning(
+                "[DEBOUNCE] %s fid=%s: persisted=%d skipped=%d (entries=%d)",
+                phone, fid, persisted_count, skipped_count, len(entries),
+            )
+
         was_aborted = False
         with flask_app.app_context():
             with wa_id_turn_lock(phone) as lock_result:
+                # skip_persist=True always — per-entry persist above is
+                # the only place we write user rows from the flush path.
                 was_aborted = bool(process_whatsapp_message(
                     combined_body,
                     business_context=business_context,
                     abort_key=ab_key,
                     stale_turn=lock_result.waited,
-                    skip_persist=skip_persist,
+                    skip_persist=True,
                 ))
 
         # Counter decay is intentionally TTL-only (not reset on first

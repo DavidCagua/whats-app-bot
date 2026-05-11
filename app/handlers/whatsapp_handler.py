@@ -23,6 +23,82 @@ from app.utils.whatsapp_utils import (
 )
 
 
+def persist_buffered_entry(
+    normalized_body: dict,
+    business_context: Optional[dict] = None,
+    abort_key: Optional[str] = None,
+):
+    """Persist a single buffered inbound entry's user message.
+
+    Called by the debounce flusher once per non-requeue entry BEFORE
+    the agent runs. Lets the flusher coalesce multiple webhook entries
+    into one merged agent turn (so the bot replies once) while still
+    writing one ``conversations.role='user'`` row per Twilio/Meta
+    inbound — the invariant that keeps the inbox UI clean and
+    prevents the mixed-batch dup ("Pago por transferencia" production
+    bug, 2026-05-10).
+
+    For attachment entries, also enqueues the media job with the
+    returned conv_id. Errors are swallowed — a single failed persist
+    must not block the rest of the flush.
+
+    Returns conv_id when an attachment row was created; None otherwise.
+    """
+    try:
+        provider = "twilio" if (business_context or {}).get("provider") == "twilio" else "meta"
+        inbound = parse_inbound_message(normalized_body, provider)
+        if not inbound:
+            try:
+                value = normalized_body["entry"][0]["changes"][0]["value"]
+                wa_id = value["contacts"][0]["wa_id"]
+                msg = value["messages"][0]
+                message_body = (msg.get("text") or {}).get("body") or ""
+                inbound = {
+                    "from_wa_id": wa_id,
+                    "provider_message_id": msg.get("id") or "",
+                    "text": message_body,
+                    "attachments": [],
+                }
+            except (KeyError, IndexError, TypeError) as exc:
+                logging.error(f"[CONVERSATION] per-entry parse failed: {exc}")
+                return None
+
+        wa_id = inbound["from_wa_id"]
+        message_body = (inbound.get("text") or "").strip()
+        attachments = inbound.get("attachments") or []
+        inferred_business_id = (business_context or {}).get("business_id")
+        inferred_whatsapp_number_id = (business_context or {}).get("whatsapp_number_id")
+
+        if attachments:
+            conv_id = conversation_service.store_conversation_message_with_attachments(
+                wa_id=wa_id,
+                message_text=message_body,
+                role="user",
+                attachments=attachments,
+                business_id=inferred_business_id,
+                whatsapp_number_id=inferred_whatsapp_number_id,
+            )
+            if conv_id is not None:
+                try:
+                    from app.workers.media_job import enqueue_media_job
+                    enqueue_media_job(conv_id, abort_key=abort_key)
+                except Exception as enq_e:
+                    logging.error(f"[CONVERSATION] media job enqueue failed: {enq_e}")
+            return conv_id
+
+        conversation_service.store_conversation_message(
+            wa_id=wa_id,
+            message=message_body,
+            role="user",
+            business_id=inferred_business_id,
+            whatsapp_number_id=inferred_whatsapp_number_id,
+        )
+        return None
+    except Exception as exc:
+        logging.error(f"[CONVERSATION] per-entry persist failed: {exc}")
+        return None
+
+
 def process_whatsapp_message(body, business_context=None, abort_key=None, stale_turn=False, skip_persist=False):
     """
     Process incoming WhatsApp message: parse, persist, optionally run agent and send reply.
