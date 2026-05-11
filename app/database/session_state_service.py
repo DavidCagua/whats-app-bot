@@ -22,21 +22,19 @@ ORDER_STATE_READY_TO_PLACE = "READY_TO_PLACE"
 
 
 def derive_order_state(order_context: Optional[Dict]) -> str:
-    """
-    Derive order state from order_context when not explicitly set.
-    In-progress cart lives only in session (order_context); no separate DB cart.
+    """Derive order state from order_context contents.
+
+    Pure function of (items, delivery_info). The previous short-circuit
+    that returned the stored ``state`` if it was a valid value was a
+    legacy-executor compat hack: it let an explicit COLLECTING_DELIVERY
+    persist even when contents alone wouldn't justify it. With v1 gone,
+    nothing sets state explicitly anymore — state is always derived
+    from contents on save, and any stored state is informational only.
     """
     if not order_context:
         return ORDER_STATE_GREETING
     items = order_context.get("items") or []
     delivery_info = order_context.get("delivery_info") or {}
-    if order_context.get("state") in (
-        ORDER_STATE_GREETING,
-        ORDER_STATE_ORDERING,
-        ORDER_STATE_COLLECTING_DELIVERY,
-        ORDER_STATE_READY_TO_PLACE,
-    ):
-        return order_context["state"]
     if not items:
         return ORDER_STATE_GREETING
     name = (delivery_info.get("name") or "").strip()

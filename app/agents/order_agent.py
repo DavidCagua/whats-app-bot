@@ -1,803 +1,230 @@
 """
-Order agent: planner (intent) -> executor (one tool) -> response generator.
-Backend is single source of truth; response is generated from actual tool result and cart state.
+Order agent — chained tool-calling architecture.
+
+Two LLMs in series:
+
+  1. **Action agent** (this file): tool-calling loop. Calls cart /
+     menu / customer / order tools to mutate state and gather facts.
+     Always ends a turn by calling ``respond(kind, summary, facts)`` —
+     a terminator tool whose call is intercepted by the dispatch loop
+     (it never executes). The model never writes user-facing prose.
+
+  2. **Response renderer** (``app.services.response_renderer``): takes
+     the envelope from ``respond(...)`` plus the last user message and
+     business voice, returns a typed payload (``text`` body or ``cta``
+     Twilio Content Template). Owns voice/locale/format/CTA decisions.
+
+This split exists because a single LLM that writes prose AND calls tools
+hallucinated subtotals in production — the model paraphrased numbers
+instead of echoing them. With the renderer constrained to "facts in
+envelope only", numeric/name hallucination becomes structurally bounded.
+
+LangChain primitives:
+- ``ChatOpenAI.bind_tools`` — exposes order_tools + ``respond`` to the model.
+- ``InjectedToolArg`` annotation on ``injected_business_context`` keeps
+  per-turn business context out of the model's tool schema.
+- ``AIMessage`` / ``HumanMessage`` / ``ToolMessage`` / ``SystemMessage``
+  build the message thread fed into each ``llm.invoke``.
+
+LangSmith trace shape per turn:
+- One ``order_agent`` LLM span per loop iteration.
+- One ``ToolMessage`` span per dispatched tool call (excluding
+  ``respond``, which terminates the loop instead of executing).
+- One ``order_response_renderer`` LLM span for the renderer (text path).
 """
 
-import json
-import os
 import logging
-import re
-import uuid
+import os
 import time
-from typing import Any, Dict, List, Optional
-from datetime import date
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from .base_agent import BaseAgent, AgentOutput
-from ..services.order_tools import order_tools
-from ..services.order_eta import NOMINAL_RANGE_TEXT
-from ..services import promotion_service
-from ..orchestration.order_flow import (
-    execute_order_intent,
-    _clear_pending_disambiguation,
-    INTENT_ADD_TO_CART,
-    INTENT_CHAT,
-    INTENT_CONFIRM,
-    INTENT_VIEW_CART,
-    ORDER_MUTATING_INTENTS,
-    RESULT_KIND_CHAT,
-    RESULT_KIND_MENU_CATEGORIES,
-    RESULT_KIND_PRODUCTS_LIST,
-    RESULT_KIND_PRODUCT_DETAILS,
-    RESULT_KIND_CART_CHANGE,
-    RESULT_KIND_CART_VIEW,
-    RESULT_KIND_CART_ABANDONED,
-    RESULT_KIND_DELIVERY_STATUS,
-    RESULT_KIND_ORDER_PLACED,
-    RESULT_KIND_ORDER_CLOSED,
-    RESULT_KIND_NEEDS_CLARIFICATION,
-    RESULT_KIND_USER_ERROR,
-    RESULT_KIND_INTERNAL_ERROR,
-    CART_ACTION_ADDED,
-    CART_ACTION_REMOVED,
-    CART_ACTION_UPDATED_QUANTITY,
-    CART_ACTION_UPDATED_NOTES,
-    CART_ACTION_REPLACED,
-    CART_ACTION_NOOP,
-)
 from ..database.conversation_service import conversation_service
-from ..database.booking_service import booking_service
-from ..database.session_state_service import session_state_service
+from ..services.order_tools import (
+    order_tools,
+    set_tool_context,
+    reset_tool_context,
+    set_awaiting_confirmation,
+    _read_awaiting_confirmation,
+    MUTATING_TOOL_NAMES,
+)
+from ..services.product_search import ProductNotFoundError
+from ..orchestration.turn_context import (
+    TurnContext,
+    build_turn_context,
+    render_for_prompt,
+)
+from ..services.response_envelope import respond as respond_tool
+from ..services.response_renderer import render_response
 from ..services.tracing import tracer
 
 
-# Mirror of the customer_service handoff guard. If the planner picks VIEW_CART
-# but the cart is empty AND the user's message reads like a status inquiry
-# (rather than a "what can I order" browse), the correct owner is the
-# customer_service agent which can look up completed orders. Keep the
-# regex narrow — false positives demote the user to the generic empty-cart
-# reply, which is a worse UX than a status lookup miss.
-_STATUS_INQUIRY_RE = re.compile(
-    r"\b(d[oó]nde|estado|ya sali[oó]|c[oó]mo va|qu[eé] pasa con|mi pedido ya)\b",
-    re.IGNORECASE,
-)
+# Cap on tool-call iterations per turn. Each iteration is one LLM call
+# plus dispatch of any non-terminator tools. The model usually converges
+# in 1-3 iterations: (1) call data tool, (2) call respond(...). 5 is a
+# balanced ceiling — enough room for a multi-step lookup, low enough to
+# fail loudly on a runaway loop.
+MAX_ITERATIONS = 5
 
 
-PLANNER_SYSTEM_TEMPLATE = """Eres un clasificador de intención para un bot de pedidos. Dado el estado actual del pedido y el mensaje del usuario, devuelves EXACTAMENTE una intención y sus parámetros en JSON.
+_SYSTEM_PROMPT_TEMPLATE = """Eres el agente de acción de pedidos de {business_name}, un restaurante colombiano.
 
-Estado actual: {order_state}
-Productos YA en el pedido (NO los incluyas de nuevo en ADD_TO_CART a menos que el usuario pida explícitamente más cantidad con frases como "quiero otro", "dame uno más", "agrega otro". Si el usuario pide UN producto NUEVO, emite SOLO ese producto — no repitas los que ya están aquí): {cart_summary}{latest_order_block}
+Tu trabajo es llamar herramientas para entender la intención del cliente y mutar el carrito / consultar el menú / preparar el pedido. NO escribes la respuesta final al cliente — eso lo hace otro componente. Tú decides QUÉ pasa, no CÓMO se le dice al cliente.
 
-Intenciones válidas: GET_MENU_CATEGORIES, LIST_PRODUCTS, SEARCH_PRODUCTS, GET_PRODUCT, ADD_TO_CART, ADD_PROMO_TO_CART, VIEW_CART, UPDATE_CART_ITEM, REMOVE_FROM_CART, PROCEED_TO_CHECKOUT, GET_CUSTOMER_INFO, SUBMIT_DELIVERY_INFO, PLACE_ORDER, CONFIRM, ABANDON_CART, CHAT.
+Herramientas de datos / acción (úsalas cuando aplique):
+- Menú y productos: get_menu_categories, list_category_products, search_products, get_product_details
+- Carrito: add_to_cart, add_promo_to_cart, view_cart, update_cart_item, remove_from_cart
+  * update_cart_item(product_name="X", quantity=N): SET la cantidad EXACTA de un item YA en el carrito ("solo una X", "que sean 3", "déjame con dos"). Solo edita lo que YA está; rechaza si X no está en el carrito.
+  * remove_from_cart(product_name="X", quantity=N): DECREMENTA por N unidades ("quita una X", "una menos", "menos una").
+  * remove_from_cart(product_name="X") sin quantity: REMUEVE el producto por completo ("quita la X", "elimínalo", "ya no quiero la X").
+  * Para ambos: usa product_name (el sistema resuelve contra el carrito); si el cliente nombra un producto que NO está en el carrito y quieres agregarlo, usa add_to_cart, NO update_cart_item.
+- Datos de entrega: get_customer_info, submit_delivery_info
+- Confirmar pedido: place_order
 
-Nota: los saludos puros (sólo "hola", "buenas", "buen día") ya son manejados por el router antes de que llegues a clasificar — NO recibirás saludos puros.
+Herramienta terminadora (OBLIGATORIA en cada turno):
+- respond(kind, summary, facts): siempre llámala UNA sola vez al final de cada turno, después de cualquier otra herramienta. Esta llamada cierra el turno y entrega un envelope al renderer que escribe la respuesta final.
+- CRÍTICO: NUNCA termines un turno escribiendo prosa sin llamar respond(). Si llamaste search_products / get_menu_categories / list_category_products / get_product_details / view_cart / get_customer_info, tu siguiente paso DEBE ser respond(...) — no escribas la respuesta tú mismo, deja que el renderer la haga.
 
-Reglas de menú y búsqueda (importante):
-- GET_MENU_CATEGORIES: cuando el usuario pregunta qué hay, qué tienes en general, o qué categorías hay (ej. "qué tienes", "qué hay en el menú"). Sin params.
-- LIST_PRODUCTS con category: cuando pregunta qué tienes EN UNA CATEGORÍA (ej. "qué tienes de bebidas", "qué hamburguesas tienes", "qué bebidas hay"). Siempre pasa params: {{"category": "bebidas"}} o "hamburguesas", "BEBIDAS", etc. category vacío = menú completo. IMPORTANTE: pasa la categoría COMPLETA que el usuario mencionó, incluyendo calificadores de tipo como "de pollo", "de res", "de cerdo" (ej. "tienes hamburguesas de pollo?" → category="hamburguesas de pollo", NO solo "hamburguesas"). El backend normaliza la categoría automáticamente. Frases implícitas también cuentan — "qué hay para tomar", "qué tienen para tomar", "algo para beber", "qué tienen de beber" → LIST_PRODUCTS con category "bebidas". "qué hay para comer", "algo de comida" (sin más contexto) → LIST_PRODUCTS sin category (menú completo) o GET_MENU_CATEGORIES si prefiere ver categorías.
-- SEARCH_PRODUCTS con query: cuando el usuario NOMBRA un producto o ingrediente o DESCRIBE lo que quiere (ej. "quiero barracuda", "tienes coca cola", "algo con queso azul", "algo picante", "algo con picante", "tienes algo dulce"). Incluye cualquier "algo con X", "algo X", "tienes algo X" — son búsquedas por atributo, NO preguntas por el menú general. No uses SEARCH_PRODUCTS para preguntas de categoría; para "qué tienes de X" usa LIST_PRODUCTS con category. IMPORTANTE: "tienes [nombre en plural de una categoría/tipo de comida]?" (ej. "tienes hamburguesas?", "tienes perros?", "tienes perros calientes?", "tienes bebidas?", "tienes cervezas?") es una pregunta por categoría, NO una búsqueda de producto — usa LIST_PRODUCTS con category, NO SEARCH_PRODUCTS ni GET_MENU_CATEGORIES. La intención del usuario es ver qué opciones hay en esa categoría. EXCEPCIÓN CLAVE: si la frase incluye un ADJETIVO CALIFICATIVO que describe una CUALIDAD (ej. "tienes hamburguesas picantes?", "algo dulce de bebida", "perros con queso", "hamburguesas grandes"), eso es una búsqueda por ATRIBUTO, no una categoría pura — usa SEARCH_PRODUCTS con query, NO LIST_PRODUCTS. El adjetivo (picante, dulce, grande, especial, etc.) indica que el usuario quiere filtrar por una característica, y LIST_PRODUCTS no soporta filtros de atributo. OJO: "de pollo", "de res", "de cerdo" NO son adjetivos — son especificadores de TIPO que forman subcategorías (ej. "hamburguesas de pollo" es una categoría, NO un atributo). Estos van a LIST_PRODUCTS con la frase completa como category.
-- GET_PRODUCT con product_name: cuando pregunta detalles de UN producto específico en singular — ya sea por contenido/ingredientes ("qué trae la barracuda", "qué tiene la montesa") o por PRECIO ("cuánto vale la X", "qué valor tiene la X", "una X qué valor", "qué precio tiene la X", "el precio de la X", "cuánto cuesta la X", "cuánto sale la X"). El response generator ya incluye precio + descripción, así que GET_PRODUCT cubre ambos casos sin distinguirlos. IMPORTANTE: si el mensaje nombra un producto Y pregunta el precio/valor (incluso sin verbo de orden, ej. "una picada que valor?"), es GET_PRODUCT, NO ADD_TO_CART — el cliente quiere saber el precio antes de decidir; no está pidiendo. Solo emite ADD_TO_CART cuando el mensaje pide claramente el producto sin preguntar el precio.
-- LIST_PRODUCTS (con la última categoría mostrada) cuando el usuario pide detalles de VARIOS/TODOS los productos ya listados — en plural o colectivo (ej. "qué tienen cada una", "qué trae cada una de esas hamburguesas", "dame los detalles de todas", "qué ingredientes tiene cada una"). NO uses GET_PRODUCT en estos casos: el usuario quiere ver todo el grupo, no uno solo.
+Kinds válidos para respond:
+- items_added: agregaste items al carrito
+- items_removed: quitaste un item
+- cart_updated: cambiaste cantidad / notas
+- cart_view: el cliente pidió ver el carrito
+- delivery_info_collected: guardaste datos parciales de entrega
+- ready_to_confirm: todos los datos listos, el sistema enviará tarjeta de confirmación con botones (NO llames place_order en este turno)
+- order_placed: pedido confirmado y creado
+- menu_info: respondiste sobre menú / categorías / productos
+- product_info: respondiste sobre un producto específico
+- disambiguation: hay variantes y necesitas que el cliente elija
+- info: info general (horario, dirección, etc.)
+- out_of_scope: tema fuera de pedidos (estado de pedido pasado, queja)
+- error: algo falló y debes disculparte
+- chat: saludo / charla / nada que mutar
 
-Otras reglas:
-- PRODUCTO RECONOCIDO (REGLA DE MÁXIMA PRIORIDAD): si el contexto del turno incluye una línea exacta `Producto reconocido en el mensaje: <NOMBRE>`, ese es el producto que el cliente nombró — ya verificado contra el catálogo. Emite SIEMPRE `ADD_TO_CART` con `product_name=<NOMBRE>` (tal cual aparece, en mayúsculas o como esté). NUNCA lo reemplaces por una opción listada anteriormente en el historial, aunque la opción listada parezca más conocida o aparezca primero — esa regla de "RESOLUCIÓN DE NOMBRES ABREVIADOS" NO aplica cuando hay un `Producto reconocido`. NUNCA pongas el nombre del producto en `notes` — `notes` es para modificaciones ("sin cebolla", "extra queso"), no para nombrar el producto. Si el mensaje contiene además modificaciones explícitas ("sin X", "con extra Y"), incluye esas y SÓLO esas en `notes`. Esta regla TIENE PRIORIDAD sobre todas las demás reglas de este planner.
-- REGLA DE PRIORIDAD (más importante que las demás): si el mensaje NOMBRA uno o más productos del menú (aunque esté acompañado de un saludo, de la palabra "domicilio", "pedido", "por favor", o de una lista con saltos de línea), SIEMPRE clasifica como ADD_TO_CART con los items correspondientes. El saludo y palabras como "domicilio"/"pedido" son contexto, NO intención — se ignoran para la clasificación cuando hay productos nombrados. CHAT se usa SOLO cuando NO hay ningún producto en el mensaje.
-- REFERENCIA PRONOMINAL A PRODUCTO RECIENTE: si el mensaje usa un pronombre demostrativo ("esa", "ese", "eso", "esas", "esos", "la misma", "el mismo", "deme esa", "quiero ese", "dame eso") para referirse a un producto que se acaba de mencionar o mostrar en la conversación, trátalo como si el usuario NOMBRÓ ese producto. Revisa el historial reciente para identificar cuál producto se mencionó. AHORA distingue por la FORMA del mensaje:
-  • PREGUNTA / forma interrogativa sobre el producto referenciado (ej. "esa viene con papitas?", "esa qué trae?", "esa tiene queso?", "esa es picante?", "esa cuánto cuesta?", "esa qué precio tiene?", "esa qué ingredientes tiene?", "esa con qué viene?"): usa GET_PRODUCT con product_name del producto referenciado. Señales de pregunta: signo de interrogación, o el mensaje empieza/contiene los verbos/palabras "viene", "trae", "tiene", "qué", "cuánto", "cuál", "cómo", "es" como verbo (no como artículo). NUNCA uses ADD_TO_CART para una pregunta — el cliente está pidiendo información, no ordenando. Ejemplo: bot acabó de listar "LA VUELTA" y usuario dice "esa viene con papitas?" → {{"intent": "GET_PRODUCT", "params": {{"product_name": "LA VUELTA"}}}}.
-  • COMANDO / orden con modificaciones (ej. "deme esa pero sin salsa picante", "esa pero sin morcilla", "quiero esa con extra queso"): clasifica como ADD_TO_CART con product_name del producto referenciado y notes con la modificación. Ejemplo: bot acaba de mostrar "AL PASTOR" y usuario dice "deme esa pero sin salsa picante" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "AL PASTOR", "quantity": 1, "notes": "sin salsa picante"}}}}.
-  Esta regla tiene PRIORIDAD sobre las reglas de MODIFICACIONES y AÑADIR nota de más abajo — esas aplican SOLO cuando el producto YA ESTÁ en el carrito.
-- Si el usuario expresa intención de pedir u ordenar SIN nombrar ningún producto específico (ej. "para un domicilio", "quiero pedir", "quiero hacer un pedido", "buenas, un domicilio por favor", "me pueden atender"): usa CHAT. El usuario probablemente ya sabe qué quiere; solo invítalo a decir su pedido. NO uses ADD_TO_CART, SEARCH_PRODUCTS ni GET_MENU_CATEGORIES porque no hay producto ni pregunta por el menú. IMPORTANTE: esta regla aplica SOLO si no hay productos nombrados — si hay aunque sea un producto, gana la regla de prioridad de arriba.
-- Si pide agregar uno o más productos: ADD_TO_CART. Para un solo producto: params con "product_name" (o "product_id"), "quantity" y opcionalmente "notes" para instrucciones especiales (ej. "sin cebolla", "sin morcilla", "extra salsa"). REGLA IMPORTANTE PARA BEBIDAS GENÉRICAS: si el usuario pide un producto genérico con un sabor o fruta (ej. "un jugo de mora en agua", "un jugo de mango en leche", "un hervido de maracuyá"), pasa la frase COMPLETA como product_name incluyendo el sabor — NO la simplifiques al nombre del catálogo. Ejemplo: "un jugo de mango en agua" → product_name="jugo de mango en agua" (NO "Jugos en agua"). Ejemplo: "un jugo de fresa en leche" → product_name="jugo de fresa en leche". El backend extrae el sabor automáticamente. Para varios productos: params con "items": [ {{"product_name": "NOMBRE", "quantity": 1, "notes": "..."}}, ... ]. Ejemplo con nota: "una barracuda sin cebolla caramelizada" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1, "notes": "sin cebolla caramelizada"}}}}. Ejemplo varios: "dame una montesa y una booster" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "MONTESA", "quantity": 1}}, {{"product_name": "BOOSTER", "quantity": 1}}]}}}}. Ejemplo saludo + pedido multi-producto: "hola buenas un domicilio por favor, 2 betas, 1 barracuda, 1 biela fries" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "BETA", "quantity": 2}}, {{"product_name": "BARRACUDA", "quantity": 1}}, {{"product_name": "BIELA FRIES", "quantity": 1}}]}}}}. Ejemplo con saltos de línea: "hola buenas tardes un domicilio por favor\\n2 betas\\n1 barracuda\\n1 biela fries" → mismo resultado (los saltos de línea son solo formato).
-- ACOMPAÑAMIENTOS INCLUIDOS POR DEFAULT — NO LOS DESCOMPONGAS EN ITEMS SEPARADOS: si la sección "Reglas y contexto del negocio" indica que un producto principal YA viene con cierto acompañamiento incluido (ej. "todas las hamburguesas vienen con papas") y el usuario pide ese principal mencionando el acompañamiento de manera afirmativa con "con" / "y" / "+" (ej. "una barracuda con papas", "una ramona con papas", "una honey burger y papas"), trátalo como UN SOLO item — el principal — y NO emitas un item separado para el acompañamiento. La razón: ese acompañamiento ya está incluido en el plato; emitirlo como producto separado dispara una ambigüedad innecesaria contra el catálogo (ej. "papas" matchea SALCHIPAPA, BIELA FRIES, CHEESE FRIES, SPECIAL FRIES, PAPAS PERGRETTI). Ejemplos:
-  • "Quiero una barracuda con papas" → {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1}}}}  (UN solo item, NO dos)
-  • "Una ramona con papas y una malteada de frutos amarillos" → {{"intent": "ADD_TO_CART", "params": {{"items": [{{"product_name": "RAMONA", "quantity": 1}}, {{"product_name": "malteada de frutos amarillos", "quantity": 1}}]}}}}  (RAMONA sin item separado de papas; la malteada SÍ es un item aparte)
-  EXCEPCIONES — sí emite el acompañamiento como item separado cuando:
-  • el usuario pide papas EXPLÍCITAS por nombre del catálogo (ej. "una barracuda y unas BIELA FRIES", "una barracuda más unas SALCHIPAPAS") → dos items.
-  • el usuario pide papas como producto PRIMARIO sin pedir un principal que las incluya (ej. "unas papas pergretti y una cocacola zero") → respeta lo que pidió.
-  • el usuario pide acompañamiento EXTRA o ADICIONAL (ej. "una barracuda con papas extras", "una barracuda más papas aparte") → dos items.
-  Negaciones ("una barracuda SIN papas") → un solo item con notes="sin papas". Esta regla aplica recíprocamente a otros acompañamientos default que el negocio declare en sus reglas (no es exclusivo de "papas"). Si la información del negocio NO declara que el acompañamiento es default, ignora esta regla y aplica las reglas normales de multi-producto.
-- MODIFICACIONES DE INGREDIENTES en producto YA AGREGADO al pedido (ej. "sin morcilla", "para que no le pongan cebolla", "quítale el queso"): usa UPDATE_CART_ITEM con "product_name" del producto en el pedido y "notes" con la instrucción. Ejemplo: pedido tiene PICADA y usuario dice "para que no le pongan morcilla" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "PICADA", "notes": "sin morcilla"}}}}. NUNCA uses ADD_TO_CART para modificar un ingrediente de un producto existente. IMPORTANTE: esta regla aplica SOLO si el producto ya aparece en "Productos YA en el pedido" de arriba. Si el carrito está vacío o el producto NO está en el carrito, NO uses UPDATE_CART_ITEM — usa ADD_TO_CART con notes (o la regla de REFERENCIA PRONOMINAL si el usuario usa "esa"/"ese").
-- AÑADIR una nota / sabor / detalle a un producto YA en el pedido (ej. "el jugo también es de mora", "el jugo en agua es de lulo", "al jugo en leche agrégale mango", "hazlo de mango"): usa UPDATE_CART_ITEM con "product_name" del producto ACTUAL en el carrito y "notes" igual al nuevo detalle (ej. "mora", "lulo", "mango"). NO lo confundas con un nuevo pedido — el cliente está describiendo el producto existente, no ordenando otro. Ejemplo: carrito tiene 'Jugos en agua' y cliente dice "el jugo en agua también es de mora" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Jugos en agua", "notes": "mora"}}}}. IMPORTANTE: esta regla aplica SOLO si el producto ya aparece en el carrito. Si no está en el carrito, NO uses UPDATE_CART_ITEM.
-- REEMPLAZO POR VARIANTE / SABOR / TIPO de un producto YA en el pedido (ej. "la soda que sea de frutos rojos", "mejor la hamburguesa doble", "cámbiala por la de pollo", "que sea la Corona", "la cerveza que sea Poker"): usa UPDATE_CART_ITEM con "product_name" = nombre del producto ACTUAL en el carrito, y "new_product_name" = nombre completo del producto NUEVO combinando el nombre actual con la variante. Ejemplo: carrito tiene "Soda" y usuario dice "la soda que sea de frutos rojos" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Soda", "new_product_name": "Soda Frutos rojos"}}}}. Ejemplo: carrito tiene "Michelada" y usuario dice "que sea con Corona" → {{"intent": "UPDATE_CART_ITEM", "params": {{"product_name": "Michelada", "new_product_name": "Corona michelada"}}}}. Distingue de `notes`: usa `notes` SOLO para exclusiones/añadidos de ingredientes (ej. "sin morcilla", "extra salsa"), NUNCA para elegir otra variante del producto. NUNCA uses ADD_TO_CART para un reemplazo: UPDATE_CART_ITEM con new_product_name maneja la sustitución atómica.
-- PROMOCIONES (ADD_PROMO_TO_CART): si el usuario pide explícitamente una promoción / combo / oferta del negocio (ej. "dame la promo de honey burger", "quiero la promo del lunes", "agregame esa promo", "me das la oferta de 2x1", "dame ese combo"), usa ADD_PROMO_TO_CART. Pasa params.promo_query con la frase descriptiva del usuario (ej. "honey burger", "promo del lunes"). Si la conversación previa identificó una promo específica con ID (ej. el agente de servicio al cliente listó promos y el usuario dijo "la primera"), pasa params.promo_id en lugar de promo_query. NO uses ADD_TO_CART para una promo — el matcher de promociones se ejecuta en backend y necesita conocer el binding explícito. NO inventes promos: si no estás seguro si existe, igual usa ADD_PROMO_TO_CART con el query del usuario y el backend responderá si no existe.
-- Si pide quitar un producto del pedido completamente ("elimina la malteada", "quita eso", "no quiero la coca cola"): REMOVE_FROM_CART con "product_name". Usa SOLO el nombre BASE del producto, SIN las notas entre paréntesis. Ejemplo: el pedido tiene "Jugos en leche (mango)" → product_name="Jugos en leche" (NO "Jugos en leche (mango)"). Otro ejemplo: "elimina la malteada" → {{"intent": "REMOVE_FROM_CART", "params": {{"product_name": "malteada"}}}}.
-- ABANDONAR EL PEDIDO COMPLETO: cuando el usuario quiere CANCELAR / DESCARTAR el pedido en curso (ANTES de confirmarlo), sin nombrar un producto específico. Frases típicas: "cancela el pedido", "anula", "ya no quiero pedir", "déjalo así, mejor no", "olvídalo", "mejor nada", "borrar todo", "cancelar todo". Usa `{{"intent": "ABANDON_CART", "params": {{}}}}`. Distinción clave: si el mensaje NOMBRA un producto del pedido ("quita la coca", "elimina la malteada"), eso es REMOVE_FROM_CART (un solo item). ABANDON_CART aplica SOLO cuando NO se nombra producto y la intención es vaciar todo. NUNCA uses ABANDON_CART como respuesta a "¿algo más?" / "¿procedemos?" — esos negativos son CONFIRM (ver regla de CONFIRMACIÓN).
-- Si pregunta por el ESTADO DE SU PEDIDO — no por el menú — usa VIEW_CART sin params. Cubre dos sub-casos:
-  (a) ¿Qué tengo / qué llevo? — frases típicas: "¿qué tengo en mi pedido?", "¿qué hay en mi pedido?", "cómo va mi pedido", "mi orden", "qué llevo", "qué he pedido", "muéstrame mi pedido", "ver mi pedido", "mi carrito", "cómo quedó mi pedido".
-  (b) ¿Cuánto es el TOTAL del carrito? — preguntas de monto SIN nombrar un producto, mientras hay items en el pedido. Frases típicas: "cuánto es?", "cuánto va?", "cuánto llevo?", "cuánto da?", "cuánto sale todo?", "a cómo me sale?", "cómo va el total?", "cuánto es el total?", "cuánto te debo?". El response generator muestra ya el desglose por ítem + subtotal + domicilio + total, así que VIEW_CART cubre estas preguntas sin distinción. NO confundas con GET_PRODUCT — esa regla aplica SOLO cuando la pregunta NOMBRA un producto específico ("cuánto vale la barracuda"); aquí no hay producto, solo el total del carrito.
-NO confundas con GET_MENU_CATEGORIES / LIST_PRODUCTS — esos son para preguntar qué tiene el restaurante, VIEW_CART es para revisar lo que el cliente ya agregó al pedido.
-- DESPEDIDA / AGRADECIMIENTO TRAS UN PEDIDO RECIÉN PLACEADO: si el contexto del turno indica `Último pedido (estado): pending|confirmed|out_for_delivery|completed|cancelled` Y el carrito actual está VACÍO Y `Estado del pedido: GREETING`, los agradecimientos cortos y afirmaciones cortas son una DESPEDIDA, NO una nueva confirmación. Frases típicas: "gracias", "si gracias", "ok gracias", "listo gracias", "muchas gracias", "perfecto gracias", "bueno gracias", "vale gracias", "dale gracias", e incluso "si" / "ok" / "listo" SOLO cuando el carrito está vacío y hay un `Último pedido` reciente. En todos esos casos clasifica como `{{"intent": "CHAT", "params": {{}}}}`. NUNCA uses CONFIRM en este escenario — el pedido ya fue colocado, no hay nada que confirmar. Esta regla TIENE PRIORIDAD sobre la regla de CONFIRMACIÓN cuando el carrito está vacío + hay un pedido reciente. NO la apliques a REMOVE_FROM_CART (esos requieren mencionar un producto: "quita la coca") ni a ABANDON_CART (esos requieren un verbo de cancelar: "cancela el pedido", "anula"). Si el mensaje sí menciona un producto del pedido o un verbo de cancelar, esas reglas siguen aplicando como antes — esta regla cubre solo despedidas/agradecimientos cortos.
-- CONFIRMACIÓN (regla principal, muy importante): el principio es CONTEXTUAL, no léxico — usa el `Historial reciente` para entenderlo. Si el último mensaje del bot terminó con una pregunta de continuación del flujo de pedido (ejemplos: `¿procedemos?`, `¿procedemos con el pedido?`, `¿algo más?`, `¿quieres agregar algo más?`, `¿te gustaría agregar alguna bebida o procedemos?`, `¿confirmas?`, `¿gustas proceder?`) Y el usuario responde con CUALQUIERA de las siguientes — SIN hacer una pregunta nueva, SIN nombrar producto, dirección, teléfono ni medio de pago — clasifica como `{{"intent": "CONFIRM", "params": {{}}}}`:
-  • Afirmaciones: "sí", "si", "claro", "obvio", "exacto", "correcto", "así es".
-  • Aceptaciones / cierre del flujo: "listo", "ya", "vale", "ok", "okay", "perfecto", "de acuerdo", "dale", "procedamos", "procedemos", "confirmar", "confirmo", "ya está", "todo bien".
-  • Cortesías afirmativas: "por favor", "porfa", "porfas", "porfis", "please", "con gusto", "de una", "siiii", "yes please".
-  • Negaciones que significan "no quiero nada más, procede": "no", "que no", "nada", "nada más", "eso es todo", "no más", "así está bien", "ya no", "estamos bien", "no gracias", "así déjalo", "con eso".
-  Las palabras-ejemplo son ILUSTRATIVAS, NO EXHAUSTIVAS — incluyen sinónimos coloquiales colombianos, typos cercanos (ej. "porfsvor" → por favor), entusiasmos breves ("dale pues!", "vamos!"), o cualquier expresión de cortesía/aceptación que un mesero entendería como "sí, continúa". Confía en tu interpretación contextual basada en lo que el bot acaba de preguntar — NO requieras coincidencia léxica exacta.
-  REGLAS DURAS:
-  - Esta regla SOLO aplica cuando el último mensaje del bot terminó con una pregunta de continuación del pedido. Si el bot hizo otra pregunta de sí/no (ej. "¿quieres la hamburguesa?", "¿te la cambio?", "¿prefieres roja o azul?"), una afirmación corta NO es CONFIRM — clasifícala según el contexto específico (ADD_TO_CART, UPDATE_CART_ITEM, etc.).
-  - No decidas tú si significa "proceder al checkout" o "colocar el pedido"; el backend lo resuelve según el estado actual. NUNCA uses PROCEED_TO_CHECKOUT ni PLACE_ORDER directamente para palabras de confirmación.
-  - Si además de confirmar el usuario provee datos de entrega (ej. "listo, mi dirección es calle 1"), usa SUBMIT_DELIVERY_INFO con los datos, no CONFIRM.
-  - ANTI-PATRONES (NO son CONFIRM aunque suenen "definitivos"):
-    Cambios y correcciones del pedido NUNCA son CONFIRM. El cliente está
-    MUTANDO el carrito (agregar / cambiar cantidad / quitar / reemplazar)
-    o proveyendo un dato — el siguiente turno del bot debe ser el recap
-    "¿algo más o procedemos?", NO el cierre del flujo. Emite SOLO la
-    intención de mutación, sin CONFIRM:
-      • "mejor una no más"          → UPDATE_CART_ITEM (cambiar cantidad), NO CONFIRM
-      • "mejor solo la barracuda"   → REMOVE_FROM_CART de los demás, NO CONFIRM
-      • "cambia la coca por sprite" → UPDATE_CART_ITEM, NO CONFIRM
-      • "quita la malteada"         → REMOVE_FROM_CART, NO CONFIRM
-      • "dos barracudas"            → ADD_TO_CART, NO CONFIRM
-      • "una hamburguesa por favor" → ADD_TO_CART, NO CONFIRM ("por favor" es cortesía, no cierre)
-      • "transferencia"             → SUBMIT_DELIVERY_INFO, NO CONFIRM
-      • "Luis, calle 5, 3001234567" → SUBMIT_DELIVERY_INFO, NO CONFIRM
-    Solo emite CONFIRM cuando el cliente cierra el flujo con una
-    afirmación EXPLÍCITA, no acompañada de mutaciones:
-      • "listo, eso es todo"        → CONFIRM
-      • "así está bien"             → CONFIRM
-      • "sí, procedamos"            → CONFIRM
-      • "dale" (en respuesta a "¿procedemos?") → CONFIRM
-    Regla mental: "¿el cliente acaba de cambiar el carrito o proveer un
-    dato?" Si la respuesta es sí, NO emitas CONFIRM en el mismo turno —
-    el bot debe mostrar el resultado primero. Cuando dudes, NO emitas
-    CONFIRM.
-- Si ya están en recolección de datos (COLLECTING_DELIVERY) y el usuario PROVEE datos: usa SUBMIT_DELIVERY_INFO con uno o más de: address, phone, name, payment_method; params pueden ser parciales, ej. {{"address": "Calle 1"}}, {{"payment_method": "Efectivo"}}, {{"name": "Juan", "phone": "+57..."}}. Si solo necesitas saber qué falta (sin que el usuario haya dado nada nuevo), usa GET_CUSTOMER_INFO.
-- Si el usuario corrige dirección, teléfono o medio de pago (ej. "no es esa dirección, es calle X", "mejor a esta dirección", "el teléfono es otro"): usa SUBMIT_DELIVERY_INFO con el valor nuevo, ej. {{"address": "calle 19#29-99"}}.
-- Si el usuario indica que su teléfono es el MISMO desde el que está escribiendo (ej. "este número", "este mismo", "el mismo", "mi whatsapp", "con este mismo", "el de whatsapp", "al que te estoy escribiendo"): usa SUBMIT_DELIVERY_INFO con `phone` igual al marcador literal `<SENDER>`. Ejemplo: {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"phone": "<SENDER>"}}}}. El backend sustituirá el marcador por el número real del remitente. NUNCA inventes un número.
-- RESOLUCIÓN DE NOMBRES ABREVIADOS: si el historial reciente muestra que el bot acaba de listar productos (ej. "Tenemos: DENVER, NAIROBI, PEGORETTI, SPECIAL DOG") y el usuario responde con un nombre corto o abreviado que coincide con UNO de esos productos (ej. "un special"), usa el nombre COMPLETO del catálogo tal como apareció en la lista (ej. "SPECIAL DOG"). NO envíes solo la parte que el usuario dijo — la búsqueda del backend puede encontrar múltiples productos con nombres similares (ej. "SPECIAL DOG" y "SPECIAL FRIES") y desambiguar innecesariamente. Ejemplos: bot listó "SPECIAL DOG, PEGORETTI, NAIROBI, DENVER" → usuario dice "un special" → product_name="SPECIAL DOG". Bot listó "BIELA FRIES, CHEESE FRIES" → usuario dice "las biela" → product_name="BIELA FRIES".
-- Si solo conversa: CHAT.
+Reglas duras de flujo:
+1. UN cambio a la vez. Después de add_to_cart / update_cart_item / remove_from_cart / add_promo_to_cart, tu PRÓXIMA acción es respond(...) — NUNCA llames otra herramienta de carrito, ni get_customer_info, ni place_order en el mismo turno. El cliente debe responder primero.
+   EXCEPCIÓN: cuando el MISMO mensaje del cliente combina un cambio de carrito con una señal de entrega (cambio de modo pickup/domicilio, nombre, dirección, teléfono, medio de pago — el cliente comunicó AMBAS intenciones simultáneamente, p.ej. "una hamburguesa para recoger", "tráeme X y soy David", "Y para domicilio en Calle 18"), llama PRIMERO la herramienta de carrito (p.ej. add_to_cart) y DESPUÉS submit_delivery_info en el mismo turno. Es válido y necesario — si separas las dos intenciones a turnos distintos, el cliente debe repetir información que ya dio.
+2. NO recolectes datos de entrega hasta que el cliente diga explícitamente que terminó de pedir ("eso es todo", "ya", "listo", "nada más", "cierra el pedido"). Solo entonces llama get_customer_info.
+3. Si get_customer_info devuelve all_present=true → llama respond(kind='ready_to_confirm') y NADA MÁS. El sistema mostrará la tarjeta de confirmación. NO llames place_order en este turno.
+3a. Después de submit_delivery_info, lee el resultado: contiene `all_present=true|false|missing=...`. Si all_present=true Y el cliente ya indicó que terminó de pedir ("eso es todo", "listo", etc.), llama respond(kind='ready_to_confirm') — NO emitas delivery_info_collected. Si all_present=false, emite delivery_info_collected con los campos faltantes en `facts` (ej. facts=["faltan: nombre, teléfono"]).
+4. NUNCA llames place_order sin haber enviado ready_to_confirm en un turno PREVIO Y haber recibido una respuesta afirmativa explícita del cliente en el turno actual. La herramienta place_order rechazará la llamada si no se cumple esta condición.
+5. NO inventes productos, precios, ni datos. Si no sabes algo, llama una herramienta.
+6. En `facts` incluye las cadenas literales que el renderer puede citar (nombres, IDs) — pero NO repitas el subtotal/total del carrito; el sistema los lee del estado canónico.
+7. Reconocimiento de productos: si el cliente menciona una frase nominal que pueda ser nombre de producto, distingue entre PREGUNTA y PEDIDO:
+   - PREGUNTA ("¿está...?", "¿tienen...?", "¿hay...?", "¿qué...?", "¿cuánto cuesta...?", "¿de qué viene...?", "¿cuál es...?"): llama search_products o get_product_details para verificar/describir, luego respond(kind='product_info' o 'menu_info') con la info. NUNCA llames add_to_cart en este caso — el cliente solo está consultando.
+   - PEDIDO explícito ("me das", "regálame", "quiero", "tráeme", "para mí", "agrégame", "ponme", "me lo llevo", "para pedir X", "pedir un X", "voy a pedir", "necesito un X"): llama add_to_cart, luego respond(kind='items_added').
+   En la duda, trata como PREGUNTA (search + product_info). Es mejor preguntar "¿quieres pedirla?" que agregar algo que el cliente solo estaba consultando.
+   Nombres del menú pueden ser palabras comunes ("La Vuelta", "El Combo", "La Especial"). NO asumas que algo "no está en el menú" sin verificar con una herramienta.
+8. Para productos ambiguos, add_to_cart listará variantes — usa kind=disambiguation con las variantes en `facts`.
+9. Si el cliente pide cancelar ("cancela", "anula", "olvídalo"), kind=chat con summary breve. NO uses herramientas destructivas sin confirmación explícita.
+10. Lenguaje aditivo: cuando el cliente dice "con X", "y X", "agrégame Y", "también Y", "súmale Z", "ponle X", "incluye X" — se refiere a AGREGAR ÚNICAMENTE el item NUEVO al carrito existente. NUNCA re-agregues items que ya están en el carrito (te los muestro arriba en ESTADO DEL CARRITO).
+11. Categoría sin producto específico: si el cliente nombra una CATEGORÍA en vez de un producto concreto ("una bebida", "algo de tomar", "una gaseosa", "una papa", "una salsa", "un postre", "una entrada", "una hamburguesa", "un perro", "algo dulce", "algo picante"), NUNCA elijas tú un producto específico — el cliente debe decidir. Tu acción es:
+    - Llama list_category_products(category=<categoría>) o search_products para ver las opciones disponibles.
+    - Llama respond(kind='menu_info', summary='Opciones disponibles de <categoría>', facts=[...nombres y precios...]).
+    El renderer le mostrará las opciones al cliente y le preguntará cuál prefiere.
+    Ejemplo: cliente dice "Con bebida" y el carrito tiene 1x BARRACUDA → llama list_category_products('BEBIDAS') → respond(kind='menu_info', facts=['Coca-Cola - $5.500', 'Sprite - $5.500', ...]). NO llames add_to_cart con un producto que el cliente no nombró.
+    Solo procede a add_to_cart cuando el cliente nombre el producto específico ("Con una Coca-Cola", "Una Sprite", "Las papas francesas").
+12. add_to_cart con resultado NOT_FOUND: si el resultado de add_to_cart empieza con `NOT_FOUND|`, el item NO se agregó al carrito (la búsqueda completa ya corrió y el producto no existe). NUNCA emitas kind='items_added' en ese caso. Sigue las instrucciones del propio resultado: infiere la categoría más probable del producto pedido (mirando el mensaje del cliente y el carrito), llama list_category_products de esa categoría, y luego respond(kind='disambiguation', facts=[...opciones reales...]). Si en el mismo turno se agregaron OTROS items con éxito, menciona ambos en el summary: lo que sí se agregó y la pregunta sobre el item no encontrado.
+14. ZONA FUERA DE COBERTURA: si "Información del negocio" lista "Zonas FUERA de cobertura de domicilio" Y el cliente menciona pedir / hacer domicilio / enviar a una de esas ciudades (en el mensaje actual o en una dirección que ya dio), NO llames add_to_cart, get_customer_info ni submit_delivery_info. Llama respond(kind='out_of_scope', summary='out_of_zone:<ciudad>', facts=['city:<ciudad>', 'phone:<numero>']) usando los valores EXACTOS listados. El sistema redirigirá al cliente al número correspondiente. Esta regla tiene prioridad sobre cualquier otra (incluso si ya hay items en el carrito).
+    Excepción: si el cliente está en MODO PICKUP (ver regla 15), la zona de cobertura no aplica — el cliente recoge en el local.
 
-FORMATO DE SALIDA (importante):
-Responde ÚNICAMENTE con un JSON válido, sin markdown ni texto extra. Formato preferido:
+15. MODO DOMICILIO vs PICKUP (REGLA UNIVERSAL):
+    El bloque "ESTADO Y HISTORIAL DEL TURNO" muestra siempre "Modo: 🛵 Domicilio" (default) o "Modo: 🏃 Recoger en local (pickup)". El default es domicilio.
+    - Cambia a PICKUP solo cuando el mensaje del cliente contenga un signal EXPLÍCITO: "lo recojo", "paso a recoger", "para recoger", "voy por él", "en sitio", "en el local", "para llevar", "recogida", "pickup". Llama submit_delivery_info(fulfillment_type='pickup', name=<si el cliente lo dijo>). NO pidas dirección, teléfono ni medio de pago — en pickup solo se necesita el nombre.
+    - PICKUP + PRODUCTO EN EL MISMO MENSAJE: si el mismo mensaje del cliente combina la señal de pickup con un nombre de producto ("para pedir un perro denver para recoger", "una BARRACUDA para llevar", "denme dos jugos y voy por ellos"), DEBES procesar AMBAS intenciones en este turno (regla 1 lo permite explícitamente):
+       1) Primero llama add_to_cart(product_name=...) para cada producto mencionado.
+       2) Luego llama submit_delivery_info(fulfillment_type='pickup', name=<si el cliente lo dijo>).
+       3) Luego respond(...).
+       Si el cliente dijo el nombre en el mismo mensaje y all_present=true → respond(kind='items_added', summary=...) con un summary que mencione el item Y los datos guardados (no emitas ready_to_confirm a menos que el cliente también haya dicho "eso es todo" o equivalente — agregar productos no implica que terminó de pedir). Si falta el nombre → respond(kind='items_added', summary=...) y en el summary recuerda al cliente decir su nombre para completar el pedido. NUNCA dejes el carrito sin el producto que el cliente mencionó — el bot daría una respuesta absurda en el siguiente turno.
+    - En PICKUP, una vez tengas el nombre Y el cliente diga que terminó ("eso es todo", "listo", "ya"), llama respond(kind='ready_to_confirm') directamente. NO llames get_customer_info para verificar dirección/pago — no aplican.
+    - Cambia DE VUELTA A DOMICILIO solo si el cliente lo indica explícitamente: "no, mejor domicilio", "envíenmelo", "para domicilio", "que llegue a casa". Llama submit_delivery_info(fulfillment_type='delivery'). En este caso vuelves a necesitar dirección, teléfono y medio de pago.
+    - Si el cliente menciona producto/comida sin dar señal de pickup, asume domicilio (el default visible en el contexto). NO inventes pickup.
+    - Si NO has visto signal de pickup y el cliente dice "eso es todo", procede normal: llama get_customer_info para revisar dirección/teléfono/pago, ya que estás en domicilio.
 
-  {{"intents": [{{"intent": "NOMBRE", "params": {{...}}}}]}}
+16. NOTAS DEL PEDIDO (orden completa, NO de un producto):
+    Cuando el cliente da una instrucción que aplica al PEDIDO completo o a la entrega/recogida — NO a un producto específico — guárdala con submit_delivery_info(notes=...). Ejemplos típicos:
+    - Hora: "a las 8 pm", "que llegue después de las 7", "para las 9".
+    - Pago: "traigan cambio de un billete de 100", "préstame factura", "necesito recibo".
+    - Llegada / contacto: "llámenme cuando estén afuera", "déjenlo en portería", "tocar al timbre del 4B".
+    - Acceso / ubicación: "edificio rojo al lado del Éxito", "casa con reja blanca".
+    - Otras: "manéjenlo con cuidado", "es un regalo, sin precio en la factura".
+    Distinción CRÍTICA con notas de producto:
+    - Notas de PRODUCTO ("sin cebolla", "extra picante", "sin queso", "bien cocida", "extra salsa"): van en add_to_cart(notes=...) sobre el producto específico.
+    - Notas del PEDIDO (lista anterior): van en submit_delivery_info(notes=...).
+    Heurística: si la nota se refiere a UN producto particular ("la HONEY sin tocineta") → producto. Si se refiere al pedido completo, al pago, a la entrega o a la recogida → pedido.
+    Cómo pasarlas:
+    - Pasa el ESTADO CONSOLIDADO ACTUAL en `notes`, no solo el delta. La herramienta REEMPLAZA el campo. Si el cliente dice primero "a las 8 pm" y luego "ah, y traigan cambio de 100k", la segunda llamada debe pasar `notes="A las 8 pm. Traigan cambio de $100.000."` (todo junto).
+    - Si el cliente AMENDA ("no, mejor a las 9"), pasa la versión NUEVA: `notes="A las 9 pm. Traigan cambio de $100.000."`. NO acumules versiones obsoletas.
+    - Las notas YA GUARDADAS están visibles en "Notas del pedido (ya guardadas)" del bloque ESTADO Y HISTORIAL DEL TURNO. Úsalas como base cuando el cliente añade/amenda.
+    - Combinación con otros campos en el mismo turno (regla 1 lo permite): si el mensaje trae producto + notas + cualquier otro dato, llama add_to_cart primero y submit_delivery_info(notes=..., name=..., fulfillment_type=...) después.
 
-La lista puede tener 1, 2 o máximo 3 entradas — emite varias SOLO cuando el mensaje del cliente combina acciones independientes que se ejecutan razonablemente en el mismo turno. El caso típico es un mensaje que mezcla un pedido de producto con datos de entrega (nombre, dirección, teléfono, medio de pago) — captura ambas. Si el mensaje tiene una sola acción, emite una lista de UN elemento. Para retro-compatibilidad también se acepta el formato legacy de una sola intención: {{"intent": "NOMBRE", "params": {{}}}}.
+13. SEPARACIÓN HISTORIAL vs MENSAJE ACTUAL — REGLA ESTRUCTURAL CRÍTICA:
+    El bloque "ESTADO Y HISTORIAL DEL TURNO" te muestra TODO lo que YA pasó: items que ya están en el carrito, datos de entrega ya guardados, conversación previa. Esos eventos YA se ejecutaron — los tools que los produjeron YA corrieron.
+    El "[MENSAJE ACTUAL DEL CLIENTE]" es lo único que aún no has procesado. Tu trabajo en este turno es procesar SOLO ese mensaje.
+    Implicaciones operativas:
+    - NUNCA llames add_to_cart por items que ya aparecen en "Carrito actual". Esos ya están agregados; llamar add_to_cart de nuevo los DUPLICA.
+    - NUNCA llames submit_delivery_info por campos que ya aparecen en "Datos de entrega ya guardados (completos)". Solo llámalo si el mensaje ACTUAL contiene un valor NUEVO o ACTUALIZA uno existente.
+    - Si el mensaje actual no contiene una solicitud sustantiva nueva (un producto nombrado, un trigger de pedir, datos de entrega que falten), tu acción más probable es solo respond(...) con el kind apropiado — sin tool calls de mutación.
+    Esto no es una lista de palabras a evitar; es una regla estructural sobre qué cuenta como "input de este turno" vs "estado ya establecido".
 
-Reglas de combinación (DURAS):
-- ABANDON_CART debe ir SOLO en una lista de un elemento — nunca con otros intents.
-- No emitas el mismo intent dos veces. Para varios productos, usa params.items dentro de un único ADD_TO_CART.
-- No fuerces multi-intent: si el mensaje sólo tiene una acción obvia, devuélvela como singleton.
-- Cada entrada debe ser un intent válido de la lista permitida más arriba.
-- CONFIRM solo se emite cuando el mensaje del cliente contiene una AFIRMACIÓN EXPLÍCITA — palabras como: sí, listo, dale, ok, okay, vale, perfecto, así está bien, eso es todo, todo bien, no más, nada más, ya, claro, procedamos, confirmar, confirmo. Proveer datos (nombre, dirección, teléfono, medio de pago) NO es CONFIRM. Nombrar un producto nuevo NO es CONFIRM. Si el mensaje contiene SOLO datos o SOLO un producto sin una afirmación explícita, emite UNA intent (SUBMIT_DELIVERY_INFO o ADD_TO_CART) — NUNCA agregues CONFIRM "por si acaso" o "para ahorrar un turno". Cuando dudes, NO emitas CONFIRM.
-
-Ejemplos multi-intent:
-
-1) Cliente envía producto + nombre + dirección + teléfono en el mismo mensaje:
-   "Una hamburguesa BARRACUDA por favor
-   Yisela Calle
-   Cl 20 #42-105 Edificio Reserva
-   3015349690"
-   →
-   {{"intents": [
-     {{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1}}}},
-     {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"name": "Yisela Calle", "address": "Cl 20 #42-105 Edificio Reserva", "phone": "3015349690"}}}}
-   ]}}
-   (Nota: NO añadas CONFIRM aunque el mensaje termine con "por favor". "por favor" es cortesía, no afirmación de cierre.)
-
-2) Cliente provee SOLO un dato (sin afirmación explícita) — emite UNA intent, NUNCA añadas CONFIRM:
-   "transferencia"   (en COLLECTING_DELIVERY, completando el pago)
-   →
-   {{"intents": [{{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"payment_method": "transferencia"}}}}]}}
-
-   "Luis, Cl 5 #1-2, 3001234567"
-   →
-   {{"intents": [{{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"name": "Luis", "address": "Cl 5 #1-2", "phone": "3001234567"}}}}]}}
-
-3) Cliente combina afirmación EXPLÍCITA con datos — solo aquí se justifica SUBMIT + CONFIRM:
-   "Así está bien, pago por transferencia"   (la frase "así está bien" es la afirmación explícita)
-   →
-   {{"intents": [
-     {{"intent": "SUBMIT_DELIVERY_INFO", "params": {{"payment_method": "transferencia"}}}},
-     {{"intent": "CONFIRM", "params": {{}}}}
-   ]}}
-
-4) Mensaje simple — singleton:
-   "Una BARRACUDA"
-   →
-   {{"intents": [{{"intent": "ADD_TO_CART", "params": {{"product_name": "BARRACUDA", "quantity": 1}}}}]}}
-
-5) Pedir un producto NUEVO no es CONFIRM aunque el bot acabe de preguntar "¿procedemos?":
-   "una gaseosa cuatro"   (estado ORDERING, bot acaba de listar fries y preguntó "¿algo más o procedemos?")
-   →
-   {{"intents": [{{"intent": "ADD_TO_CART", "params": {{"product_name": "gaseosa cuatro", "quantity": 1}}}}]}}
+Información del negocio:
+{business_info}
 """
-
-RESPONSE_GENERATOR_SYSTEM = """Generas la respuesta del asistente en español colombiano, amigable y breve.
-
-Reglas críticas:
-- NUNCA afirmes que agregaste, quitaste o modificaste algo en el pedido si la intención ejecutada no fue ADD_TO_CART, REMOVE_FROM_CART o UPDATE_CART_ITEM con éxito. Solo describe cambios que el backend confirmó.
-- Si se ejecutó add/remove/update con éxito, incluye el resumen del pedido actual que te doy (es la verdad del backend).
-- Usa solo la información del resultado de la herramienta y del resumen del pedido; no inventes datos.
-- Si hubo error, explica brevemente y sugiere qué hacer.
-- Después de un ADD_TO_CART exitoso: (1) confirma lo que se agregó, (2) muestra el resumen del pedido actual, (3) sugiere el siguiente paso: pregunta si desea agregar algo más (ej. bebida) o si procede con el pedido (ej. "¿Te gustaría agregar alguna bebida o procedemos con el pedido?").
-- Búsqueda por ingrediente: cuando el resultado de la herramienta incluya descripciones de productos (varias líneas por producto) y el usuario preguntó por un ingrediente o tipo de plato (ej. "algo con queso azul", "hamburguesa con pollo"), menciona primero y de forma explícita el producto cuya descripción coincida con lo que pidió (ej. "La que lleva queso azul es la MONTESA: ...") y luego puedes listar brevemente otras opciones si aplica.
-- Listado de productos: cuando el resultado incluya MÚLTIPLES productos (el usuario preguntó por una categoría, tipo de comida, o "tienes X?"), lista TODOS los productos que aparecen en el resultado, no solo el primero o uno destacado. El usuario quiere ver sus opciones. Si hay más de 5 productos, lista los primeros 5 con nombre, precio y descripción breve, y al final di cuántos más hay e invita al usuario a preguntar por más opciones o visitar el menú.
-- Datos de entrega: NUNCA digas "Tengo esta dirección, teléfono y tipo de pago" a menos que el resultado de la herramienta contenga exactamente "DELIVERY_STATUS" y "all_present=true". Si el resultado es "OK_COLLECTING_DELIVERY" (sin DELIVERY_STATUS), responde pidiendo los datos: "Para continuar con tu pedido necesito: nombre, dirección, teléfono y medio de pago. ¿Me los indicas?". Si el resultado tiene DELIVERY_STATUS y all_present=true, confirma incluyendo los valores reales (dirección, teléfono, medio de pago) en el mensaje: "Tengo esta dirección: [valor], teléfono [valor] y pago [valor]. ¿Gustas proceder o quieres enviarla a otra dirección?". Si DELIVERY_STATUS tiene missing= o all_present=false: pide SOLO lo que falta (ej. "Me falta: teléfono y medio de pago. ¿Me los indicas?") o todo si faltan todos; NUNCA en ese caso sugieras "proceder con el pedido" ni "agregar algo más" hasta que todos los datos estén completos.
-- Ubicación y datos del negocio: si el usuario pregunta dónde estamos ubicados, horarios, teléfono de contacto o dirección del local, responde usando ÚNICAMENTE la "Información del negocio" que te doy a continuación. Si esa información está vacía o dice "no configurada", di que por el momento no tienes esa información a mano y que puede preguntar por el menú o hacer su pedido.
-- Combos / hamburguesas con papas: si el usuario pregunta si tienen combos, si las hamburguesas vienen con papas o si incluyen papas, responde SIEMPRE usando la sección "Reglas y contexto del negocio" de la Información del negocio (aunque la intención ejecutada haya sido GET_MENU_CATEGORIES o GET_PRODUCT). No digas "no encontré información" ni solo listes categorías; da la respuesta de las reglas (ej. todas las hamburguesas vienen con papas, bebida aparte).
-- Estado del pedido / entrega: si el usuario pregunta por tiempos de entrega, seguimiento o estado de envío (ej. "¿a qué hora llega?", "¿ya salió mi pedido?", "¿cuánto se demora?") y NO hay un pedido confirmado (el resumen del pedido dice "Pedido vacío" o muestra productos SIN que se haya colocado la orden), NUNCA digas que el pedido está en camino ni inventes un estado de entrega. Responde que aún no tiene un pedido confirmado y ofrece ayuda para completar o hacer su pedido.
-"""
-
-
-def _format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
-    """Format address, phone, hours from business_context for the response generator."""
-    if not business_context or not business_context.get("business"):
-        return "Información del negocio: (no configurada)."
-    raw_settings = business_context["business"].get("settings")
-    # Support both dict and None; JSONB can sometimes be dict-like
-    settings = dict(raw_settings) if raw_settings is not None else {}
-    if not isinstance(settings, dict):
-        settings = {}
-    address = (settings.get("address") or settings.get("Address") or "").strip()
-    phone = (settings.get("phone") or "").strip()
-    city = (settings.get("city") or "").strip()
-    state = (settings.get("state") or "").strip()
-    country = (settings.get("country") or "").strip()
-    business_id = business_context.get("business_id")
-    parts = []
-    if address:
-        parts.append(f"Dirección: {address}")
-    if city or state or country:
-        loc = ", ".join(filter(None, [city, state, country]))
-        if loc:
-            parts.append(f"Ciudad/país: {loc}")
-    if phone:
-        parts.append(f"Teléfono: {phone}")
-    if business_id:
-        try:
-            rules = booking_service.get_availability(str(business_id))
-            if rules:
-                day_names = {
-                    0: "Domingo",
-                    1: "Lunes",
-                    2: "Martes",
-                    3: "Miércoles",
-                    4: "Jueves",
-                    5: "Viernes",
-                    6: "Sábado",
-                }
-                hour_lines = []
-                for rule in sorted(rules, key=lambda x: x.get("day_of_week", 0)):
-                    day_label = day_names.get(rule.get("day_of_week", -1), "Día")
-                    if not rule.get("is_active", True):
-                        hour_lines.append(f"  {day_label}: cerrado")
-                        continue
-                    hour_lines.append(
-                        f"  {day_label}: {rule.get('open_time', '')} - {rule.get('close_time', '')}"
-                    )
-                if hour_lines:
-                    parts.append("Horarios:\n" + "\n".join(hour_lines))
-        except Exception:
-            pass
-    # One clear line for location questions: address if set, else city/state/country
-    location_parts = []
-    if address:
-        location_parts.append(address)
-    if city or state or country:
-        location_parts.append(", ".join(filter(None, [city, state, country])))
-    if location_parts:
-        parts.append("Ubicación (para preguntas 'dónde están'): " + " ".join(location_parts))
-    payment_methods = settings.get("payment_methods") or []
-    if isinstance(payment_methods, list):
-        cleaned_methods = [str(m).strip() for m in payment_methods if str(m).strip()]
-        if cleaned_methods:
-            parts.append(
-                "Métodos de pago aceptados: "
-                + ", ".join(cleaned_methods)
-                + ". Cuando el cliente indique su método de pago, EMPAREJA su "
-                "texto contra esta lista de forma flexible (case-insensitive, "
-                "fragmentos, abreviaturas, errores de tipeo razonables) y pasa "
-                "el NOMBRE CANÓNICO de la lista al campo `payment_method` de "
-                "submit_delivery_info. Ejemplos: 'breb' o 'bre' → 'Llave BreB'; "
-                "'efe' o 'cash' → 'efectivo'; 'transf' o 'transferencia bancaria' "
-                "→ 'transferencia'; 'nequi' (cualquier capitalización) → 'Nequi'. "
-                "Solo OMITE el campo `payment_method` cuando el cliente mencione "
-                "EXPLÍCITAMENTE un método que claramente NO está en la lista "
-                "(ej. PayPal, tarjeta de crédito) y no haya overlap razonable con "
-                "ningún canónico — entonces emite delivery_info_collected con la "
-                "lista canónica en facts para que el cliente elija."
-            )
-    ai_prompt = (settings.get("ai_prompt") or "").strip()
-    if ai_prompt:
-        parts.append("IMPORTANTE: Reglas y contexto del negocio (usa para preguntas sobre combos, hamburguesas con papas, etc.):\n" + ai_prompt)
-    # Universal pickup-vs-delivery rules. Surfaced for every business —
-    # not behind a per-business flag — so the model has one consistent
-    # mental model. Default is delivery; pickup is set only when the
-    # customer explicitly signals it. Switching is symmetric.
-    parts.append(
-        "Modos de cumplimiento disponibles:\n"
-        "- 🛵 Domicilio (default): se requiere nombre, dirección, teléfono y medio de pago.\n"
-        "- 🏃 Recoger en local (pickup): se requiere SOLO el nombre. El número de WhatsApp "
-        "cubre el teléfono y el pago se hace en el local.\n"
-        "El modo activo está visible en \"Modo:\" del bloque ESTADO Y HISTORIAL DEL TURNO. "
-        "El cliente comienza en domicilio por default. Cambia a pickup ÚNICAMENTE cuando el "
-        "cliente lo indique explícitamente con frases como: \"lo recojo\", \"paso a recoger\", "
-        "\"para recoger\", \"en sitio\", \"en el local\", \"para llevar\", \"recogida\". "
-        "En ese caso llama submit_delivery_info(fulfillment_type='pickup', name=<si lo dijo>) "
-        "— NO pidas dirección ni medio de pago. Cambia de vuelta a domicilio si el cliente "
-        "dice \"no, mejor domicilio\", \"envíenmelo\", \"para domicilio\" pasando "
-        "submit_delivery_info(fulfillment_type='delivery')."
-    )
-    out_of_zone = settings.get("out_of_zone_delivery_contacts") or []
-    if isinstance(out_of_zone, list) and out_of_zone:
-        rows: list[str] = []
-        for entry in out_of_zone:
-            if not isinstance(entry, dict):
-                continue
-            city = (entry.get("city") or "").strip()
-            phone = (entry.get("phone") or "").strip()
-            if city and phone:
-                rows.append(f"- {city} → contacto: {phone}")
-        if rows:
-            parts.append(
-                "Zonas FUERA de cobertura de domicilio (NO atendemos pedidos a estas ciudades; "
-                "el cliente debe escribir al número listado):\n"
-                + "\n".join(rows)
-                + "\n\nSi el cliente pide hacer un pedido o domicilio a una de estas "
-                "ciudades (lo dice en la dirección, en el destino, o explícitamente "
-                "'a Ipiales', 'para X', 'envíen a Y'), NO recolectes datos de entrega "
-                "ni intentes crear el pedido. Llama "
-                "respond(kind='out_of_scope', summary='out_of_zone:<ciudad>', "
-                "facts=['city:<ciudad>', 'phone:<numero>']) — el sistema redirigirá "
-                "al cliente al número correspondiente."
-            )
-    if not parts:
-        return "Información del negocio: (no configurada)."
-    return "Información del negocio:\n" + "\n".join(parts)
-
-
-def build_pending_disambiguation_prompt_block(pending: Optional[Dict[str, Any]]) -> str:
-    """
-    Build the "CONTEXTO DE ACLARACIÓN PENDIENTE" block appended to the
-    planner system prompt when a pending disambiguation is active.
-
-    Extracted from OrderAgent.execute so integration tests (and any
-    future caller) use exactly the same text — otherwise the test
-    helper's hand-rolled copy drifts from production.
-
-    Returns an empty string when there's no active pending
-    disambiguation or no options to offer.
-    """
-    if not pending or not pending.get("options"):
-        return ""
-    opts_lines = "\n".join(
-        f"  - {o.get('name')} (${int(o.get('price') or 0):,})".replace(",", ".")
-        for o in pending.get("options", [])
-    )
-    return (
-        "\n\nCONTEXTO DE ACLARACIÓN PENDIENTE: En tu turno ANTERIOR ofreciste al cliente "
-        f"estas opciones porque preguntó por \"{pending.get('requested_name', '')}\":\n"
-        f"{opts_lines}\n"
-        "\n"
-        "REGLA 1 — MAPEO A OPCIÓN: si el mensaje actual del cliente es una elección "
-        "(ej. 'la normal', 'la primera', 'la barata', 'dame la Corona', 'la michelada', "
-        "'un jugo en agua', 'el de leche', un nombre o un número), mapea su respuesta "
-        "a UNA de estas opciones y clasifícalo como ADD_TO_CART con product_name EXACTO "
-        "de la opción elegida. Ejemplos: 'la normal' → la opción SIN modificador "
-        "(ej. \"Michelada\" no \"Corona michelada\"); 'la primera' → la primera de la "
-        "lista; 'la más barata' → la de menor precio.\n"
-        "\n"
-        "REGLA 2 — PRESERVAR SABOR / INGREDIENTE / DETALLE (MUY IMPORTANTE): si además "
-        "del mapeo de REGLA 1 el cliente menciona un sabor, fruta, ingrediente, color, "
-        "tamaño, o cualquier calificador que NO forma parte del nombre de la opción "
-        "elegida, incluye ese calificador en el campo `notes` del ADD_TO_CART. "
-        "NUNCA lo borres. Aplica incluso si el nombre de la opción parece cubrir "
-        "todos los sabores (ej. 'Jugos en agua' es una fila genérica del catálogo; "
-        "el sabor va como nota).\n"
-        "\n"
-        "FUENTE DE TOKENS (CRÍTICO): los calificadores para `notes` SOLO pueden venir "
-        "del MENSAJE ACTUAL del cliente — NUNCA de la pregunta anterior del bot, NUNCA "
-        "del historial, NUNCA de los nombres de las opciones. Si una palabra (ej. "
-        "'prefieres', 'quieres', 'gustaría', 'cuál', 'dime') solo aparece en el "
-        "mensaje del bot y no en lo que el cliente acaba de escribir, NO va en `notes`. "
-        "Si el cliente solo dijo el nombre o un sinónimo del nombre de la opción "
-        "(ej. 'maracuya' → Hervido Maracuyá), `notes` debe quedar VACÍO.\n"
-        "\n"
-        "Ejemplos obligatorios de REGLA 2 (úsalos como referencia exacta):\n"
-        "  • Opciones: Jugos en agua, Jugos en leche, Hervido Mora\n"
-        "    Cliente dice: 'un jugo de mora en agua'\n"
-        "    → {\"intent\":\"ADD_TO_CART\",\"params\":{\"product_name\":\"Jugos en agua\",\"notes\":\"mora\"}}\n"
-        "  • Opciones: Jugos en agua, Jugos en leche\n"
-        "    Cliente dice: 'dame uno de mango en leche'\n"
-        "    → {\"intent\":\"ADD_TO_CART\",\"params\":{\"product_name\":\"Jugos en leche\",\"notes\":\"mango\"}}\n"
-        "  • Opciones: Jugos en agua, Jugos en leche\n"
-        "    Cliente dice: 'el de lulo en agua por favor'\n"
-        "    → {\"intent\":\"ADD_TO_CART\",\"params\":{\"product_name\":\"Jugos en agua\",\"notes\":\"lulo\"}}\n"
-        "\n"
-        "Contraejemplos (REGLA 2 NO aplica):\n"
-        "  • Cliente dice 'el de agua' → notes vacío (no hay sabor mencionado).\n"
-        "  • Cliente dice 'la michelada' → notes vacío (es solo el mapeo, sin detalle).\n"
-        "\n"
-        "Si el cliente está cambiando de tema o pidiendo algo completamente distinto "
-        "a las opciones (ej. ahora quiere una hamburguesa, o pide el menú), ignora "
-        "este contexto y clasifica normalmente."
-    )
-
-
-def apply_disamb_reply_flavor_fallback(
-    parsed: Dict[str, Any],
-    message_body: str,
-    pending: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """
-    Deterministic safety net on the disambiguation-reply planner path.
-
-    The planner prompt (REGLA 2 in the pending-context block) asks the
-    LLM to carry qualifier tokens from the user's reply over into
-    ``params["notes"]`` when the chosen product is an exact option name.
-    gpt-4o-mini sometimes complies and sometimes strips the qualifier.
-    This function patches the latter case in pure Python:
-
-      1. Only runs when there's an active pending disambiguation.
-      2. Only runs on ``ADD_TO_CART`` with a single ``product_name``
-         (multi-item batches stay as-is).
-      3. Only runs when ``notes`` is missing / empty.
-      4. Only runs when the chosen ``product_name`` normalizes to one
-         of the pending option names (so we don't inject notes on a
-         "topic change" reply where the user genuinely wants a
-         different product).
-      5. Computes the set of stemmed user-message tokens NOT present
-         in the chosen product name and, if non-empty, joins them in
-         original-surface order and writes them to ``params["notes"]``.
-
-    Returns the (possibly mutated) parsed dict. Modifies in place too.
-    """
-    if not pending or not pending.get("options"):
-        return parsed
-    params = parsed.get("params") or {}
-    parsed["params"] = params
-    if (parsed.get("intent") or "").upper() != INTENT_ADD_TO_CART:
-        return parsed
-    chosen = params.get("product_name")
-    if not isinstance(chosen, str) or not chosen.strip():
-        return parsed
-    if (params.get("notes") or "").strip():
-        return parsed
-
-    from ..services import product_search as _ps
-    chosen_norm = _ps._normalize(chosen.strip())
-    option_norms = {
-        _ps._normalize(o.get("name", "") or "")
-        for o in pending.get("options", [])
-    }
-    if chosen_norm not in option_norms:
-        return parsed
-
-    chosen_stems = {
-        _ps._stem(t) for t in _ps._tokenize(chosen_norm) if t
-    }
-    user_tokens = _ps._tokenize(_ps._normalize(message_body or ""))
-    leftover: List[str] = []
-    seen_stems = set()
-    for tok in user_tokens:
-        st = _ps._stem(tok) or tok
-        if st in chosen_stems or st in seen_stems:
-            continue
-        seen_stems.add(st)
-        leftover.append(tok)
-    if leftover:
-        injected = " ".join(leftover)
-        params["notes"] = injected
-        logging.warning(
-            "[ORDER_AGENT] flavor preservation: injected notes=%r "
-            "for chosen=%r (planner stripped qualifier)",
-            injected, chosen,
-        )
-    return parsed
-
-
-# Tokens that indicate the customer is asking ABOUT promos (discovery /
-# listing) rather than naming one to add. Used as a defensive override
-# when the order planner falls through to CHAT — those messages belong
-# to the customer service agent's GET_PROMOS path. Action verbs like
-# "dame", "quiero" deliberately excluded: those are cart-add and stay
-# on the order side via ADD_PROMO_TO_CART.
-_PROMO_DISCOVERY_PATTERN = re.compile(
-    r"\b(promo|promos|promoci(?:o|ó)n(?:es)?|oferta|ofertas|combo|combos)\b",
-    re.IGNORECASE,
-)
-_PROMO_ACTION_VERBS = re.compile(
-    r"\b(dame|quiero|agrega(?:me)?|p[oó]ngame|m[ae]te|añade|sumame|me das)\b",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_promo_discovery(message: str) -> bool:
-    """True when message mentions a promo concept WITHOUT a cart-add verb.
-    Lets a misrouted "qué promos tienen?" reach customer_service."""
-    if not message:
-        return False
-    if not _PROMO_DISCOVERY_PATTERN.search(message):
-        return False
-    return _PROMO_ACTION_VERBS.search(message) is None
-
-
-def _parse_planner_response(text: str) -> Dict[str, Any]:
-    """Extract intent and params from planner LLM response (JSON only or embedded)."""
-    text = (text or "").strip()
-    # Try raw JSON
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Try to find JSON object in text
-    match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-    return {"intent": INTENT_CHAT, "params": {}}
-
-
-# Maximum intents the planner is allowed to emit per turn. Cap exists so a
-# misbehaving model can't blow up latency by chaining a long sequence; 3
-# covers the realistic pack-everything-into-one-message cases (e.g. add
-# product + provide delivery info + provide payment) without unbounded fan-out.
-MAX_INTENTS_PER_TURN = 3
-
-
-def _extract_intents(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Normalize planner output to a list of ``{"intent": ..., "params": ...}``
-    dicts. Accepts both the new multi-intent shape::
-
-        {"intents": [{"intent": "ADD_TO_CART", "params": {...}}, ...]}
-
-    and the legacy singleton::
-
-        {"intent": "ADD_TO_CART", "params": {...}}
-
-    The list is capped at ``MAX_INTENTS_PER_TURN``. Empty / malformed input
-    falls back to a single CHAT intent so the agent never dead-ends.
-    """
-    if not isinstance(parsed, dict):
-        return [{"intent": INTENT_CHAT, "params": {}}]
-
-    raw: List[Any]
-    if isinstance(parsed.get("intents"), list):
-        raw = parsed["intents"]
-    elif "intent" in parsed:
-        raw = [parsed]
-    else:
-        raw = []
-
-    out: List[Dict[str, Any]] = []
-    for entry in raw[:MAX_INTENTS_PER_TURN]:
-        if not isinstance(entry, dict):
-            continue
-        intent_name = (entry.get("intent") or "").strip().upper().replace(" ", "_")
-        if not intent_name:
-            continue
-        params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
-        out.append({"intent": intent_name, "params": params})
-
-    if not out:
-        return [{"intent": INTENT_CHAT, "params": {}}]
-    return out
-
-
-# Canonical execution order for multi-intent dispatch. Lower number = earlier.
-# - SUBMIT_DELIVERY_INFO first so the customer profile is captured before any
-#   downstream intent reads it.
-# - Cart mutations next; ordering inside the group doesn't matter much, but we
-#   put REMOVE/UPDATE before ADD so the cart is "clean" before adding new items
-#   in the rare case a planner emits both.
-# - Read-only / browse intents are essentially free, slot them mid-list.
-# - State-advancing intents (CHECKOUT/CONFIRM/PLACE_ORDER) last, so prior
-#   side effects have already landed in state.
-# - ABANDON_CART is destructive and MUST run alone; the dispatcher drops
-#   any sibling intents when ABANDON_CART is present.
-_CANONICAL_INTENT_ORDER: Dict[str, int] = {
-    "SUBMIT_DELIVERY_INFO": 10,
-    "REMOVE_FROM_CART": 20,
-    "UPDATE_CART_ITEM": 21,
-    "ADD_TO_CART": 22,
-    "ADD_PROMO_TO_CART": 23,
-    "VIEW_CART": 30,
-    "GET_CUSTOMER_INFO": 31,
-    "GET_MENU_CATEGORIES": 32,
-    "LIST_PRODUCTS": 33,
-    "SEARCH_PRODUCTS": 34,
-    "GET_PRODUCT": 35,
-    "CHAT": 50,
-    "PROCEED_TO_CHECKOUT": 60,
-    "CONFIRM": 61,
-    "PLACE_ORDER": 62,
-    "ABANDON_CART": 99,
-}
-
-
-# CTA button titles (Twilio Content Template quick replies). When the
-# inbound message body matches one of these exactly, we skip the planner
-# LLM entirely and emit a deterministic intent. Production 2026-05-07
-# (Luis / 3159280840): planner saw the CTA card's recap in recent history
-# (Nombre/Dirección/Teléfono/Pago) and re-emitted those fields as
-# SUBMIT_DELIVERY_INFO when the customer tapped "Confirmar pedido" — the
-# order was never placed and the CTA card looped. The titles below MUST
-# match the Twilio template at confirm_order_content_sid; if you change
-# the template labels, update these strings too (or add the alternate
-# spellings to _CTA_BUTTON_INTENTS).
-_CTA_BUTTON_INTENTS: Dict[str, Dict[str, Any]] = {
-    "confirmar pedido": {"intent": "CONFIRM", "params": {}},
-    # "Cambiar algo" routes to CHAT — the response composer asks the
-    # customer what they'd like to change, then their next reply runs
-    # through the normal planner.
-    "cambiar algo": {"intent": "CHAT", "params": {}},
-}
-
-
-def _match_cta_button(message_body: Optional[str]) -> Optional[Dict[str, Any]]:
-    """
-    Detect when the inbound message body is the title of a CTA quick-reply
-    button. Match is case-insensitive on a trimmed copy. Returns a parsed
-    planner-shape dict (legacy singleton) so the dispatcher can route it
-    through the existing multi-intent normalizer without a special path.
-    """
-    if not message_body:
-        return None
-    normalized = message_body.strip().lower()
-    return _CTA_BUTTON_INTENTS.get(normalized)
-
-
-def _sort_intents_canonical(
-    intents: List[Dict[str, Any]],
-    current_state: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Sort intents by canonical execution order. Stable on ties so the
-    planner's emit order is the secondary key — useful when the planner
-    emits two ADD_TO_CARTs (it shouldn't, but the cap is the safety net).
-
-    Two pre-sort filters:
-
-    1. ABANDON_CART runs alone — drops any siblings (destructive intent
-       must not be paired with cart mutations).
-    2. CONFIRM resolves to whatever state-action fits (PROCEED_TO_CHECKOUT
-       in ORDERING, PLACE_ORDER in READY_TO_PLACE — see CONFIRM_RESOLUTION
-       in order_flow). Emitting CONFIRM alongside PROCEED_TO_CHECKOUT or
-       PLACE_ORDER is redundant: the second intent typically lands in a
-       state where the allowlist rejects it, producing a recovery CHAT
-       that overwrites the meaningful CONFIRM result. We saw this in
-       production 2026-05-07 (David / 3177000722): planner emitted
-       [CONFIRM, PLACE_ORDER] for "asi esta bien", PLACE_ORDER got
-       rejected after CONFIRM transitioned state, and the customer
-       received the recovery prose ("¡Con gusto, que disfrutes!") instead
-       of the delivery-info prompt.
-    """
-    if any(i.get("intent") == "ABANDON_CART" for i in intents):
-        return [i for i in intents if i.get("intent") == "ABANDON_CART"][:1]
-
-    intent_names = {i.get("intent") for i in intents}
-    if "CONFIRM" in intent_names:
-        intents = [
-            i for i in intents
-            if i.get("intent") not in ("PROCEED_TO_CHECKOUT", "PLACE_ORDER")
-        ]
-    elif "PROCEED_TO_CHECKOUT" in intent_names:
-        # PROCEED + PLACE alongside is also redundant; PROCEED moves to
-        # COLLECTING_DELIVERY where PLACE isn't allowed yet.
-        intents = [i for i in intents if i.get("intent") != "PLACE_ORDER"]
-
-    # Suppress CONFIRM when paired with any state-mutating action — data
-    # submission OR cart change — UNLESS we're already in READY_TO_PLACE.
-    # Two cases, opposite resolutions:
-    #
-    #   Case A (state ≠ READY_TO_PLACE): customer is mid-flow, providing
-    #   data or mutating the cart. The mutation result is what they
-    #   should see next (cart recap, "missing payment" prompt, etc.);
-    #   CONFIRM piggybacked on the same turn would resolve through the
-    #   just-advanced state and skip the recap. Drop CONFIRM.
-    #     • "transferencia" in COLLECTING_DELIVERY →
-    #       [SUBMIT, CONFIRM] → SUBMIT only → CTA card fires.
-    #     • "dos barracudas" in GREETING →
-    #       [ADD_TO_CART, CONFIRM] → ADD only → cart recap.
-    #     • "mejor una no más" in ORDERING →
-    #       [UPDATE_CART_ITEM, CONFIRM] → UPDATE only → cart recap.
-    #
-    #   Case B (state == READY_TO_PLACE): data is already complete and
-    #   the CTA card was already sent on a prior turn. The planner
-    #   often re-emits SUBMIT_DELIVERY_INFO with the values it sees in
-    #   the recap card — that's a redundant echo, NOT a real data
-    #   change. Meanwhile CONFIRM ("Sí" / "Confirmo") is the customer's
-    #   genuine signal to place the order. Drop SUBMIT, keep CONFIRM.
-    #   Production 2026-05-07 (Luis / 3159280840): customer typed "Si"
-    #   after the CTA, planner emitted [SUBMIT(echo), CONFIRM], the
-    #   case-A dedup dropped CONFIRM, SUBMIT was a no-op, and the CTA
-    #   card looped.
-    #
-    # This is structural (operates on the intent set + state, not user
-    # text). Singleton CONFIRM (single intent in the list) is unaffected
-    # in either branch — the CTA-button fast-path and explicit-affirmation
-    # paths route through that.
-    _MUTATING_INTENTS = (
-        "SUBMIT_DELIVERY_INFO",
-        "ADD_TO_CART",
-        "ADD_PROMO_TO_CART",
-        "UPDATE_CART_ITEM",
-        "REMOVE_FROM_CART",
-    )
-    if "CONFIRM" in intent_names:
-        if (
-            current_state == "READY_TO_PLACE"
-            and "SUBMIT_DELIVERY_INFO" in intent_names
-        ):
-            # Case B — data is already captured, SUBMIT is the echo.
-            intents = [i for i in intents if i.get("intent") != "SUBMIT_DELIVERY_INFO"]
-        elif any(name in intent_names for name in _MUTATING_INTENTS):
-            # Case A — mid-flow, the mutation should drive the response.
-            intents = [i for i in intents if i.get("intent") != "CONFIRM"]
-
-    return sorted(
-        intents,
-        key=lambda i: _CANONICAL_INTENT_ORDER.get(i.get("intent", ""), 50),
-    )
 
 
 class OrderAgent(BaseAgent):
-    """Order agent: planner (intent) -> executor (one tool) -> response from real state."""
+    """
+    Tool-calling order agent (action half of the chained pair).
+
+    Per turn:
+        1. Set per-turn tool context (wa_id, business_id, business
+           settings) via context var.
+        2. Build messages: system prompt + recent history + user turn.
+        3. Loop up to MAX_ITERATIONS:
+             - Invoke model.
+             - For each tool_call:
+                 * If ``respond`` → capture envelope, mark loop done.
+                 * Else → dispatch the tool, append ToolMessage.
+             - If loop done OR no tool_calls → break.
+        4. If no envelope captured → synthesize a ``chat`` envelope from
+           the model's last text (handles a model that ignores the
+           "always end with respond" rule).
+        5. Hand envelope to ``response_renderer.render_response`` —
+           returns a typed payload.
+        6. If ``cta`` payload: dispatch via ``send_twilio_cta``, persist
+           the rendered body, return ``__SUPPRESS_SEND__`` so the
+           upstream sender skips the text path.
+        7. Else (text): persist + return as the assistant turn.
+    """
 
     agent_type = "order"
 
-    def __init__(self):
-        self._llm = None
-        self._planner_llm = None
-        self._v2_agent = None
-        logging.info("[ORDER_AGENT] Initialized with planner + executor + response generator (LLM lazy)")
-
-    def _tool_calling_agent(self):
-        """
-        Lazy-init the tool-calling agent. Only constructed for businesses
-        that opt in via settings.order_agent_mode='tool_calling'. Singleton
-        per OrderAgent instance; the registry already singletons OrderAgent
-        itself.
-        """
-        if self._v2_agent is None:
-            from .order_agent_tool_calling import OrderAgentToolCalling
-            self._v2_agent = OrderAgentToolCalling()
-        return self._v2_agent
+    def __init__(self) -> None:
+        self._llm: Optional[ChatOpenAI] = None
+        logging.info("[ORDER_AGENT] Initialized (chained tool-calling, LLM lazy)")
 
     @property
     def llm(self) -> ChatOpenAI:
-        """Response-generator LLM. Slight temperature for natural prose."""
+        """Lazy-init: defer OpenAI client + tool binding until first use."""
         if self._llm is None:
             self._llm = ChatOpenAI(
                 model="gpt-4o-mini",
                 temperature=0.3,
                 api_key=os.getenv("OPENAI_API_KEY"),
-            )
+            ).bind_tools(list(order_tools) + [respond_tool])
         return self._llm
 
-    @property
-    def planner_llm(self) -> ChatOpenAI:
-        """
-        Planner LLM. Temperature 0 on gpt-4o-mini.
-
-        Brief experiment with gpt-4o (full) regressed: the model interpreted
-        the anti-patterns section more literally than mini did and silently
-        dropped clear multi-item orders to CHAT (Biela / 3177000722:
-        "una barracuda y una vittoria" → CHAT). gpt-4o-mini emits the cart
-        actions correctly; its remaining failure mode is over-eager CONFIRM
-        bolting, which is caught by the structural dedup in
-        ``_sort_intents_canonical`` (CONFIRM dropped when paired with any
-        cart-mutating intent). That dedup gives us a known UX outcome and a
-        working safety net, while gpt-4o's silent-drop mode had no
-        structural signal to catch on.
-
-        Temp=0 stays — structured-output classifier wants determinism.
-        """
-        if self._planner_llm is None:
-            self._planner_llm = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0,
-                api_key=os.getenv("OPENAI_API_KEY"),
-            )
-        return self._planner_llm
-
-    def get_tools(self):
-        return order_tools
+    def get_tools(self) -> List:
+        return list(order_tools) + [respond_tool]
 
     def get_system_prompt(
         self,
@@ -807,726 +234,7 @@ class OrderAgent(BaseAgent):
         wa_id: str,
         name: str,
     ) -> str:
-        """Used by response generator for business name/menu_url context."""
-        business_name = "el restaurante"
-        menu_url = ""
-        if business_context and business_context.get("business"):
-            biz = business_context["business"]
-            business_name = biz.get("name") or business_name
-            settings = biz.get("settings") or {}
-            menu_url = settings.get("menu_url") or ""
-        return f"Negocio: {business_name}. Menu URL: {menu_url or 'no configurado'}. Fecha: {current_date}."
-
-    def _build_response_prompt(
-        self,
-        result_kind: str,
-        exec_result: Dict[str, Any],
-        message_body: str,
-        business_context: Optional[Dict],
-        cart_summary_after: str,
-        latest_order_status: Optional[str] = None,
-    ) -> tuple:
-        """
-        Build (response_system, resp_input) pair tailored to the result_kind.
-        Each branch gets structured data (never raw tool strings) and a dedicated tone guide.
-        """
-        biz_info = _format_business_info_for_prompt(business_context)
-        base_system = (
-            "Eres el asistente de pedidos de un restaurante colombiano. Hablas en español colombiano, "
-            "cálido, breve y natural — como un mesero profesional que conoce su menú. "
-            "Usa SOLO los datos que te doy; no inventes productos, precios, ni confirmes acciones que no ocurrieron. "
-            "Respuestas breves (1-4 líneas típicamente). Evita frases robóticas.\n"
-            "NUNCA inicies la respuesta con un saludo (Hola, Buenas, Buen día/tardes/noches, "
-            "Hey) NI con el nombre del cliente como saludo (ej. 'Hola Yisela', 'Yisela,'). "
-            "La conversación ya está en curso — empieza directo con el contenido. El saludo "
-            "de bienvenida lo maneja el router en el primer turno; tú nunca lo emites.\n\n"
-            + biz_info
-        )
-
-        def money(x: Any) -> str:
-            try:
-                return f"${int(x):,}".replace(",", ".")
-            except Exception:
-                return f"${x}"
-
-        if result_kind == RESULT_KIND_NEEDS_CLARIFICATION:
-            options = exec_result.get("options") or []
-            requested = exec_result.get("requested_name") or "ese producto"
-            opts_lines = "\n".join(f"- {o.get('name')} ({money(o.get('price'))})" for o in options)
-            system = base_system + (
-                "\n\nSITUACIÓN: El cliente pidió un producto con varias variantes. Necesitas saber cuál quiere ANTES de agregarlo. "
-                "Esto NO es un error — es una pregunta normal de mesero.\n"
-                "REGLAS:\n"
-                "- PROHIBIDO: 'no se pudo', 'no pude', 'error', 'problema', 'disculpa', 'lo siento', 'falló'.\n"
-                "- PROHIBIDO: 'agregué', 'listo', 'ya está', 'añadí' — el pedido NO cambió.\n"
-                "- NO repitas el resumen del pedido actual.\n"
-                "- PROHIBIDO ABSOLUTO: inventar, traducir, especializar, o combinar los nombres de "
-                "la lista con lo que el cliente pidió. Por ejemplo, si la lista dice 'Jugos en leche' "
-                "y el cliente pidió 'jugo de mora en leche', la opción que muestras se llama "
-                "'Jugos en leche' — NUNCA la llames 'Jugo de Mora en Leche' ni similar. Copia los "
-                "nombres exactamente como aparecen en la lista, con mayúsculas y acentos idénticos.\n"
-                "- Usa SOLO los nombres y precios de la lista, exactos.\n"
-                "- 1-3 líneas total."
-            )
-            inp = (
-                f"Cliente dijo: {message_body}\n"
-                f"Producto solicitado: {requested}\n"
-                f"Opciones disponibles (usa exactamente estos nombres y precios):\n{opts_lines}\n"
-                f"Tarea: presenta las opciones de forma natural y pregunta cuál prefiere."
-            )
-            return system, inp
-
-        if result_kind == RESULT_KIND_CHAT:
-            # Status-aware closing when the user is winding down a turn
-            # right after a recently placed order. The planner already
-            # routes "si gracias" to CHAT in this scenario (see the
-            # DESPEDIDA / AGRADECIMIENTO rule in PLANNER_SYSTEM_TEMPLATE);
-            # the response template here picks the right closing line
-            # based on the latest order's lifecycle status.
-            post_order_guide = ""
-            if latest_order_status:
-                _status_guides = {
-                    "pending": (
-                        "El cliente acaba de placear un pedido y está pendiente de "
-                        "confirmación de la cocina. Responde con una despedida cálida y breve "
-                        "(1-2 líneas) reconociendo el pedido sin invitar a uno nuevo. Ej: "
-                        "\"¡Con gusto! En cuanto la cocina lo confirme te aviso.\""
-                    ),
-                    "confirmed": (
-                        "El cliente acaba de placear un pedido que ya fue confirmado. "
-                        "Responde con una despedida cálida y breve (1-2 líneas) sin invitar a un "
-                        "pedido nuevo. Ej: \"¡Con gusto, que disfrutes tu pedido!\""
-                    ),
-                    "out_for_delivery": (
-                        "El cliente tiene un pedido EN CAMINO. Responde con una despedida "
-                        "cálida y breve (1-2 líneas) sin invitar a uno nuevo. Ej: "
-                        "\"¡Con gusto! Ya va en camino.\""
-                    ),
-                    "completed": (
-                        "El cliente acaba de recibir su pedido. Responde con una despedida "
-                        "cálida y breve agradeciéndole sin invitar a uno nuevo. Ej: "
-                        "\"¡Gracias a ti! Que lo hayas disfrutado.\""
-                    ),
-                    "cancelled": (
-                        "El último pedido fue cancelado. Responde con una despedida cordial "
-                        "y breve sin presionar a un nuevo pedido. Ej: \"Con gusto. Cuando "
-                        "quieras vuelves a ordenar.\""
-                    ),
-                }
-                guide = _status_guides.get(latest_order_status)
-                if guide:
-                    post_order_guide = (
-                        "\n\nSITUACIÓN ESPECIAL — DESPEDIDA POST-PEDIDO:\n"
-                        + guide
-                        + "\nNUNCA digas \"¿qué te gustaría ordenar hoy?\" ni invites a un nuevo "
-                        "pedido en este turno; el cliente solo está cerrando."
-                    )
-            if post_order_guide:
-                system = base_system + post_order_guide
-            else:
-                system = base_system + (
-                    "\n\nSITUACIÓN: El cliente está conversando sin pedir una acción específica. "
-                    "Si mencionó que quiere hacer un pedido pero no dijo qué, invítalo a decirte qué quiere ordenar. "
-                    "Si saludó o hizo small talk, responde amable y breve (1-2 líneas) y ofrécele ayuda con su pedido. "
-                    "NO listes el menú a menos que lo pida."
-                )
-            inp = f"Cliente dijo: {message_body}\nEstado del pedido: {cart_summary_after}"
-            if latest_order_status:
-                inp += f"\nÚltimo pedido (estado): {latest_order_status}"
-            return system, inp
-
-        if result_kind == RESULT_KIND_MENU_CATEGORIES:
-            categories = exec_result.get("categories") or []
-            cats_lines = "\n".join(f"- {c}" for c in categories)
-            menu_url = ""
-            if business_context and business_context.get("business"):
-                settings = business_context["business"].get("settings") or {}
-                if isinstance(settings, dict):
-                    menu_url = (settings.get("menu_url") or "").strip()
-
-            rules = (
-                "\n\nSITUACIÓN: El cliente preguntó por el menú. Tienes las categorías disponibles. "
-                "REGLAS:\n"
-                "- Presenta las categorías de forma amigable (puedes traducirlas al español natural, ej. HAMBURGUESAS → hamburguesas).\n"
-                "- NO listes productos individuales — solo categorías.\n"
-                "- Termina invitando al cliente a elegir una categoría o a pedir si ya sabe qué quiere.\n"
-                "- Tono cálido, no robótico. Máx 5-6 líneas."
-            )
-            if menu_url:
-                rules += (
-                    "\n- MENU URL disponible: úsalo SIEMPRE en la respuesta.\n"
-                    "- Si el cliente pidió explícitamente que LE ENVÍES la carta/menú/link "
-                    "(verbos: 'envías', 'mandas', 'pasas', 'compartes', 'me puedes enviar', "
-                    "'mándame', 'envíame', 'pásame', 'dame'; o sustantivos: 'el link', 'la carta' "
-                    "como objeto directo), LIDERA con el URL en su propia línea, luego menciona "
-                    "las categorías brevemente como referencia.\n"
-                    "- Si el cliente solo preguntó qué hay (ej. 'qué tienen', 'qué hay en el menú'), "
-                    "LIDERA con las categorías y pon el URL al final como oferta suave "
-                    "(ej. 'si quieres ver la carta completa: <url>')."
-                )
-            system = base_system + rules
-
-            inp_parts = [
-                f"Cliente dijo: {message_body}",
-                f"Categorías disponibles:\n{cats_lines}",
-            ]
-            if menu_url:
-                inp_parts.append(f"URL de la carta: {menu_url}")
-            inp = "\n".join(inp_parts)
-            return system, inp
-
-        if result_kind == RESULT_KIND_PRODUCTS_LIST:
-            products = exec_result.get("products") or []
-            query_label = exec_result.get("query_label")
-            category_label = exec_result.get("category_label")
-            if not products:
-                label = query_label or category_label or "eso"
-                system = base_system + (
-                    "\n\nSITUACIÓN: No hay productos que coincidan con lo que el cliente pidió. "
-                    "REGLAS CRÍTICAS:\n"
-                    "- Di explícitamente que NO tenemos ese producto/categoría (ej. \"no tenemos pizza\").\n"
-                    "- NUNCA ofrezcas productos como si fueran una versión del producto pedido. No digas \"tenemos esta pizza\" si no tienes pizzas — nunca.\n"
-                    "- Puedes invitar amablemente a ver las categorías disponibles del menú.\n"
-                    "- Sin 'lo siento', 'disculpa', ni 'error'. 1-2 líneas."
-                )
-                inp = f"Cliente buscó: {label}\nNo hay coincidencias exactas ni parciales en el catálogo."
-                return system, inp
-            # Defense in depth: even after the Phase 2 filter, if every item
-            # only matched via embedding the response generator should not
-            # pretend they exactly match the query. Flag it so the prompt
-            # phrases them as "related" rather than authoritative.
-            all_embedding = bool(products) and all(
-                (p.get("matched_by") == "embedding") for p in products
-            )
-            # Cap at 5 products for WhatsApp readability. Keep total count
-            # so the response generator can say "y X más".
-            _MAX_LISTED = 5
-            total_count = len(products)
-            products_shown = products[:_MAX_LISTED]
-            remaining = total_count - len(products_shown)
-
-            prods_lines = "\n".join(
-                f"- {p.get('name')} ({money(p.get('price'))})"
-                + (f" — {p.get('description')}" if p.get("description") else "")
-                for p in products_shown
-            )
-            context_label = ""
-            if category_label:
-                context_label = f"Categoría: {category_label}"
-            elif query_label:
-                context_label = f"Búsqueda: {query_label}"
-            remaining_note = ""
-            if remaining > 0:
-                remaining_note = (
-                    f"\n(Mostrando {len(products_shown)} de {total_count} productos. "
-                    f"Hay {remaining} más disponibles.)"
-                )
-            rules = (
-                "\n\nSITUACIÓN: El cliente pidió ver una lista de productos. "
-                "REGLAS:\n"
-                "- Presenta los productos de forma clara con nombre y precio.\n"
-                "- Si el producto trae descripción en los datos, INCLÚYELA SIEMPRE (1 línea breve por producto). Nunca omitas descripciones aunque la lista sea larga.\n"
-                "- Si NO hay descripciones disponibles, lista solo nombre y precio.\n"
-                "- Si hay descripciones y el cliente preguntó por un ingrediente, menciona primero el producto cuya descripción coincide.\n"
-                "- Si hay más productos de los que se muestran, menciona cuántos más hay al final e invita al usuario a preguntar por más opciones o visitar el menú.\n"
-                "- Termina invitando a ordenar o a preguntar por alguno en particular.\n"
-                "- NUNCA muestres IDs ni códigos internos."
-            )
-            if all_embedding and query_label:
-                rules += (
-                    "\n- IMPORTANTE: ninguno de estos productos coincide exactamente con "
-                    f"lo que el cliente buscó ({query_label}). Presenta la lista como "
-                    "\"opciones relacionadas que podrían gustarte\", NO como \"aquí están "
-                    f"los {query_label}\". Nunca afirmes que la lista ES {query_label}."
-                )
-            system = base_system + rules
-            inp = f"Cliente dijo: {message_body}\n{context_label}\nProductos disponibles:\n{prods_lines}{remaining_note}"
-            return system, inp
-
-        if result_kind == RESULT_KIND_PRODUCT_DETAILS:
-            product = exec_result.get("product") or {}
-            desc = product.get("description") or "(sin descripción)"
-            in_cart_qty = int(exec_result.get("in_cart_quantity") or 0)
-            if in_cart_qty > 0:
-                # Already in cart — DO NOT close with "¿agregarla?". Production
-                # 2026-05-06 (Biela / +573159280840): user asked ingredients of a
-                # product already in cart, bot closed with "¿te gustaría agregarla?",
-                # user said "Si", and the order agent ADD_TO_CARTed a duplicate line.
-                system = base_system + (
-                    "\n\nSITUACIÓN: El cliente preguntó por los detalles de un producto que YA tiene en su pedido. "
-                    "REGLAS:\n"
-                    "- Di el nombre, precio y describe qué trae en 1-2 líneas.\n"
-                    "- Aclara que YA tiene N en el pedido y pregunta si quiere otra unidad o algo más.\n"
-                    "- NUNCA digas '¿te gustaría agregarla al pedido?' / '¿quieres añadirla?' — ya está agregada.\n"
-                    "- NO inventes ingredientes fuera de la descripción dada."
-                )
-                inp = (
-                    f"Cliente dijo: {message_body}\n"
-                    f"Producto: {product.get('name')}\n"
-                    f"Precio: {money(product.get('price'))}\n"
-                    f"Descripción: {desc}\n"
-                    f"Ya tiene en el pedido: {in_cart_qty}"
-                )
-                return system, inp
-            system = base_system + (
-                "\n\nSITUACIÓN: El cliente preguntó por los detalles de un producto. "
-                "REGLAS:\n"
-                "- Di el nombre, precio y describe qué trae en 1-2 líneas.\n"
-                "- Termina preguntando si lo quiere agregar al pedido.\n"
-                "- NO inventes ingredientes fuera de la descripción dada."
-            )
-            inp = (
-                f"Cliente dijo: {message_body}\n"
-                f"Producto: {product.get('name')}\n"
-                f"Precio: {money(product.get('price'))}\n"
-                f"Descripción: {desc}"
-            )
-            return system, inp
-
-        if result_kind == RESULT_KIND_CART_CHANGE:
-            cc = exec_result.get("cart_change") or {}
-            action = cc.get("action") or ""
-            added = cc.get("added") or []
-            removed = cc.get("removed") or []
-            updated = cc.get("updated") or []
-            cart_after = cc.get("cart_after") or []
-
-            # Re-run the matcher so the response shows the same totals
-            # the customer will pay. Items bound to a promo collapse into
-            # one labeled bundle line so the LLM doesn't talk about base
-            # prices for items the customer got via a promo.
-            business_id = (business_context or {}).get("business_id") or ""
-            preview = promotion_service.preview_cart(str(business_id), cart_after)
-            total_after = int(preview["subtotal"])
-            applied_promos = preview.get("applications") or []
-            promo_just_added = (
-                action == CART_ACTION_ADDED
-                and any(it.get("promotion_id") for it in (added or []))
-            )
-            new_promo_name = ""
-            if promo_just_added:
-                # Find the promo name for the bundle that was just added.
-                added_pgids = {it.get("promo_group_id") for it in added if it.get("promo_group_id")}
-                for app in applied_promos:
-                    if app.get("promo_group_id") in added_pgids:
-                        new_promo_name = app.get("promotion_name") or ""
-                        break
-
-            def fmt_items(items):
-                return "\n".join(
-                    f"- {it.get('quantity')}x {it.get('name')}"
-                    + (f" ({it.get('notes')})" if it.get("notes") else "")
-                    for it in items
-                )
-
-            def fmt_groups(groups):
-                lines = []
-                for g in groups:
-                    if g.get("kind") == "promo_bundle":
-                        comps = ", ".join(
-                            f"{c.get('quantity')}x {c.get('name')}"
-                            for c in (g.get("components") or [])
-                        )
-                        lines.append(
-                            f"- 🏷 PROMO {g.get('promotion_name')} ({comps}) — {money(g.get('promo_price'))}"
-                        )
-                    else:
-                        notes = g.get("notes")
-                        notes_part = f" ({notes})" if notes else ""
-                        lines.append(
-                            f"- {g.get('quantity')}x {g.get('name')}{notes_part}"
-                        )
-                return "\n".join(lines)
-
-            cart_lines = fmt_groups(preview["display_groups"]) or "(vacío)"
-
-            if action == CART_ACTION_NOOP:
-                system = base_system + (
-                    "\n\nSITUACIÓN: El cliente pidió modificar el pedido pero nada cambió "
-                    "(tal vez ya estaba así, o no se encontró el producto). "
-                    "Dile amablemente el estado actual y pregúntale qué quiere hacer. "
-                    "NO uses 'error' ni 'lo siento'. 1-2 líneas."
-                )
-                inp = f"Cliente dijo: {message_body}\nPedido actual (sin cambios):\n{cart_lines}\nTotal: {money(total_after)}"
-                return system, inp
-
-            if action == CART_ACTION_ADDED:
-                situation = "El cliente agregó productos al pedido."
-                change_desc = f"Agregado:\n{fmt_items(added)}"
-            elif action == CART_ACTION_REMOVED:
-                situation = "El cliente quitó productos del pedido."
-                change_desc = f"Quitado:\n{fmt_items(removed)}"
-            elif action == CART_ACTION_UPDATED_QUANTITY:
-                situation = "El cliente actualizó la cantidad de un producto."
-                change_desc = f"Actualizado:\n{fmt_items(updated)}"
-            elif action == CART_ACTION_UPDATED_NOTES:
-                situation = "El cliente cambió las instrucciones de un producto (ej. 'sin cebolla')."
-                change_desc = f"Actualizado (notas):\n{fmt_items(added) or fmt_items(updated)}"
-            elif action == CART_ACTION_REPLACED:
-                situation = "El cliente reemplazó un producto por otro."
-                change_desc = f"Quitado:\n{fmt_items(removed)}\nAgregado:\n{fmt_items(added)}"
-            else:
-                situation = "Cambio en el pedido."
-                change_desc = f"Actualizado:\n{fmt_items(updated) or fmt_items(added) or fmt_items(removed)}"
-
-            pending_clarification = exec_result.get("pending_clarification") or {}
-            pending_options = pending_clarification.get("options") or []
-            pending_requested = pending_clarification.get("requested_name") or ""
-            not_found_items = [x for x in (exec_result.get("not_found") or []) if x]
-
-            not_found_block = ""
-            if not_found_items:
-                not_found_block = (
-                    "Productos que NO encontramos en el menú (menciónalos al cliente de "
-                    "forma breve y ofrece otra opción o ver el menú):\n"
-                    + "\n".join(f"- {n}" for n in not_found_items)
-                )
-
-            if pending_options:
-                # Multi-item batch: some items were added, but one item
-                # in the same message was ambiguous. The response must
-                # confirm the partial success AND ask the open question,
-                # using the exact option names from the catalog (no
-                # hallucinated names).
-                opts_lines = "\n".join(
-                    f"- {o.get('name')} ({money(o.get('price'))})" for o in pending_options
-                )
-                not_found_rule = ""
-                if not_found_items:
-                    not_found_rule = (
-                        "- Si hay productos listados como NO encontrados, menciónalos en "
-                        "una sola frase breve ('X no está en el menú por ahora') antes o "
-                        "después de la lista de opciones.\n"
-                    )
-                system = base_system + (
-                    f"\n\nSITUACIÓN: {situation} PERO uno de los productos que el cliente pidió "
-                    "tiene varias variantes y necesitas que elija cuál quiere antes de agregarlo.\n"
-                    "REGLAS:\n"
-                    "- Primero confirma brevemente lo que SÍ se agregó (está en 'Cambio realizado').\n"
-                    "- Luego, en la misma respuesta, pregunta por el producto que quedó pendiente "
-                    f"(lo pidió como '{pending_requested or 'ese producto'}') y lista las opciones.\n"
-                    + not_found_rule +
-                    "- PROHIBIDO ABSOLUTO: inventar, traducir, especializar o combinar los nombres "
-                    "de las opciones con lo que el cliente pidió. Copia los nombres de las opciones "
-                    "EXACTAMENTE como aparecen (mayúsculas y acentos idénticos).\n"
-                    "- No digas 'error', 'no pude', 'lo siento' — es una pregunta normal.\n"
-                    "- NO sugieras proceder con el pedido todavía: falta resolver la duda.\n"
-                    "- 3-6 líneas total."
-                )
-                inp_parts = [
-                    f"Cliente dijo: {message_body}",
-                    f"Cambio realizado:\n{change_desc}",
-                    f"Pedido actual:\n{cart_lines}",
-                    f"Subtotal: {money(total_after)}",
-                    f"Producto pendiente de aclarar: {pending_requested}",
-                    f"Opciones disponibles (usa exactamente estos nombres y precios):\n{opts_lines}",
-                ]
-                if not_found_block:
-                    inp_parts.append(not_found_block)
-                return system, "\n".join(inp_parts)
-
-            if not_found_items:
-                # Multi-item batch: some items were added, others weren't
-                # found at all (typo, truly unavailable). Confirm the
-                # successes AND flag the missing items — never drop them
-                # silently, and never present them as suggestions.
-                missing_list = ", ".join(f"'{m}'" for m in not_found_items)
-                system = base_system + (
-                    f"\n\nSITUACIÓN: {situation} PERO uno o más productos que el cliente "
-                    f"pidió no existen en nuestro menú (lista literal: {missing_list}). "
-                    "No pudimos agregarlos al pedido. Estos NO son sugerencias — son "
-                    "productos que el restaurante no vende.\n"
-                    "REGLAS CRÍTICAS:\n"
-                    "- Primero confirma lo que SÍ se agregó (está en 'Cambio realizado'), "
-                    "usando los nombres EXACTOS de 'Pedido actual'.\n"
-                    "- Luego, en una frase, di CLARAMENTE que los productos listados como "
-                    "'no encontrados' NO están en el menú. Usa lenguaje explícito: "
-                    "\"no tenemos [X] en el menú\", \"[X] no está disponible hoy\", "
-                    "\"[X] no lo manejamos\". NO los presentes como sugerencias para que "
-                    "el cliente los pida después.\n"
-                    "- PROHIBIDO: frases como \"¿quieres agregar [X]?\", "
-                    "\"¿te gustaría [X]?\", \"como un [X]\", que hacen parecer que el "
-                    "producto no encontrado es una opción disponible.\n"
-                    "- PROHIBIDO: 'lo siento', 'disculpa', 'no pude', 'falló', 'error'.\n"
-                    "- Puedes ofrecerle al cliente ver el menú o pedir algo diferente "
-                    "para los ítems faltantes — pero DESPUÉS de decir claramente que no "
-                    "están disponibles.\n"
-                    "- NO sugieras proceder con el pedido todavía si el cliente quería "
-                    "esos productos faltantes.\n"
-                    "- 2-5 líneas total."
-                )
-                inp = (
-                    f"Cliente dijo: {message_body}\n"
-                    f"Cambio realizado:\n{change_desc}\n"
-                    f"Pedido actual:\n{cart_lines}\n"
-                    f"Subtotal: {money(total_after)}\n"
-                    f"{not_found_block}"
-                )
-                return system, inp
-
-            promo_added_rule = ""
-            if new_promo_name:
-                promo_added_rule = (
-                    f"- ESTA RESPUESTA AGREGÓ UNA PROMO ('{new_promo_name}'). Confirma que "
-                    "agregaste LA PROMO por nombre (no enumeres los productos individuales "
-                    "con sus precios base — el cliente pidió un combo/promo, no productos sueltos).\n"
-                )
-            promo_total_rule = ""
-            if applied_promos:
-                promo_total_rule = (
-                    "- El subtotal que te doy YA incluye los descuentos de la promo. NO digas "
-                    "el precio sin descuento como si fuera el total. NO sumes precios base "
-                    "tú mismo.\n"
-                )
-            system = base_system + (
-                f"\n\nSITUACIÓN: {situation}\n"
-                "REGLAS:\n"
-                "- Confirma brevemente el cambio que hizo el backend (está en 'Cambio realizado').\n"
-                + promo_added_rule +
-                "- Muestra el resumen del pedido actual usando los nombres EXACTOS de la lista "
-                "'Pedido actual' que te doy. Si una línea empieza con '🏷 PROMO', preséntala como "
-                "una sola promo con su nombre y precio promocional — NO enumeres sus componentes "
-                "como ítems separados con precios base.\n"
-                "- Copia el nombre del producto tal cual aparece (con mayúsculas, acentos y notas "
-                "entre paréntesis). NO los reemplaces por las palabras que usó el cliente.\n"
-                + promo_total_rule +
-                "- Sugiere el siguiente paso: preguntar si quiere agregar algo más (ej. bebida si no tiene una) o procedemos con el pedido.\n"
-                "- NO inventes productos, nombres, variantes, ni precios — usa solo los datos dados.\n"
-                "- 2-5 líneas."
-            )
-            inp = (
-                f"Cliente dijo: {message_body}\n"
-                f"Cambio realizado:\n{change_desc}\n"
-                f"Pedido actual:\n{cart_lines}\n"
-                f"Subtotal (ya con promo si aplica): {money(total_after)}"
-            )
-            return system, inp
-
-        if result_kind == RESULT_KIND_CART_VIEW:
-            cv = exec_result.get("cart_view") or {}
-            items = cv.get("items") or []
-            if cv.get("is_empty") or not items:
-                system = base_system + (
-                    "\n\nSITUACIÓN: El cliente pidió ver su pedido, pero está vacío. "
-                    "Invítalo amablemente a pedir algo (sugiérele preguntar por categorías). 1-2 líneas."
-                )
-                inp = f"Cliente dijo: {message_body}\nPedido: vacío"
-                return system, inp
-            items_lines = "\n".join(
-                f"- {it.get('quantity')}x {it.get('name')}"
-                + (f" ({it.get('notes')})" if it.get("notes") else "")
-                + f" — {money(int(it.get('price') or 0) * int(it.get('quantity') or 0))}"
-                for it in items
-            )
-            system = base_system + (
-                "\n\nSITUACIÓN: El cliente quiere ver su pedido actual. "
-                "REGLAS:\n"
-                "- Muestra cada ítem con cantidad, nombre, notas (si hay) y precio.\n"
-                "- Muestra subtotal, domicilio y total.\n"
-                "- Pregunta si quiere agregar algo más o proceder.\n"
-                "- NO muestres IDs internos."
-            )
-            inp = (
-                f"Cliente dijo: {message_body}\n"
-                f"Pedido actual:\n{items_lines}\n"
-                f"Subtotal: {money(cv.get('subtotal'))}\n"
-                f"Domicilio: {money(cv.get('delivery_fee'))}\n"
-                f"Total: {money(cv.get('total'))}"
-            )
-            return system, inp
-
-        if result_kind == RESULT_KIND_DELIVERY_STATUS:
-            ds = exec_result.get("delivery_status") or {}
-            if ds.get("all_present"):
-                allowed_methods = ds.get("payment_methods_allowed") or []
-                payment_rejected = ds.get("payment_rejected_input") or ""
-                payment_rules = ""
-                if payment_rejected and allowed_methods:
-                    # User just proposed an invalid method but we still have a
-                    # valid stored one. Don't pretend nothing happened —
-                    # acknowledge the rejection BEFORE re-confirming the data.
-                    payment_rules = (
-                        f"\n- IMPORTANTE: el cliente acaba de proponer pagar con "
-                        f"\"{payment_rejected}\", que NO aceptamos. PRIMERO dile "
-                        f"claramente que solo aceptamos {', '.join(allowed_methods)}, "
-                        f"y que su pago actual seguirá siendo {ds.get('payment_method')} "
-                        f"a menos que elija otro permitido. LUEGO pregúntale si "
-                        f"procede así o quiere cambiar a uno permitido."
-                    )
-                system = base_system + (
-                    "\n\nSITUACIÓN: Ya tenemos todos los datos de entrega del cliente. "
-                    "Confírmale los datos que tenemos y pregúntale si gusta proceder o quiere cambiar algo. "
-                    "FORMATO: 'Tengo esta dirección: [addr], teléfono [phone] y pago [payment]. ¿Procedemos o quieres cambiar algo?'. "
-                    "1-3 líneas."
-                    + payment_rules
-                )
-                inp = (
-                    f"Cliente dijo: {message_body}\n"
-                    f"Datos actuales:\n"
-                    f"- Nombre: {ds.get('name') or '(no registrado)'}\n"
-                    f"- Dirección: {ds.get('address')}\n"
-                    f"- Teléfono: {ds.get('phone')}\n"
-                    f"- Pago: {ds.get('payment_method')}"
-                )
-                if allowed_methods:
-                    inp += f"\nMétodos de pago aceptados: {', '.join(allowed_methods)}"
-                if payment_rejected:
-                    inp += f"\nMétodo propuesto por el cliente y rechazado: {payment_rejected}"
-                return system, inp
-            missing = ds.get("missing") or []
-            missing_es = {"name": "nombre", "address": "dirección", "phone": "teléfono", "payment": "medio de pago"}
-            missing_labels = [missing_es.get(m, m) for m in missing]
-            allowed_methods = ds.get("payment_methods_allowed") or []
-            payment_rejected = ds.get("payment_rejected_input") or ""
-            payment_rules = ""
-            if allowed_methods:
-                payment_rules = (
-                    "\n- Métodos de pago aceptados: "
-                    + ", ".join(allowed_methods)
-                    + ". NO ofrezcas ni aceptes otros (Nequi, DaviPlata, tarjeta, etc.)."
-                )
-                if payment_rejected:
-                    payment_rules += (
-                        f"\n- El cliente propuso pagar con \"{payment_rejected}\", "
-                        "que NO aceptamos. Dile claramente que solo aceptamos los "
-                        "métodos listados y pídele que elija uno."
-                    )
-                elif "payment" in missing:
-                    payment_rules += (
-                        "\n- Cuando preguntes por el medio de pago, lista las opciones "
-                        "permitidas para que el cliente elija una."
-                    )
-            system = base_system + (
-                "\n\nSITUACIÓN: Faltan algunos datos de entrega. "
-                "REGLAS:\n"
-                "- Pide SOLO los datos que faltan (nunca pidas de más).\n"
-                "- Si ya tenemos alguno, menciónalo brevemente (ej. 'ya tengo tu dirección').\n"
-                "- NO sugieras 'proceder con el pedido' hasta tener todos los datos.\n"
-                "- 1-3 líneas."
-                + payment_rules
-            )
-            inp = (
-                f"Cliente dijo: {message_body}\n"
-                f"Datos ya registrados:\n"
-                f"- Nombre: {ds.get('name') or '(falta)'}\n"
-                f"- Dirección: {ds.get('address') or '(falta)'}\n"
-                f"- Teléfono: {ds.get('phone') or '(falta)'}\n"
-                f"- Pago: {ds.get('payment_method') or '(falta)'}\n"
-                f"Faltan: {', '.join(missing_labels) if missing_labels else '(ninguno)'}"
-            )
-            if allowed_methods:
-                inp += f"\nMétodos de pago aceptados: {', '.join(allowed_methods)}"
-            if payment_rejected:
-                inp += f"\nMétodo propuesto por el cliente y rechazado: {payment_rejected}"
-            return system, inp
-
-        if result_kind == RESULT_KIND_ORDER_PLACED:
-            op = exec_result.get("order_placed") or {}
-            oid = op.get("order_id_display") or ""
-            items = op.get("items") or []
-            promo_discount = int(op.get("promo_discount") or 0)
-            applied_promos = op.get("applied_promos") or []
-
-            # Render the items list bundle-aware: items bound to a promo
-            # collapse into a single "PROMO X" line so the customer sees
-            # the promo as a unit, not as base-priced individual items.
-            business_id = (business_context or {}).get("business_id") or ""
-            preview = promotion_service.preview_cart(str(business_id), items)
-            items_lines = "\n".join(
-                (
-                    "- 🏷 PROMO " + (g.get("promotion_name") or "")
-                    + " (" + ", ".join(
-                        f"{c.get('quantity')}x {c.get('name')}"
-                        for c in (g.get("components") or [])
-                    ) + ") — " + money(g.get("promo_price") or 0)
-                ) if g.get("kind") == "promo_bundle" else (
-                    f"- {g.get('quantity')}x {g.get('name')}"
-                    + (f" ({g.get('notes')})" if g.get("notes") else "")
-                )
-                for g in preview["display_groups"]
-            )
-
-            savings_clause = ""
-            if promo_discount > 0:
-                names = ", ".join(applied_promos) or "promo aplicada"
-                savings_clause = (
-                    f"- Incluye una línea de ahorro DESPUÉS del subtotal con este formato exacto: "
-                    f"'Ahorro con promo: -{money(promo_discount)} ({names})'. Esto enmarca el "
-                    f"descuento como un beneficio para el cliente, no como una corrección.\n"
-                )
-            system = base_system + (
-                "\n\nSITUACIÓN: El pedido fue confirmado exitosamente. "
-                "REGLAS:\n"
-                "- Celebra brevemente (ej. '¡Listo!').\n"
-                "- Muestra el número de pedido, los items, subtotal, domicilio y total.\n"
-                "- Si una línea de items empieza con '🏷 PROMO', preséntala como UNA promo "
-                "con su nombre y precio promocional. NO la descompongas en sus componentes "
-                "como ítems separados con precios base.\n"
-                + savings_clause +
-                "- El subtotal y total que te doy YA reflejan los descuentos. NO recalcules.\n"
-                "- En la línea del 'Domicilio:', después del valor agrega entre paréntesis "
-                "una aclaración corta de que el costo puede variar según la distancia/dirección "
-                "de entrega (ej. '(puede variar según la distancia)'). NO pongas esta "
-                "aclaración en un párrafo aparte después del total.\n"
-                "- Dile que pronto se comunicarán para coordinar la entrega.\n"
-                f"- Indica que el pedido se demora {NOMINAL_RANGE_TEXT} en su entrega.\n"
-                "- 3-6 líneas."
-            )
-            inp = (
-                f"Pedido confirmado.\n"
-                f"Número: #{oid}\n"
-                f"Items:\n{items_lines}\n"
-                f"Subtotal (ya con promo si aplica): {money(op.get('subtotal'))}\n"
-                f"Domicilio: {money(op.get('delivery_fee'))}\n"
-                f"Total: {money(op.get('total'))}"
-            )
-            return system, inp
-
-        if result_kind == RESULT_KIND_CART_ABANDONED:
-            had_items = bool(exec_result.get("had_items"))
-            system = base_system + (
-                "\n\nSITUACIÓN: El cliente pidió cancelar/abandonar el pedido en curso "
-                "ANTES de confirmarlo. El backend ya vació el carrito y reseteó el estado.\n"
-                "REGLAS:\n"
-                "- Confirma que se canceló el pedido en curso de forma corta y amable.\n"
-                "- NO menciones números de pedido — no había pedido confirmado todavía.\n"
-                "- Cierra invitando a volver cuando quiera ('cuando quieras pedir, "
-                "aquí estamos').\n"
-                "- 1-2 líneas, sin disculpas exageradas.\n"
-                "- Si el carrito ya estaba vacío, simplemente confirma que no había "
-                "nada por cancelar y ofrece ayuda."
-            )
-            inp = (
-                f"Cliente dijo: {message_body}\n"
-                f"Carrito tenía productos: {'sí' if had_items else 'no'}"
-            )
-            return system, inp
-
-        if result_kind == RESULT_KIND_USER_ERROR:
-            err = exec_result.get("error_message") or "No pude procesar eso."
-            system = base_system + (
-                "\n\nSITUACIÓN: Ocurrió una situación que requiere guiar al cliente (ej. pedido vacío, producto no encontrado). "
-                "REGLAS:\n"
-                "- Dile lo que pasa de forma amable y natural, SIN usar 'error', 'falló', 'disculpa', 'lo siento', 'no pude'.\n"
-                "- Ofrece el siguiente paso útil (ej. 'dime qué te gustaría pedir', 'revisa el menú').\n"
-                "- 1-2 líneas."
-            )
-            inp = f"Cliente dijo: {message_body}\nSituación: {err}"
-            return system, inp
-
-        if result_kind == RESULT_KIND_INTERNAL_ERROR:
-            # Safe generic fallback — the LLM sees no raw stack trace.
-            system = base_system + (
-                "\n\nSITUACIÓN: Hubo un problema técnico temporal. "
-                "Dile al cliente amablemente que intente de nuevo en un momento. 1 línea."
-            )
-            inp = f"Cliente dijo: {message_body}"
-            return system, inp
-
-        # Fallback — shouldn't normally happen
-        system = base_system + "\n\nResponde amablemente al cliente."
-        inp = f"Cliente dijo: {message_body}\nResumen pedido: {cart_summary_after}"
-        return system, inp
+        return self._build_system_prompt(business_context)
 
     def execute(
         self,
@@ -1539,35 +247,11 @@ class OrderAgent(BaseAgent):
         session: Optional[Dict] = None,
         stale_turn: bool = False,
         abort_key: Optional[str] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> AgentOutput:
-        """Planner (intent) -> executor (one tool) -> response generator from actual tool result and cart."""
-        # Feature-flag delegation to the tool-calling agent. Opt-in per
-        # business via settings.order_agent_mode = "tool_calling"; the
-        # default ("legacy" / unset) keeps the planner+executor path.
-        # See docs/order-agent-rearchitecture-plan.md for context.
-        try:
-            settings = ((business_context or {}).get("business") or {}).get("settings") or {}
-            mode = str(settings.get("order_agent_mode") or "legacy").strip().lower()
-        except Exception:
-            mode = "legacy"
-        if mode == "tool_calling":
-            return self._tool_calling_agent().execute(
-                message_body=message_body,
-                wa_id=wa_id,
-                name=name,
-                business_context=business_context,
-                conversation_history=conversation_history,
-                message_id=message_id,
-                session=session,
-                stale_turn=stale_turn,
-                abort_key=abort_key,
-                **kwargs,
-            )
-
         run_id = str(uuid.uuid4())
         start_time = time.time()
-        business_id = business_context.get("business_id") if business_context else None
+        business_id = (business_context or {}).get("business_id") or ""
 
         if not business_id:
             return {
@@ -1576,414 +260,249 @@ class OrderAgent(BaseAgent):
                 "state_update": {},
             }
 
-        # Load session if not provided (e.g. when executor passes it).
-        # Goes through the turn cache so the rest of the flow reuses
-        # the same load result.
-        if session is None:
-            from ..orchestration import turn_cache
-            # session_state_service imported at module level — keeping a
-            # local re-import here would force Python to treat the name as
-            # local across the whole function, leaving it unbound on the
-            # multi-intent refresh path when callers pass a non-None session.
-            load_result = turn_cache.current().get_session(
-                wa_id, str(business_id),
-                loader=lambda: session_state_service.load(wa_id, str(business_id)),
-            )
-            session = load_result.get("session", {})
+        tracer.start_run(
+            run_id=run_id, user_id=wa_id, message_id=message_id, business_id=business_id,
+        )
 
-        order_context = session.get("order_context") or {}
-        order_state = order_context.get("state") or "GREETING"
-        items = order_context.get("items") or []
-        if items:
-            # Use the matcher-aware preview so the planner sees the same
-            # numbers the customer sees. Items bound to a promo are
-            # tagged "(promo)" so the planner doesn't think the customer
-            # got a base-priced product.
-            preview = promotion_service.preview_cart(str(business_id), items)
-            lines = []
-            for g in preview["display_groups"]:
-                if g.get("kind") == "promo_bundle":
-                    comps = ", ".join(
-                        f"{c.get('quantity')}x {c.get('name')}"
-                        for c in (g.get("components") or [])
-                    )
-                    lines.append(
-                        f"PROMO {g.get('promotion_name')} ({comps}) — "
-                        f"${int(g.get('promo_price') or 0):,}".replace(",", ".")
-                    )
-                else:
-                    notes_part = f" ({g['notes']})" if g.get("notes") else ""
-                    lines.append(f"{g.get('quantity', 0)}x {g.get('name', '')}{notes_part}")
-            subtotal_str = f"${int(preview['subtotal']):,}".replace(",", ".")
-            cart_summary_str = "; ".join(lines) + f". Subtotal: {subtotal_str}"
-        else:
-            cart_summary_str = "Pedido vacío."
+        # Per-turn business context. Tools' ``injected_business_context``
+        # arg is annotated with InjectedToolArg, so it never appears in
+        # the model's tool schema. We pass it explicitly on each
+        # tool.invoke({...}) below.
+        ctx_for_tools: Dict[str, Any] = {**(business_context or {}), "wa_id": wa_id}
+        token = set_tool_context(ctx_for_tools)
 
+        # Build the unified turn context (cart, delivery, awaiting_confirmation,
+        # history, latest order). Same shape every layer (router / order /
+        # CS) sees — divergence between layers was a source of bugs
+        # ("model re-adds items because it didn't see them in cart",
+        # "model re-saves delivery info that's already on file").
+        turn_ctx = build_turn_context(wa_id, str(business_id))
+        # If the caller passed conversation_history (orchestrator
+        # pre-load, or test injection) and the DB-loaded history is
+        # empty, use the caller's history. Saves one DB hit in
+        # production and lets tests construct deterministic histories
+        # without a real DB.
+        if conversation_history and not turn_ctx.recent_history:
+            turn_ctx = _replace_history(turn_ctx, conversation_history)
+        cart_has_items = turn_ctx.has_active_cart
+        awaiting_confirmation = turn_ctx.awaiting_confirmation
+        logging.warning(
+            "[ORDER_AGENT] turn_in wa_id=%s cart_has_items=%s "
+            "awaiting_confirmation=%s",
+            wa_id,
+            cart_has_items,
+            awaiting_confirmation,
+        )
+
+        # Order-availability gate (mirror of v1 OrderAgent). Read once
+        # per turn from business_availability via is_taking_orders_now.
+        # The gate's decision is intercepted in the dispatch loop:
+        # mutating tools (add_to_cart, place_order, etc.) are blocked
+        # when the shop is closed; browse / read-only tools (menu,
+        # search, view_cart) pass through. On a block, the turn hands
+        # off to customer_service with reason='order_closed' — the CS
+        # agent has a deterministic fast-path that composes the
+        # "estamos cerrados, abrimos a las X" reply. The cart stays
+        # untouched in session so the customer picks up where they
+        # left off when the shop reopens.
+        # Honors business.settings.order_gate_enabled = False as opt-out.
+        order_gate: Optional[Dict[str, Any]] = None
         try:
-            tracer.start_run(run_id=run_id, user_id=wa_id, message_id=message_id, business_id=str(business_id))
-
-            # Closed-shop short-circuit. The per-intent gate further down
-            # only fires when the planner emits a mutating intent. For
-            # order openers like "Buenas noches para un domicilio", the
-            # planner often emits CHAT (no mutation), so the LLM happily
-            # replies "¿Qué te gustaría pedir?" — leading the customer
-            # into a multi-message ordering path that fails at submit
-            # time. Production incident: +573172908887, 2026-05-11.
-            #
-            # When the shop is closed and the customer has no active
-            # cart, skip the planner LLM entirely and hand off to CS so
-            # the canonical "estamos cerrados…" reply (with the
-            # alt-branch contact line on fully-closed days) lands as the
-            # very first response. Customers with an active cart still
-            # fall through to the planner: they may want VIEW_CART or
-            # to browse, and the in-loop gate guards mutations.
-            _early_gate_opt_in = True
-            try:
-                _early_settings = ((business_context or {}).get("business") or {}).get("settings") or {}
-                _early_gate_opt_in = _early_settings.get("order_gate_enabled", True) is not False
-            except Exception:
-                _early_gate_opt_in = True
-            if _early_gate_opt_in and not items:
-                try:
-                    from ..services import business_info_service as _bi_svc_early
-                    _early_gate = _bi_svc_early.is_taking_orders_now(str(business_id))
-                except Exception as exc:
-                    logging.warning(
-                        "[ORDER_GATE] business=%s wa_id=%s early-gate compute failed: %s",
-                        business_id, wa_id, exc,
-                    )
-                    _early_gate = None
-                if _early_gate is not None and not _early_gate.get("can_take_orders"):
-                    logging.warning(
-                        "[ORDER_GATE] business=%s wa_id=%s closed-shop short-circuit "
-                        "(no active cart) → handoff customer_service reason=order_closed",
-                        business_id, wa_id,
-                    )
-                    tracer.end_run(
-                        run_id, success=True,
-                        latency_ms=(time.time() - start_time) * 1000,
-                    )
-                    return {
-                        "agent_type": self.agent_type,
-                        "message": "",
-                        "state_update": {"active_agents": ["order"]},
-                        "handoff": {
-                            "to": "customer_service",
-                            "segment": message_body,
-                            "context": {
-                                "reason": "order_closed",
-                                "has_active_cart": False,
-                                "blocked_intents": [],
-                            },
-                        },
-                    }
-
-            # Handoff fast-path: when we got here via a customer-service
-            # handoff that already resolved a promo (e.g. user said "dame
-            # esa" after CS listed promos), skip the planner LLM and
-            # synthesize ADD_PROMO_TO_CART with the resolved id.
-            handoff_context = kwargs.get("handoff_context") or {}
-            handoff_promo_id = (handoff_context.get("promo_id") or "").strip() if handoff_context else ""
-
-            # 1) Planner: one intent + params.
-            # Surface the latest placed-order status when present so the
-            # planner can tell post-PLACE_ORDER thank-you turns
-            # ("si gracias") apart from a fresh CONFIRM. Source: per-turn
-            # TurnContext built by conversation_manager; agents that don't
-            # receive one fall back to no extra context (legacy callers
-            # / tests).
-            turn_ctx_local = kwargs.get("turn_ctx")
-            latest_status = getattr(turn_ctx_local, "latest_order_status", None) if turn_ctx_local is not None else None
-            latest_block = (
-                f"\nÚltimo pedido (estado): {latest_status}"
-                if latest_status else ""
-            )
-            planner_system = PLANNER_SYSTEM_TEMPLATE.format(
-                order_state=order_state,
-                cart_summary=cart_summary_str,
-                latest_order_block=latest_block,
-            )
-
-            # Operator-handoff reset: if the most recent assistant-side turn
-            # in history was an operator (human) message — i.e. someone toggled
-            # the bot off, typed a manual reply, then toggled it back on — any
-            # cached pending_disambiguation belongs to whatever the bot last
-            # said BEFORE the operator stepped in, not to the operator's
-            # message. Clear it so the planner doesn't try to resolve the
-            # current user reply against stale options. Both Biela incidents
-            # (2026-05-06 / 3137112249, 2026-05-04 / 3108069647) had operator
-            # toggling preceding the misclassification.
-            operator_handoff_recent = False
-            for prior in reversed(conversation_history or []):
-                if (prior.get("role") or "").strip().lower() != "assistant":
-                    continue
-                if (prior.get("agent_type") or "").strip().lower() == "operator":
-                    operator_handoff_recent = True
-                break  # first assistant-side entry is decisive
-            if operator_handoff_recent and order_context.get("pending_disambiguation"):
+            _settings = ((business_context or {}).get("business") or {}).get("settings") or {}
+            if _settings.get("order_gate_enabled", True) is not False:
+                from ..services import business_info_service as _bi_svc
+                order_gate = _bi_svc.is_taking_orders_now(str(business_id))
                 logging.warning(
-                    "[ORDER_AGENT] operator handoff detected — clearing pending_disambiguation"
-                )
-                _clear_pending_disambiguation(wa_id, str(business_id))
-                order_context = {**order_context, "pending_disambiguation": None}
-                session = {**session, "order_context": order_context}
-
-            # Pending disambiguation: if last turn we offered the customer a set
-            # of options, inject them so the planner can resolve replies like
-            # "la normal", "la primera", "la Corona" to a specific product.
-            pending = order_context.get("pending_disambiguation") or {}
-            logging.warning(
-                "[ORDER_AGENT] pending_disambiguation loaded=%s options=%s operator_handoff=%s",
-                bool(pending and pending.get("options")),
-                [o.get("name") for o in (pending.get("options") or [])] if pending else [],
-                operator_handoff_recent,
-            )
-            planner_system += build_pending_disambiguation_prompt_block(pending)
-
-            if stale_turn:
-                planner_system += (
-                    "\n\nNOTA: El usuario envió este mensaje ANTES de ver tu respuesta "
-                    "anterior. No asumas que leyó o reaccionó a tu último mensaje."
-                )
-
-            history_text = ""
-            # Uniform 10-msg window across router / order planner / CS planner
-            # so every layer sees the same stateful view of the conversation.
-            # Operator-typed messages get a distinct label ("operator (human)")
-            # so the planner doesn't treat them as the bot's prior turn —
-            # otherwise an operator's manual reply can poison the next intent
-            # classification (see incident 2026-05-06, Biela / 3137112249).
-            for msg in conversation_history[-10:]:
-                role = msg.get("role", "")
-                agent_type = (msg.get("agent_type") or "").strip().lower()
-                if role == "assistant" and agent_type == "operator":
-                    role = "operator (human)"
-                content = (msg.get("content") or msg.get("message", ""))[:400]
-                history_text += f"{role}: {content}\n"
-            cta_intent = _match_cta_button(message_body)
-            if handoff_promo_id:
-                # Skip the planner LLM call entirely — the handoff already
-                # told us exactly what to do.
-                parsed = {
-                    "intent": "ADD_PROMO_TO_CART",
-                    "params": {"promo_id": handoff_promo_id},
-                }
-                logging.warning(
-                    "[ORDER_AGENT] handoff fast-path: promo_id=%s — skipping planner",
-                    handoff_promo_id,
-                )
-            elif cta_intent is not None:
-                # CTA quick-reply tap. Skip the planner — the button is a
-                # deterministic UI affordance, not free text. Emitting a
-                # canned intent prevents the planner from misreading the
-                # CTA's data recap (Nombre/Dirección/...) as fields the
-                # customer just typed (Luis / 3159280840 incident).
-                parsed = dict(cta_intent)
-                logging.warning(
-                    "[ORDER_AGENT] CTA button fast-path: %r → %s — skipping planner",
-                    message_body, cta_intent.get("intent"),
+                    "[ORDER_GATE] business=%s wa_id=%s can_take_orders=%s "
+                    "reason=%s (v2)",
+                    business_id, wa_id,
+                    order_gate.get("can_take_orders"),
+                    order_gate.get("reason"),
                 )
             else:
-                planner_messages = [
-                    SystemMessage(content=planner_system),
-                    HumanMessage(content=f"Historial reciente:\n{history_text}\nUsuario: {message_body}\n\nResponde solo con JSON usando el formato {{\"intents\": [...]}} (1 a 3 entradas). Usa multi-intent SOLO cuando el mensaje combina varias acciones independientes."),
-                ]
-                planner_response = self.planner_llm.invoke(
-                    planner_messages,
+                logging.warning(
+                    "[ORDER_GATE] business=%s wa_id=%s opt-out via "
+                    "business.settings.order_gate_enabled=False — gate skipped (v2)",
+                    business_id, wa_id,
+                )
+        except Exception as exc:
+            logging.warning(
+                "[ORDER_GATE] business=%s wa_id=%s compute failed (defaulting to open): %s",
+                business_id, wa_id, exc,
+            )
+            order_gate = None
+
+        # Closed-shop short-circuit (v2 mirror of v1). When the shop is
+        # closed AND the customer has no active cart, skip the LLM loop
+        # entirely and hand off to CS. Order openers like "para un
+        # domicilio" otherwise get a friendly model reply that never
+        # calls a mutating tool, so the in-loop gate never fires.
+        # Production incident: +573172908887, 2026-05-11.
+        if (
+            order_gate is not None
+            and not order_gate.get("can_take_orders")
+            and not cart_has_items
+        ):
+            logging.warning(
+                "[ORDER_GATE] business=%s wa_id=%s closed-shop short-circuit "
+                "(no active cart) → handoff customer_service reason=order_closed (v2)",
+                business_id, wa_id,
+            )
+            tracer.end_run(
+                run_id, success=True,
+                latency_ms=(time.time() - start_time) * 1000,
+            )
+            return {
+                "agent_type": self.agent_type,
+                "message": "",
+                "state_update": {"active_agents": ["order"]},
+                "handoff": {
+                    "to": "customer_service",
+                    "segment": message_body,
+                    "context": {
+                        "reason": "order_closed",
+                        "has_active_cart": False,
+                        "blocked_intents": [],
+                    },
+                },
+            }
+
+        try:
+            messages = self._build_initial_messages(
+                business_context=business_context,
+                conversation_history=conversation_history,
+                message_body=message_body,
+                turn_ctx=turn_ctx,
+            )
+            tool_map = {t.name: t for t in order_tools}
+            executed_tools: List[str] = []
+            # Captured tool result strings, keyed by tool name. The
+            # renderer uses these for shapes (e.g., order_placed) where
+            # the canonical tool output must be emitted verbatim — the
+            # LLM is not trusted to rephrase a receipt without dropping
+            # fields like the order ID or subtotal.
+            tool_outputs: Dict[str, str] = {}
+            envelope: Optional[Dict[str, Any]] = None
+            last_model_text = ""
+            iteration = 0
+
+            # NOTE: The pre-tool keyword guard (_looks_like_order_trigger)
+            # was removed once the unified turn context made it
+            # redundant. The model now sees "Carrito actual: ..." and
+            # "Datos de entrega ya guardados (completos): ..." in every
+            # turn, plus rule 13's structural framing ("don't repeat
+            # operations already reflected in CONTEXTO"). The duplicate-
+            # add bug the guard targeted is now prevented at the prompt
+            # layer; if the model still misbehaves, we sharpen the
+            # prompt + add eval cases — not another keyword list.
+
+            for iteration in range(MAX_ITERATIONS):
+                # Mid-loop abort check. Mirrors v1's between-planner-and-
+                # executor check (order_agent.py:1863). Each LLM iteration
+                # is the v2 equivalent of a planner step; if a newer user
+                # message arrived during the previous iteration, halt now,
+                # requeue the in-flight text so the next debounce flusher
+                # coalesces it with the newcomer, and return __ABORTED__.
+                # The dispatcher consumes this as a clean abort and the
+                # caller skips the send.
+                if abort_key:
+                    from ..services.debounce import (
+                        check_abort,
+                        clear_abort,
+                        requeue_aborted_text,
+                    )
+                    if check_abort(abort_key):
+                        clear_abort(abort_key)
+                        requeue_aborted_text(abort_key, message_body)
+                        logging.warning(
+                            "[ABORT] %s: v2 abort detected at iteration=%d — "
+                            "requeued for next flush",
+                            wa_id, iteration,
+                        )
+                        tracer.end_run(
+                            run_id, success=False,
+                            latency_ms=(time.time() - start_time) * 1000,
+                        )
+                        return {
+                            "agent_type": self.agent_type,
+                            "message": "__ABORTED__",
+                            "state_update": {},
+                        }
+
+                response = self.llm.invoke(
+                    messages,
                     config={
-                        "run_name": "order_planner",
+                        "run_name": "order_agent",
                         "metadata": {
                             "wa_id": wa_id,
                             "business_id": str(business_id),
                             "turn_id": message_id or "",
-                            "order_state": order_state,
-                            "stale_turn": stale_turn,
+                            "iteration": iteration,
                             "run_id": run_id,
                         },
                     },
                 )
-                planner_text = planner_response.content if hasattr(planner_response, "content") else str(planner_response)
-                parsed = _parse_planner_response(planner_text)
-            # Multi-intent dispatch. Extract zero-or-more intents from the
-            # planner output (accepts legacy singleton and new {"intents":[...]}
-            # shape), apply per-intent fallbacks, then sort by canonical order
-            # so capture-style intents (SUBMIT_DELIVERY_INFO) run before
-            # cart mutations run before state-advancing intents (CONFIRM,
-            # PLACE_ORDER). See _CANONICAL_INTENT_ORDER for the priority table.
-            raw_intents = _extract_intents(parsed)
-            # apply_disamb_reply_flavor_fallback expects the legacy
-            # {"intent","params"} shape — apply it per-entry so the safety
-            # net still kicks in on the relevant ADD_TO_CART intent within
-            # a multi-intent list.
-            for entry in raw_intents:
-                apply_disamb_reply_flavor_fallback(entry, message_body, pending)
-            sorted_intents = _sort_intents_canonical(raw_intents, current_state=order_state)
-            primary_intent = sorted_intents[0]["intent"] if sorted_intents else INTENT_CHAT
-            logging.warning(
-                "[ORDER_AGENT] Planner emitted %d intent(s): %s",
-                len(sorted_intents),
-                [(e["intent"], e.get("params") or {}) for e in sorted_intents],
-            )
+                messages.append(response)
+                last_model_text = (getattr(response, "content", "") or "").strip()
 
-            # Order-availability gate: compute once per turn. When the
-            # business is closed (per business_availability rows), block
-            # mutating intents (ADD_TO_CART, SUBMIT_DELIVERY_INFO, etc.)
-            # and hand the turn off to customer_service so the customer
-            # gets a "estamos cerrados" reply. Browse intents
-            # (GET_MENU_CATEGORIES, LIST_PRODUCTS, GET_PRODUCT,
-            # SEARCH_PRODUCTS, VIEW_CART, CHAT) pass through unchanged —
-            # the menu is browsable while closed.
-            #
-            # Opt-out: business.settings.order_gate_enabled = False
-            # disables the gate even when availability rows exist.
-            # When the business has no availability rows configured,
-            # is_taking_orders_now returns can_take_orders=True, so the
-            # gate is effectively no-op for unconfigured businesses.
-            order_gate: Optional[Dict[str, Any]] = None
-            try:
-                _settings = ((business_context or {}).get("business") or {}).get("settings") or {}
-                _gate_opt_in = _settings.get("order_gate_enabled", True) is not False
-                if not _gate_opt_in:
+                tool_calls = getattr(response, "tool_calls", None) or []
+                if not tool_calls:
+                    # Model emitted plain prose without calling respond.
+                    # Treat that prose as a ``chat`` envelope — the
+                    # renderer will tone-fix and ground it as best it can.
                     logging.warning(
-                        "[ORDER_GATE] business=%s wa_id=%s opt-out via "
-                        "business.settings.order_gate_enabled=False — gate skipped",
-                        business_id, wa_id,
+                        "[ORDER_AGENT] model returned no tool calls — "
+                        "synthesizing chat envelope"
                     )
-                else:
-                    from ..services import business_info_service as _bi_svc
-                    order_gate = _bi_svc.is_taking_orders_now(str(business_id))
-                    # Format the structured fields so a single grep on
-                    # [ORDER_GATE] reconstructs every decision: what the
-                    # bot thought "now" was, what reason it landed on,
-                    # and (when closed) when it thinks orders resume.
-                    _now_local = order_gate.get("now_local")
-                    _opens_at = order_gate.get("opens_at")
-                    _next_dow = order_gate.get("next_open_dow")
-                    _next_time = order_gate.get("next_open_time")
-                    logging.warning(
-                        "[ORDER_GATE] business=%s wa_id=%s state_in=%s "
-                        "can_take_orders=%s reason=%s "
-                        "now_local=%s opens_at=%s next_open_dow=%s next_open_time=%s",
-                        business_id, wa_id, order_state,
-                        order_gate.get("can_take_orders"),
-                        order_gate.get("reason"),
-                        _now_local.isoformat() if _now_local else "",
-                        _opens_at.isoformat() if _opens_at else "",
-                        _next_dow if _next_dow is not None else "",
-                        _next_time.isoformat() if _next_time else "",
-                    )
-            except Exception as exc:
-                logging.warning(
-                    "[ORDER_GATE] business=%s wa_id=%s compute failed "
-                    "(defaulting to open): %s",
-                    business_id, wa_id, exc,
-                )
-                order_gate = None
+                    break
 
-            # Defensive promo-discovery handoff: when the router misclassifies
-            # a "qué promos hay" question as `order` and our planner picks
-            # CHAT (because there's no add-to-cart intent expressed), bounce
-            # it to customer_service which owns promo listings. Empty cart
-            # only — once a cart exists, an order-side CHAT is more likely
-            # to be a real conversational reply than a promo question.
-            # Single-intent only — multi-intent compound messages aren't
-            # status-query shaped.
-            if (
-                len(sorted_intents) == 1
-                and primary_intent == INTENT_CHAT
-                and not items
-                and _looks_like_promo_discovery(message_body)
-            ):
-                logging.warning(
-                    "[ORDER_AGENT] promo-discovery defensive handoff -> customer_service (msg=%r)",
-                    message_body[:80],
-                )
-                tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
-                return {
-                    "agent_type": self.agent_type,
-                    "message": "",
-                    "state_update": {},
-                    "handoff": {
-                        "to": "customer_service",
-                        "segment": message_body,
-                        "context": {"reason": "promo_discovery_misroute"},
-                    },
-                }
+                # Dispatch tools. respond(...) terminates the loop and is
+                # NOT executed — we lift its args as the envelope.
+                terminate = False
+                for tc in tool_calls:
+                    tool_name, tool_args, tool_id = _unpack_tool_call(tc)
+                    executed_tools.append(tool_name)
 
-            # ── Abort check: a newer message arrived while the planner ran.
-            # Skip executor + response so cart state stays clean. Requeue
-            # the aborted text into the debounce buffer so the next flusher
-            # coalesces it with newer arrivals — the planner then sees the
-            # full thread instead of only the trailing message. Scales to N
-            # consecutive aborts because requeue appends to the same buffer.
-            if abort_key:
-                from ..services.debounce import check_abort, clear_abort, requeue_aborted_text
-                if check_abort(abort_key):
-                    clear_abort(abort_key)
-                    requeue_aborted_text(abort_key, message_body)
-                    logging.warning(
-                        "[ABORT] %s: aborting after planner (intent=%s) — requeued for next flush",
-                        wa_id, primary_intent,
-                    )
-                    tracer.end_run(run_id, success=False, latency_ms=(time.time() - start_time) * 1000)
-                    return {
-                        "agent_type": self.agent_type,
-                        "message": "__ABORTED__",
-                        "state_update": {},
-                    }
+                    if tool_name == "respond":
+                        envelope = _envelope_from_args(tool_args)
+                        # Acknowledge the call so the message thread
+                        # stays well-formed, in case anything downstream
+                        # inspects it.
+                        messages.append(
+                            ToolMessage(content="RESPOND_OK", tool_call_id=tool_id)
+                        )
+                        terminate = True
+                        continue
 
-            # 2) Executor: run each intent in canonical order. Best-effort on
-            # partial failure — earlier side effects stay applied so a botched
-            # CONFIRM doesn't roll back a successful ADD_TO_CART. Refresh
-            # session between calls so step N+1 sees step N's state changes.
-            #
-            # A step that returns a "blocking" result_kind halts the loop:
-            # the user has to act before further intents make sense. Without
-            # this, a needs_clarification (disambiguation question) emitted
-            # by step 1 gets overwritten by a state-advancing step 2.
-            # Production 2026-05-07 (David / 3177000722): "una gaseosa cuatro"
-            # → planner emitted [ADD_TO_CART(cuatro), CONFIRM]. ADD hit
-            # needs_clarification (2 Cuatro variants); CONFIRM still ran,
-            # advanced state to READY_TO_PLACE, the CTA card overwrote the
-            # disambiguation question, and the customer never saw the
-            # variant choice.
-            _BLOCKING_RESULT_KINDS = frozenset({
-                RESULT_KIND_NEEDS_CLARIFICATION,
-                RESULT_KIND_USER_ERROR,
-                RESULT_KIND_INTERNAL_ERROR,
-            })
-            current_session = session
-            last_result: Dict[str, Any] = {}
-            last_real_result: Dict[str, Any] = {}
-            last_real_intent: str = ""
-            last_real_params: Dict[str, Any] = {}
-            executed_summaries: List[str] = []
-            for entry in sorted_intents:
-                step_intent = entry["intent"]
-                step_params = entry.get("params") or {}
-
-                # Order-availability gate (per-intent). Only fires when the
-                # gate computed at top-of-turn says the business is closed
-                # AND this step is a mutating intent. Browse intents are
-                # allowed through even while closed. On a hit, halt the
-                # loop and hand off to customer_service — the CS branch
-                # for handoff_context.reason="order_closed" composes the
-                # "estamos cerrados, abrimos a las X" reply. The cart
-                # stays in session untouched, so when the shop reopens
-                # the customer's items are still there.
-                if order_gate is not None and not order_gate.get("can_take_orders"):
-                    if step_intent in ORDER_MUTATING_INTENTS:
+                    # Order-availability gate: when the shop is closed
+                    # AND the model picked a mutating tool, halt the
+                    # whole turn and hand off to customer_service. The
+                    # cart stays in session — customer picks up when
+                    # the shop reopens. Browse / read-only tools fall
+                    # through to normal dispatch. Mirrors v1's
+                    # ``ORDER_MUTATING_INTENTS`` gate in order_agent.py.
+                    if (
+                        order_gate is not None
+                        and not order_gate.get("can_take_orders")
+                        and tool_name in MUTATING_TOOL_NAMES
+                    ):
+                        # Collect every mutating tool the model wanted
+                        # this turn so the CS reply can mention them.
                         blocked = [
-                            e["intent"] for e in sorted_intents
-                            if e["intent"] in ORDER_MUTATING_INTENTS
+                            _unpack_tool_call(c)[0]
+                            for c in tool_calls
+                            if _unpack_tool_call(c)[0] in MUTATING_TOOL_NAMES
                         ]
                         logging.warning(
                             "[ORDER_GATE] business=%s wa_id=%s BLOCKED "
-                            "intent=%s blocked_intents=%s has_active_cart=%s "
-                            "→ handoff customer_service reason=order_closed",
-                            business_id, wa_id, step_intent,
-                            blocked, bool(items),
+                            "tool=%s blocked_tools=%s has_active_cart=%s "
+                            "→ handoff customer_service reason=order_closed (v2)",
+                            business_id, wa_id, tool_name, blocked, cart_has_items,
                         )
+                        # Disarm any stale confirm-flag so a follow-up
+                        # in CS doesn't accidentally trip place_order.
+                        if awaiting_confirmation:
+                            set_awaiting_confirmation(wa_id, str(business_id), False)
                         tracer.end_run(
                             run_id, success=True,
                             latency_ms=(time.time() - start_time) * 1000,
@@ -1991,278 +510,611 @@ class OrderAgent(BaseAgent):
                         return {
                             "agent_type": self.agent_type,
                             "message": "",
-                            # Keep the cart in session so a returning customer
-                            # picks up where they left off.
+                            # Keep the cart in session so a returning
+                            # customer picks up where they left off.
                             "state_update": {"active_agents": ["order"]},
                             "handoff": {
                                 "to": "customer_service",
                                 "segment": message_body,
                                 "context": {
                                     "reason": "order_closed",
-                                    "has_active_cart": bool(items),
+                                    "has_active_cart": cart_has_items,
                                     "blocked_intents": blocked,
                                 },
                             },
                         }
+
+                    tool_fn = tool_map.get(tool_name)
+                    if tool_fn is None:
+                        result_str = (
+                            f"Error: la herramienta '{tool_name}' no existe. "
+                            "No la uses."
+                        )
                     else:
-                        # Browse / read-only intent slipping through a
-                        # closed shop. Useful trace for verifying the
-                        # "menu reading while closed" UX is firing.
-                        logging.warning(
-                            "[ORDER_GATE] business=%s wa_id=%s ALLOW "
-                            "intent=%s (browse) reason=closed",
-                            business_id, wa_id, step_intent,
-                        )
+                        injected = {
+                            **(tool_args or {}),
+                            "injected_business_context": ctx_for_tools,
+                        }
+                        try:
+                            result = tool_fn.invoke(injected)
+                            result_str = result if isinstance(result, str) else str(result)
+                            # Diagnostic: log args + result preview +
+                            # post-call cart size for cart-mutating
+                            # tools so we can see exactly what happened
+                            # when a turn appears to lose state.
+                            if tool_name in (
+                                "add_to_cart", "remove_from_cart",
+                                "update_cart_item", "add_promo_to_cart",
+                                "submit_delivery_info", "place_order",
+                            ):
+                                logging.warning(
+                                    "[ORDER_AGENT_DIAG] tool=%s args=%s "
+                                    "result=%r cart_size_after=%d",
+                                    tool_name,
+                                    {k: v for k, v in (tool_args or {}).items()
+                                     if k != "injected_business_context"},
+                                    result_str[:160],
+                                    _diag_cart_size(wa_id, str(business_id)),
+                                )
+                        except ProductNotFoundError as nf:
+                            # The full hybrid search (lexical + semantic +
+                            # trigram + LLM zero-result fallback) already
+                            # ran inside get_product and found nothing.
+                            # Surface the negative result AS DATA — not as
+                            # an exception — with an explicit recovery
+                            # script so the model lists alternatives via
+                            # respond(kind='disambiguation') instead of
+                            # giving up or fabricating an items_added.
+                            query = getattr(nf, "query", "") or (
+                                (tool_args or {}).get("product_name")
+                                or (tool_args or {}).get("product_id")
+                                or ""
+                            )
+                            logging.warning(
+                                "[ORDER_AGENT] tool=%s NOT_FOUND query=%r",
+                                tool_name, query,
+                            )
+                            result_str = (
+                                f"NOT_FOUND|query={query}|"
+                                "El producto NO existe en el catálogo "
+                                "(la búsqueda fuzzy + semántica ya corrió). "
+                                "ESTE ITEM NO SE AGREGÓ. Acción requerida en "
+                                "este mismo turno: 1) infiere la categoría más "
+                                "probable a partir del contexto del mensaje y "
+                                "del carrito (ej. en posición de bebida → "
+                                "BEBIDAS); 2) llama list_category_products con "
+                                "esa categoría para obtener las opciones "
+                                "reales; 3) llama respond(kind='disambiguation', "
+                                f"summary='No tenemos {query!r}, opciones "
+                                "disponibles', facts=[...nombres y precios de "
+                                "las alternativas...]). NO emitas items_added."
+                            )
+                        except Exception as exc:
+                            logging.exception(
+                                "[ORDER_AGENT] tool=%s raised: %s",
+                                tool_name, exc,
+                            )
+                            result_str = (
+                                f"Error al ejecutar {tool_name}: {exc}. "
+                                "Pide disculpas al cliente y ofrécele alternativas."
+                            )
+                    tool_outputs[tool_name] = result_str
+                    messages.append(
+                        ToolMessage(content=result_str, tool_call_id=tool_id)
+                    )
 
-                try:
-                    step_result = execute_order_intent(
-                        wa_id=wa_id,
-                        business_id=str(business_id),
-                        business_context=business_context,
-                        session=current_session,
-                        intent=step_intent,
-                        params=step_params,
-                        conversation_history=conversation_history,
-                        message_body=message_body,
-                    )
-                except Exception as step_exc:
-                    logging.exception(
-                        "[ORDER_AGENT] intent=%s raised — continuing best-effort: %s",
-                        step_intent, step_exc,
-                    )
-                    continue
-                last_result = step_result
-                step_kind = step_result.get("result_kind") or ""
-                # Track the last "real" (non-recovery) successful step. The
-                # recovery branch fires when an intent fails the allowlist and
-                # the executor falls back to a state-appropriate chat — its
-                # prose ("¡Con gusto, que disfrutes!") will overwrite useful
-                # earlier results if we naively use last_result. Prefer the
-                # last non-recovery successful result for the response generator.
-                if not step_result.get("is_recovery"):
-                    last_real_result = step_result
-                    last_real_intent = step_intent
-                    last_real_params = step_params
-                executed_summaries.append(
-                    f"{step_intent}->{step_kind or '?'}"
-                    + ("(recovery)" if step_result.get("is_recovery") else "")
-                )
-                # Blocking result: stop the loop. The customer needs to
-                # answer this (disambiguation pick / fix the error) before
-                # any subsequent intent in this turn is meaningful.
-                if step_kind in _BLOCKING_RESULT_KINDS:
-                    logging.warning(
-                        "[ORDER_AGENT] blocking result_kind=%s — halting "
-                        "remaining intents in this turn",
-                        step_kind,
-                    )
+                if terminate:
                     break
-                # Refresh session for the next iteration so subsequent
-                # intents see this step's state mutations (cart, profile,
-                # state transitions).
-                if len(sorted_intents) > 1:
-                    try:
-                        refreshed = session_state_service.load(wa_id, str(business_id))
-                        current_session = (refreshed or {}).get("session") or {}
-                    except Exception as exc:
-                        logging.warning(
-                            "[ORDER_AGENT] session reload between intents failed: %s", exc,
-                        )
-
-            # Pick the result that drives the response. Prefer the last
-            # non-recovery step (the intent the customer actually moved
-            # forward on). Fall back to whatever the last step produced if
-            # everything was a recovery.
-            exec_result = last_real_result or last_result
-            if last_real_result:
-                intent = last_real_intent
-                params = last_real_params
             else:
-                intent = sorted_intents[-1]["intent"] if sorted_intents else INTENT_CHAT
-                params = sorted_intents[-1].get("params", {}) if sorted_intents else {}
-
-            # Defensive: if NOTHING ran (e.g. all intents raised), fall back
-            # to a single CHAT pass so we never silently dead-end the user.
-            if not exec_result:
-                exec_result = execute_order_intent(
-                    wa_id=wa_id,
-                    business_id=str(business_id),
-                    business_context=business_context,
-                    session=session,
-                    intent=INTENT_CHAT,
-                    params={},
-                    conversation_history=conversation_history,
-                    message_body=message_body,
-                )
-                intent = INTENT_CHAT
-                params = {}
-            success = exec_result.get("success", False)
-            cart_summary_after = exec_result.get("cart_summary") or cart_summary_str
-
-            # One structured event per turn — grep [ORDER_TURN] to reconstruct a
-            # user's session, or alert on rejected=true (planner drift signal).
-            state_after = exec_result.get("state_after") or order_state
-            result_kind_tag = exec_result.get("result_kind") or ""
-            planner_intent_rejected = (
-                result_kind_tag == RESULT_KIND_USER_ERROR
-                and (exec_result.get("error_kind") == "user_visible")
-            )
-            logging.warning(
-                "[ORDER_TURN] wa_id=%s turn_id=%s state_in=%s intent=%s "
-                "result_kind=%s state_out=%s success=%s rejected=%s "
-                "latency_ms=%d steps=%s",
-                wa_id,
-                message_id or "-",
-                order_state,
-                intent,
-                result_kind_tag,
-                state_after,
-                success,
-                planner_intent_rejected,
-                int((time.time() - start_time) * 1000),
-                "|".join(executed_summaries) or "-",
-            )
-
-            # Handoff guard: empty-cart status query.
-            # Mirror of customer_service_flow's active-cart guard. If the
-            # router sent "mi pedido" style questions to order but the cart
-            # is empty AND the phrasing reads like a status query, defer
-            # to customer_service which can check completed orders.
-            if (
-                intent == INTENT_VIEW_CART
-                and (exec_result.get("cart_view") or {}).get("is_empty")
-                and _STATUS_INQUIRY_RE.search(message_body or "")
-            ):
                 logging.warning(
-                    "[ORDER_AGENT] handoff to customer_service (empty_cart_status_query)"
+                    "[ORDER_AGENT] max iterations reached without respond() "
+                    "(executed=%s)",
+                    executed_tools,
                 )
-                tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+
+            if envelope is None:
+                # Either the model never called respond, or we hit max
+                # iterations. Fall back to a chat envelope using the
+                # model's last text as summary so the renderer has
+                # something grounded to work with.
+                envelope = {
+                    "kind": "chat",
+                    "summary": last_model_text or "Listo.",
+                    "facts": [],
+                }
+
+            # Sanity guards on impossible envelopes — the model
+            # occasionally emits ready_to_confirm/order_placed in
+            # contexts where they make no sense, e.g. after
+            # place_order clears the cart and a follow-up message gets
+            # mis-routed back to order. Without these guards the
+            # renderer happily produces a phantom confirm card from
+            # leftover customer-DB data, confusing the customer
+            # ("ya no estaba confirmado?").
+            envelope = _guard_impossible_envelope(
+                envelope=envelope,
+                cart_was_empty_at_turn_start=not cart_has_items,
+                tool_outputs=tool_outputs,
+                wa_id=wa_id,
+            )
+
+            # Out-of-zone delivery → handoff to CS. Mirror of the
+            # order_closed handoff pattern: order agent detects, CS
+            # builds the deterministic redirect message. Keeps subsequent
+            # turns ("ah ok gracias") in CS context where they belong.
+            handoff_payload = _maybe_out_of_zone_handoff(envelope)
+            if handoff_payload is not None:
+                # Disarm any stale confirm-flag so a later genuine confirm
+                # in CS handoff doesn't trip place_order.
+                if awaiting_confirmation:
+                    set_awaiting_confirmation(wa_id, str(business_id), False)
+                tracer.end_run(
+                    run_id, success=True,
+                    latency_ms=(time.time() - start_time) * 1000,
+                )
+                logging.warning(
+                    "[ORDER_AGENT] out_of_zone handoff → CS "
+                    "city=%s phone=%s",
+                    handoff_payload["context"].get("city"),
+                    handoff_payload["context"].get("phone"),
+                )
                 return {
                     "agent_type": self.agent_type,
                     "message": "",
                     "state_update": {},
-                    "handoff": {
-                        "to": "customer_service",
-                        "segment": message_body,
-                        "context": {"reason": "empty_cart_status_query"},
-                    },
+                    "handoff": handoff_payload,
                 }
 
-            # 3) Response generator.
-            # Pure greetings are handled upstream by the router fast-path
-            # (see app/services/business_greeting.py) and never reach this agent.
-            result_kind = exec_result.get("result_kind", "")
-
-            # Confirm-order CTA short-circuit. When all delivery data is
-            # present AND the business has a Twilio Content Template
-            # configured, send a button card ("Confirmar pedido" /
-            # "Cambiar algo") instead of the plain-text "¿Procedemos o
-            # quieres cambiar algo?" prompt. Reduces the friction that
-            # caused Yisela's 48-min silence (Biela / 3015349690,
-            # 2026-05-06) — one tap vs. typing a confirmation. Falls back
-            # to the LLM path on any failure or when the SID isn't set.
-            if result_kind == RESULT_KIND_DELIVERY_STATUS:
-                try:
-                    from ..services.order_cta import cta_confirm_order_payload
-                    cta = cta_confirm_order_payload(
-                        business_context, exec_result.get("delivery_status"),
-                    )
-                except Exception as exc:
-                    logging.warning(
-                        "[ORDER_AGENT] cta_confirm_order_payload raised: %s", exc,
-                    )
-                    cta = None
-                if cta is not None:
-                    try:
-                        from ..utils.whatsapp_utils import send_twilio_cta
-                        sent = send_twilio_cta(
-                            content_sid=cta["content_sid"],
-                            variables=cta["variables"],
-                            to=wa_id,
-                            business_context=business_context,
-                        )
-                    except Exception as exc:
-                        logging.error(
-                            "[ORDER_AGENT] confirm CTA send raised: %s", exc,
-                        )
-                        sent = None
-                    if sent is not None:
-                        try:
-                            conversation_service.store_conversation_message(
-                                wa_id=wa_id,
-                                message=cta["rendered_body"],
-                                role="assistant",
-                                business_id=str(business_id),
-                            )
-                        except Exception as exc:
-                            logging.error(
-                                "[ORDER_AGENT] confirm CTA persist failed: %s", exc,
-                            )
-                        logging.warning(
-                            "[ORDER_AGENT] confirm step sent via CTA Content Template",
-                        )
-                        tracer.end_run(
-                            run_id, success=True,
-                            latency_ms=(time.time() - start_time) * 1000,
-                        )
-                        return {
-                            "agent_type": self.agent_type,
-                            "message": "__SUPPRESS_SEND__",
-                            "state_update": {"active_agents": ["order"]},
-                        }
-                    logging.warning(
-                        "[ORDER_AGENT] confirm CTA send failed — falling back to LLM prompt",
-                    )
-
-            response_system, resp_input = self._build_response_prompt(
-                result_kind=result_kind,
-                exec_result=exec_result,
-                message_body=message_body,
+            rendered = render_response(
+                envelope,
                 business_context=business_context,
-                cart_summary_after=cart_summary_after,
-                latest_order_status=latest_status,
+                last_user_message=message_body,
+                wa_id=wa_id,
+                tool_outputs=tool_outputs,
             )
-            response_messages = [
-                SystemMessage(content=response_system),
-                HumanMessage(content=resp_input + "\n\nResponde al cliente en español colombiano, breve y natural:"),
-            ]
-            response_llm = self.llm.invoke(
-                response_messages,
-                config={
-                    "run_name": "order_response",
-                    "metadata": {
-                        "wa_id": wa_id,
-                        "business_id": str(business_id),
-                        "turn_id": message_id or "",
-                        "intent": intent,
-                        "result_kind": result_kind,
-                        "run_id": run_id,
-                    },
-                },
+
+            logging.warning(
+                "[ORDER_TURN] wa_id=%s turn_id=%s tools=%s iterations=%d "
+                "envelope_kind=%s response_type=%s latency_ms=%d",
+                wa_id,
+                message_id or "-",
+                "|".join(executed_tools) or "-",
+                iteration + 1,
+                envelope.get("kind"),
+                rendered.get("type"),
+                int((time.time() - start_time) * 1000),
             )
-            final_response_text = response_llm.content if hasattr(response_llm, "content") else str(response_llm)
-            final_response_text = (final_response_text or "").strip() or "Listo. ¿En qué más puedo ayudarte?"
 
-            conversation_service.store_conversation_message(wa_id, final_response_text, "assistant", business_id=business_id)
+            envelope_kind = (envelope.get("kind") or "").strip()
+            is_confirm_prompt = envelope_kind == "ready_to_confirm"
 
-            tracer.end_run(run_id, success=True, latency_ms=(time.time() - start_time) * 1000)
+            # Dispatch CTA directly via Twilio when the renderer asked
+            # for one. We persist the rendered_body so the inbox UI and
+            # planner history match what the customer actually saw.
+            if rendered.get("type") == "cta":
+                cta_sent = self._dispatch_cta(
+                    wa_id=wa_id,
+                    business_context=business_context,
+                    rendered=rendered,
+                )
+                if cta_sent:
+                    # Arm the state-machine interlock: place_order now
+                    # refuses unless the next inbound turn is the user
+                    # responding to this prompt.
+                    set_awaiting_confirmation(wa_id, str(business_id), True)
+                    self._persist(wa_id, business_id, rendered.get("body", ""))
+                    tracer.end_run(
+                        run_id, success=True,
+                        latency_ms=(time.time() - start_time) * 1000,
+                    )
+                    return {
+                        "agent_type": self.agent_type,
+                        "message": "__SUPPRESS_SEND__",
+                        "state_update": {"active_agents": ["order"]},
+                    }
+                logging.warning(
+                    "[ORDER_AGENT] CTA send failed — falling back to text body"
+                )
+                # Fall through to text path with the rendered body.
 
-            # state_update: if place_order cleared context, don't overwrite; else keep order agent active
-            state_update = {"active_agents": ["order"]}
-            if intent == "PLACE_ORDER" and success:
-                state_update = {}
+            final_text = (rendered.get("body") or "").strip() or "Listo."
 
+            # Symmetric flag write: arm on ready_to_confirm, clear on
+            # everything else. Without this, a "no, cambia a Nequi" reply
+            # leaves the flag stuck on True, and the next genuine
+            # ready_to_confirm gets bypassed (or worse, place_order runs
+            # without a fresh prompt).
+            if is_confirm_prompt:
+                set_awaiting_confirmation(wa_id, str(business_id), True)
+            elif awaiting_confirmation:
+                # Flag was on but this turn produced a different envelope
+                # — disarm so the next confirm prompt re-arms cleanly.
+                set_awaiting_confirmation(wa_id, str(business_id), False)
+
+            self._persist(wa_id, business_id, final_text)
+            tracer.end_run(
+                run_id, success=True,
+                latency_ms=(time.time() - start_time) * 1000,
+            )
             return {
                 "agent_type": self.agent_type,
-                "message": final_response_text,
-                "state_update": state_update,
+                "message": final_text,
+                "state_update": {"active_agents": ["order"]},
             }
 
-        except Exception as e:
-            logging.exception("[ORDER_AGENT] Error: %s", e)
-            tracer.end_run(run_id, success=False, error=str(e), latency_ms=(time.time() - start_time) * 1000)
+        except Exception as exc:
+            logging.exception("[ORDER_AGENT] error: %s", exc)
+            tracer.end_run(
+                run_id, success=False, error=str(exc),
+                latency_ms=(time.time() - start_time) * 1000,
+            )
             return {
                 "agent_type": self.agent_type,
                 "message": "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo?",
                 "state_update": {},
             }
+        finally:
+            reset_tool_context(token)
+
+    # ── Internals ────────────────────────────────────────────────────
+
+    def _persist(self, wa_id: str, business_id: str, text: str) -> None:
+        if not text:
+            return
+        try:
+            conversation_service.store_conversation_message(
+                wa_id, text, "assistant", business_id=business_id,
+            )
+        except Exception as exc:
+            logging.error("[ORDER_AGENT] persist failed: %s", exc)
+
+    def _dispatch_cta(
+        self,
+        *,
+        wa_id: str,
+        business_context: Optional[Dict],
+        rendered: Dict[str, Any],
+    ) -> bool:
+        """Send a Twilio Content Template. Returns True on success."""
+        content_sid = rendered.get("content_sid") or ""
+        variables = rendered.get("variables") or {}
+        if not content_sid:
+            return False
+        try:
+            from ..utils.whatsapp_utils import send_twilio_cta
+            sent = send_twilio_cta(
+                content_sid=content_sid,
+                variables=variables,
+                to=wa_id,
+                business_context=business_context,
+            )
+            return sent is not None
+        except Exception as exc:
+            logging.error("[ORDER_AGENT] CTA dispatch raised: %s", exc)
+            return False
+
+    def _build_system_prompt(self, business_context: Optional[Dict]) -> str:
+        from ..services.business_info_service import format_business_info_for_prompt
+        biz_info = format_business_info_for_prompt(business_context)
+        biz = (business_context or {}).get("business") or {}
+        biz_name = (biz.get("name") or "el restaurante").strip()
+        return _SYSTEM_PROMPT_TEMPLATE.format(
+            business_name=biz_name,
+            business_info=biz_info,
+        )
+
+    def _build_initial_messages(
+        self,
+        business_context: Optional[Dict],
+        conversation_history: List[Dict],
+        message_body: str,
+        turn_ctx: Optional["TurnContext"] = None,
+    ) -> List[Any]:
+        if turn_ctx is None:
+            turn_ctx = TurnContext()
+
+        messages: List[Any] = [
+            SystemMessage(content=self._build_system_prompt(business_context))
+        ]
+
+        # Unified context block — same wording every layer (router /
+        # order / CS) sees. Includes order_state, cart contents,
+        # delivery info already on file, awaiting_confirmation flag,
+        # latest order status, and recent history. The model uses this
+        # to understand "what's already done" so it doesn't redundantly
+        # re-issue tools that target state that already matches.
+        messages.append(
+            SystemMessage(content=(
+                "===== ESTADO Y HISTORIAL DEL TURNO =====\n"
+                "(lo que YA pasó antes de este turno; NO repitas "
+                "operaciones que ya están reflejadas aquí)\n\n"
+                + render_for_prompt(turn_ctx)
+                + "\n===== FIN DEL ESTADO ====="
+            ))
+        )
+
+        # Behavioral hint when ready_to_confirm is armed. State above
+        # tells the model "Esperando confirmación: SÍ" — this block tells
+        # it what to *do* with that state. Kept separate from context so
+        # behavioral guidance doesn't get confused with state.
+        if turn_ctx.awaiting_confirmation:
+            messages.append(
+                SystemMessage(content=(
+                    "ACCIÓN ESPERADA: En el turno anterior YA enviaste al "
+                    "cliente la tarjeta/mensaje de confirmación. "
+                    "- Si el mensaje del cliente es afirmativo "
+                    "(\"Confirmar pedido\", \"si\", \"sí\", \"dale\", \"ok\", "
+                    "\"listo\", \"confirma\", \"confirmo\", \"perfecto\"): "
+                    "llama place_order DIRECTAMENTE. NO llames "
+                    "respond(kind='ready_to_confirm') de nuevo — eso "
+                    "enviaría una segunda tarjeta y confundiría al cliente. "
+                    "- Si el cliente pide cambios, agrega items, o quiere "
+                    "modificar datos: maneja la solicitud y NO uses "
+                    "kind='ready_to_confirm' en este turno — el sistema "
+                    "lo re-armará cuando vuelvas a estar listo."
+                ))
+            )
+
+        # NOTE: We intentionally do NOT append `recent_history` as
+        # individual HumanMessage/AIMessage objects here. The history
+        # is rendered inside render_for_prompt above (labeled with
+        # "usuario:" / "bot:" prefixes), so the model sees it as
+        # context in the SystemMessage. This avoids the
+        # "history-vs-current-turn" ambiguity where the model
+        # re-processes prior user messages as if they were the current
+        # input. Only the current turn appears as a HumanMessage.
+        #
+        # Operator-typed messages are visible inside the rendered
+        # history block with the "operador (humano)" label.
+
+        # Current turn — explicitly labeled so the model can never
+        # confuse it with history. Even though it's the only
+        # HumanMessage, the explicit marker makes the boundary
+        # unmistakable when the model parses the prompt.
+        messages.append(
+            HumanMessage(content=(
+                "[MENSAJE ACTUAL DEL CLIENTE — procesa SOLO este "
+                "mensaje en este turno; los mensajes anteriores en "
+                "CONTEXTO DEL TURNO son historial]\n\n"
+                + message_body
+            ))
+        )
+        return messages
+
+
+def _unpack_tool_call(tc: Any) -> Tuple[str, Dict[str, Any], str]:
+    """Normalize a tool_call entry from a ChatOpenAI response."""
+    if isinstance(tc, dict):
+        return tc.get("name", ""), tc.get("args") or {}, tc.get("id", "")
+    return (
+        getattr(tc, "name", ""),
+        getattr(tc, "args", None) or {},
+        getattr(tc, "id", ""),
+    )
+
+
+def _replace_history(
+    ctx: "TurnContext", conversation_history: List[Dict],
+) -> "TurnContext":
+    """Return a copy of ``ctx`` with ``recent_history`` populated from
+    a caller-supplied list of message dicts. Mirrors
+    ``build_turn_context``'s history shaping (operator-remap, last 10).
+    """
+    from dataclasses import replace
+    rendered: List[Tuple[str, str]] = []
+    for entry in (conversation_history or [])[-10:]:
+        role = (entry.get("role") or "").strip().lower()
+        msg = (entry.get("content") or entry.get("message") or "").strip()
+        if not role or not msg:
+            continue
+        agent_type = (entry.get("agent_type") or "").strip().lower()
+        if role == "assistant" and agent_type == "operator":
+            role = "operator"
+        rendered.append((role, msg))
+    last_assistant = ""
+    for r, m in reversed(rendered):
+        if r == "assistant":
+            last_assistant = m
+            break
+    return replace(
+        ctx,
+        recent_history=tuple(rendered),
+        last_assistant_message=last_assistant or ctx.last_assistant_message,
+    )
+
+
+def _read_cart_snapshot(wa_id: str, business_id: str) -> str:
+    """Render the current cart as a compact, model-readable snapshot.
+
+    Returns a few lines like:
+        - 1x BARRACUDA - $28.000
+        - 2x COCA-COLA - $11.000
+        Subtotal: $39.000
+
+    Empty string when there's nothing in the cart — the caller skips
+    the runtime hint in that case so we don't waste prompt tokens on
+    an empty section.
+    """
+    if not wa_id or not business_id:
+        return ""
+    try:
+        from ..database.session_state_service import session_state_service
+        from ..services import promotion_service
+        from ..services.order_tools import _format_cart_display_lines, _format_price
+
+        result = session_state_service.load(wa_id, business_id) or {}
+        oc = (result.get("session") or {}).get("order_context") or {}
+        items = oc.get("items") or []
+        # Diagnostic: log the raw read so we can tell whether an empty
+        # snapshot is "DB has nothing" vs "exception swallowed". Cheap
+        # log, runs once per turn at start.
+        logging.warning(
+            "[ORDER_AGENT_DIAG] cart_read wa_id=%s items_count=%d "
+            "state=%s delivery_present=%s",
+            wa_id,
+            len(items),
+            oc.get("state"),
+            bool((oc.get("delivery_info") or {}).get("address")),
+        )
+        if not items:
+            return ""
+        preview = promotion_service.preview_cart(business_id, items)
+        lines = _format_cart_display_lines(preview["display_groups"])
+        subtotal = preview.get("subtotal") or 0
+        return "\n".join(lines + [f"Subtotal: {_format_price(subtotal)}"])
+    except Exception as exc:
+        logging.warning("[ORDER_AGENT] cart snapshot read failed: %s", exc)
+        return ""
+
+
+def _diag_cart_size(wa_id: str, business_id: str) -> int:
+    """Count items in the canonical cart, for post-tool diagnostic logs."""
+    if not wa_id or not business_id:
+        return -1
+    try:
+        from ..database.session_state_service import session_state_service
+        result = session_state_service.load(wa_id, business_id) or {}
+        oc = (result.get("session") or {}).get("order_context") or {}
+        items = oc.get("items") or []
+        return len(items)
+    except Exception:
+        return -1
+
+
+def _guard_impossible_envelope(
+    envelope: Dict[str, Any],
+    cart_was_empty_at_turn_start: bool,
+    tool_outputs: Dict[str, str],
+    wa_id: str,
+) -> Dict[str, Any]:
+    """Override envelopes that don't match the actual turn outcome.
+
+    Two failure modes this catches:
+
+    1. ``ready_to_confirm`` with no cart at turn start — happens when
+       the router sends a non-order follow-up to v2 after a placed
+       order. The renderer would otherwise build a "phantom" confirm
+       card from leftover customer-DB data, confusing the customer.
+
+    2. ``order_placed`` without a successful ``place_order`` tool
+       result — happens when the model emits the kind after a guard
+       refusal or other tool failure. Surfacing a fake receipt here
+       is far worse than admitting the failure.
+
+    Both get downgraded to ``chat`` with a helpful summary so the
+    renderer produces a reasonable text response instead.
+    """
+    kind = (envelope.get("kind") or "").strip()
+
+    if kind == "ready_to_confirm" and cart_was_empty_at_turn_start:
+        # Detect the multi-intent failure mode: model saved delivery info
+        # this turn (e.g. switched to pickup, captured a name) but never
+        # called add_to_cart, so the confirm card would be for a phantom
+        # order. Steer the chat reply toward "I have your data, what do
+        # you want to order?" instead of the generic "no active order".
+        sdi_output = (tool_outputs or {}).get("submit_delivery_info", "") or ""
+        delivery_just_saved = "✅" in sdi_output and "Datos guardados" in sdi_output
+        logging.warning(
+            "[ORDER_AGENT] override_envelope kind=ready_to_confirm→chat "
+            "reason=cart_empty wa_id=%s delivery_just_saved=%s",
+            wa_id, delivery_just_saved,
+        )
+        if delivery_just_saved:
+            summary = (
+                "Caso especial: el cliente acaba de darte datos (modo de "
+                "entrega y/o nombre) pero el carrito está vacío — el "
+                "agente probablemente perdió el producto del mensaje "
+                "multi-intención. Reconoce los datos guardados (si dijo "
+                "su nombre, salúdalo por nombre) y pídele que te diga qué "
+                "quiere pedir. NO emitas pregunta de confirmación, NO "
+                "menciones \"pedido\" como si ya existiera. Tono: cálido, "
+                "1-2 oraciones."
+            )
+        else:
+            summary = (
+                "El cliente envió un mensaje pero no hay un pedido activo "
+                "(carrito vacío). Si pareces ver intención de ordenar, "
+                "invítalo a decir qué quiere; si es una pregunta general "
+                "(p.ej. sobre pagos, horarios, un pedido pasado), "
+                "respóndele directamente sin pedir confirmación."
+            )
+        return {
+            "kind": "chat",
+            "summary": summary,
+            "facts": envelope.get("facts") or [],
+        }
+
+    if kind == "order_placed":
+        place_order_output = (tool_outputs or {}).get("place_order", "") or ""
+        if "✅" not in place_order_output:
+            logging.warning(
+                "[ORDER_AGENT] override_envelope kind=order_placed→%s "
+                "reason=no_successful_place_order wa_id=%s output=%r",
+                "error" if place_order_output else "chat",
+                wa_id,
+                place_order_output[:120],
+            )
+            new_kind = "error" if place_order_output else "chat"
+            summary = (
+                place_order_output[:300]
+                if place_order_output
+                else "El pedido no se confirmó. Pide al cliente que lo intente de nuevo."
+            )
+            return {
+                "kind": new_kind,
+                "summary": summary,
+                "facts": envelope.get("facts") or [],
+            }
+
+    return envelope
+
+
+def _maybe_out_of_zone_handoff(envelope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """If the envelope is an ``out_of_zone:<city>`` redirect, return a
+    dispatcher-style handoff payload pointing at customer_service with
+    ``reason='out_of_zone'`` plus city/phone in context. Returns ``None``
+    when the envelope isn't an out-of-zone redirect.
+
+    The CS agent has a deterministic fast-path for this reason that
+    builds the polished redirect message — no LLM, no hallucination.
+    """
+    kind = (envelope.get("kind") or "").strip()
+    summary = (envelope.get("summary") or "").strip()
+    if kind != "out_of_scope" or not summary.startswith("out_of_zone:"):
+        return None
+    city = summary[len("out_of_zone:"):].strip()
+    phone = ""
+    for fact in envelope.get("facts") or []:
+        if not isinstance(fact, str):
+            continue
+        f = fact.strip()
+        if f.lower().startswith("phone:"):
+            phone = f.split(":", 1)[1].strip()
+        elif f.lower().startswith("city:") and not city:
+            city = f.split(":", 1)[1].strip()
+    if not city or not phone:
+        return None
+    return {
+        "to": "customer_service",
+        "segment": f"[OUT_OF_ZONE] {city}",
+        "context": {
+            "reason": "out_of_zone",
+            "city": city,
+            "phone": phone,
+        },
+    }
+
+
+def _envelope_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Lift the respond() args into a normalized envelope dict."""
+    args = args or {}
+    facts = args.get("facts")
+    if facts is None:
+        facts = []
+    elif not isinstance(facts, list):
+        facts = [str(facts)]
+    return {
+        "kind": (args.get("kind") or "chat").strip(),
+        "summary": (args.get("summary") or "").strip(),
+        "facts": [str(f) for f in facts],
+    }

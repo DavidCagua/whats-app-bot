@@ -94,17 +94,15 @@ class TestGetBusinessInfo:
     def test_delivery_fee_default_matches_order_side(self):
         """The constant CS uses must equal the constant the order side
         falls back to, otherwise receipts would charge X but CS would
-        say Y. Pin the value so a future refactor that splits them
-        breaks the test loudly."""
+        say Y. (The legacy ``order_flow._get_delivery_fee`` mirror was
+        removed when v1 was deleted — only ``order_tools._get_delivery_fee``
+        remains as the order-side source.)"""
         from app.services.order_tools import _get_delivery_fee as order_fee
-        from app.orchestration.order_flow import _get_delivery_fee as flow_fee
-        # No business_context → both fall back to the same default.
+        # No business_context → fall back to the documented default.
         assert order_fee(None) == float(bis.DELIVERY_FEE_DEFAULT)
-        assert flow_fee(None) == float(bis.DELIVERY_FEE_DEFAULT)
         # Empty settings → same default again.
         empty_ctx = {"business": {"settings": {}}}
         assert order_fee(empty_ctx) == float(bis.DELIVERY_FEE_DEFAULT)
-        assert flow_fee(empty_ctx) == float(bis.DELIVERY_FEE_DEFAULT)
 
     def test_menu_url(self):
         result = bis.get_business_info(_ctx({"menu_url": "https://x.test"}), "menu_url")

@@ -124,13 +124,13 @@ def _run_v2_turn(
     initial_order_context: dict = None,
     conversation_history: list = None,
 ):
-    """Drive one turn through the real v2 OrderAgentToolCalling.
+    """Drive one turn through the real v2 OrderAgent.
 
     The LLM is NOT mocked — this calls OpenAI. Returns the AgentOutput
     plus the post-turn order_context so assertions can read both the
     user-facing reply and the resulting state.
     """
-    from app.agents.order_agent_tool_calling import OrderAgentToolCalling
+    from app.agents.order_agent import OrderAgent
     from contextlib import ExitStack
 
     if initial_order_context is not None:
@@ -140,15 +140,15 @@ def _run_v2_turn(
             {"order_context": initial_order_context},
         )
 
-    agent = OrderAgentToolCalling()
+    agent = OrderAgent()
     with ExitStack() as stack:
         for cm in _patch_catalog_and_services(fake_session):
             stack.enter_context(cm)
         stack.enter_context(patch(
-            "app.agents.order_agent_tool_calling.conversation_service.store_conversation_message",
+            "app.agents.order_agent.conversation_service.store_conversation_message",
         ))
         stack.enter_context(patch(
-            "app.agents.order_agent_tool_calling.tracer",
+            "app.agents.order_agent.tracer",
         ))
         out = agent.execute(
             message_body=user_message,

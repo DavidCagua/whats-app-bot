@@ -36,11 +36,11 @@ from . import promotion_service
 
 def _turn_cache():
     """
-    Lazy import of the per-turn cache. order_tools is imported from
-    app.orchestration.order_flow at module-load time, which would make
-    a top-level `from ..orchestration import turn_cache` trigger the
-    orchestration package __init__ before it's ready. Defer the import
-    to first call; Python caches the module so it's ~free.
+    Lazy import of the per-turn cache. ``order_tools`` is loaded early
+    by the agent module; a top-level ``from ..orchestration import
+    turn_cache`` would trigger the orchestration package __init__ before
+    it's ready. Defer the import to first call; Python caches the module
+    so it's effectively free.
     """
     from ..orchestration import turn_cache as tc
     return tc.current()
@@ -206,8 +206,6 @@ def _allowed_payment_methods(injected_business_context: Optional[Dict]) -> List[
 
     Returns ``[]`` when the business has no list configured — caller
     treats that as "no enforcement" (accept any string verbatim).
-    Mirrors ``order_flow._get_allowed_payment_methods`` so v2 and
-    legacy share the same source of truth.
     """
     ctx = injected_business_context or _tool_business_context.get() or {}
     settings = (ctx.get("business") or {}).get("settings") or {}
@@ -225,9 +223,6 @@ def _match_payment_method(value: str, allowed: List[str]) -> Optional[str]:
     ``allowed`` on a hit, ``None`` on no match. Empty ``allowed``
     means "no enforcement" → returns ``None`` so the caller falls
     back to the raw value.
-
-    Mirrors the legacy ``order_flow._normalize_payment_method`` matcher
-    so legacy and v2 normalize the same way.
     """
     if not value or not allowed:
         return None
@@ -336,27 +331,25 @@ def _cart_from_session(wa_id: str, business_id: str) -> Dict:
 
 def _save_cart(wa_id: str, business_id: str, cart: Dict) -> None:
     """
-    Save cart to session order_context with state resolution.
+    Save cart to session order_context. State is always derived from
+    the merged cart contents (items + delivery_info + fulfillment_type).
 
-    State resolution:
-    - If the caller explicitly set ``state`` in ``cart`` (legacy
-      executor's state machine), respect it — legacy advances
-      COLLECTING_DELIVERY etc. that we can't infer from contents alone.
-    - Otherwise (v2 tool-calling agent), compute state from the merged
-      items + delivery_info. This way every cart mutation auto-advances
-      state — without each tool having to remember to do it.
+    Single source of truth: state is a function of cart contents, not
+    an independent field. Every mutation re-derives it via
+    ``_compute_order_state`` so it cannot drift away from what the cart
+    actually holds. Any ``state`` value the caller passes in is
+    overwritten — there is no longer a legacy executor with its own
+    state machine to defer to.
     """
     if not wa_id or not business_id:
         return
-    explicit_state = cart.get("state") is not None
-    existing = _cart_from_session(wa_id, business_id) if not explicit_state else {}
+    existing = _cart_from_session(wa_id, business_id)
     merged = {**existing, **cart}
-    if not explicit_state:
-        merged["state"] = _compute_order_state(
-            merged.get("items") or [],
-            merged.get("delivery_info") or {},
-            merged.get("fulfillment_type") or "delivery",
-        )
+    merged["state"] = _compute_order_state(
+        merged.get("items") or [],
+        merged.get("delivery_info") or {},
+        merged.get("fulfillment_type") or "delivery",
+    )
     session_state_service.save(wa_id, business_id, {"order_context": merged})
     # Drop the per-turn cached session so the next _cart_from_session in
     # this turn refetches and sees the merged state.
@@ -1325,26 +1318,19 @@ def place_order(injected_business_context: Annotated[dict, InjectedToolArg]) -> 
         # the *prior* turn when it emits respond(kind='ready_to_confirm').
         # On this turn the guard ensures the user is actually responding
         # to that prompt (not that the model jumped ahead).
-        # Bypass: when called from the legacy executor (which has its
-        # own state machine), a session flag is not used and the legacy
-        # caller passes injected_business_context.legacy_bypass=true.
-        legacy_bypass = bool(
-            (injected_business_context or {}).get("legacy_bypass")
+        awaiting = bool(
+            (cart.get("awaiting_confirmation")
+             if isinstance(cart, dict) else False)
+            or _read_awaiting_confirmation(wa_id, business_id)
         )
-        if not legacy_bypass:
-            awaiting = bool(
-                (cart.get("awaiting_confirmation")
-                 if isinstance(cart, dict) else False)
-                or _read_awaiting_confirmation(wa_id, business_id)
+        if not awaiting:
+            return (
+                "❌ El cliente todavía no ha confirmado el pedido. "
+                "Llama respond(kind='ready_to_confirm') en este turno "
+                "para mostrar la tarjeta de confirmación; el cliente "
+                "responderá en el próximo turno y entonces sí podrás "
+                "llamar place_order."
             )
-            if not awaiting:
-                return (
-                    "❌ El cliente todavía no ha confirmado el pedido. "
-                    "Llama respond(kind='ready_to_confirm') en este turno "
-                    "para mostrar la tarjeta de confirmación; el cliente "
-                    "responderá en el próximo turno y entonces sí podrás "
-                    "llamar place_order."
-                )
 
         # Validate cart: each item must have product_id, name, price, quantity (from session only)
         for i, it in enumerate(items):
@@ -1632,8 +1618,7 @@ order_tools = [
 # customer_service. Browse / read-only tools (get_menu_categories,
 # list_category_products, search_products, get_product_details,
 # view_cart, get_customer_info) are intentionally NOT in this set —
-# customers can still read the menu while the shop is closed. Mirrors
-# v1's ``order_flow.ORDER_MUTATING_INTENTS``.
+# customers can still read the menu while the shop is closed.
 MUTATING_TOOL_NAMES = frozenset({
     "add_to_cart",
     "add_promo_to_cart",

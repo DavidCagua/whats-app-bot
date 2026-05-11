@@ -1,14 +1,15 @@
 """
-Unit tests for the v2 (tool-calling) order agent's availability gate.
+Unit tests for the tool-calling order agent's availability gate.
 
-Mirror of v1's behavior in
-``app/orchestration/order_flow.ORDER_MUTATING_INTENTS`` — when the
-business is closed (no ``business_availability`` row covers the current
-Bogotá time), mutating tool calls (add_to_cart, place_order, etc.) are
-intercepted and the turn hands off to ``customer_service`` with
-``reason='order_closed'``. Browse / read-only tools (menu lookups,
-product search, view_cart, get_customer_info) pass through so
-customers can still read the menu while the shop is closed.
+When the business is closed (no ``business_availability`` row covers
+the current Bogotá time), mutating tool calls (add_to_cart, place_order,
+etc.) are intercepted and the turn hands off to ``customer_service``
+with ``reason='order_closed'``. Browse / read-only tools (menu lookups,
+product search, view_cart, get_customer_info) pass through so customers
+can still read the menu while the shop is closed.
+
+``MUTATING_TOOL_NAMES`` in ``app/services/order_tools.py`` is the
+canonical mutating-tool allowlist the agent consults at gate-close time.
 
 Coverage:
 - ``MUTATING_TOOL_NAMES`` is the canonical set the v2 agent reads.
@@ -26,7 +27,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from app.agents.order_agent_tool_calling import OrderAgentToolCalling
+from app.agents.order_agent import OrderAgent
 from app.orchestration.turn_context import TurnContext
 
 
@@ -49,7 +50,7 @@ def _ai_with_tools(tool_calls):
 
 
 def _stub_turn_context(**overrides):
-    """Minimal TurnContext for tests, mirrors test_order_agent_tool_calling
+    """Minimal TurnContext for tests, mirrors test_order_agent
     so we can patch ``build_turn_context`` to return a deterministic
     snapshot."""
     has_active_cart = overrides.pop("has_active_cart", False)
@@ -124,14 +125,14 @@ class TestGateClosedBlocksMutating:
         post-LLM blocked_intents — order openers like "quiero una
         barracuda" can now slip the planner without calling a mutating
         tool, so the only reliable gate is the pre-LLM short-circuit."""
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         llm = MagicMock()
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(),
              ), \
              patch(
@@ -156,18 +157,18 @@ class TestGateClosedBlocksMutating:
         assert ctx.get("has_active_cart") is False
 
     def test_place_order_blocked_returns_handoff(self):
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         only = _ai_with_tools([{
             "name": "place_order", "args": {}, "id": "c1", "type": "tool_call",
         }])
         llm = MagicMock()
         llm.invoke.return_value = only
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(has_active_cart=True),
              ), \
              patch(
@@ -192,7 +193,7 @@ class TestGateClosedBlocksMutating:
         The in-loop gate is the safety net here and it lists every
         mutating tool emitted that turn so the CS message references
         all of them."""
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         only = _ai_with_tools([
             {"name": "add_to_cart", "args": {"product_name": "X"},
              "id": "c1", "type": "tool_call"},
@@ -203,11 +204,11 @@ class TestGateClosedBlocksMutating:
         llm = MagicMock()
         llm.invoke.return_value = only
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(has_active_cart=True),
              ), \
              patch(
@@ -230,18 +231,18 @@ class TestGateClosedBlocksMutating:
     def test_awaiting_confirmation_is_disarmed_on_gate_block(self):
         """If a stale confirm flag is set when the gate fires, it must
         be cleared so the eventual CS follow-up doesn't trip place_order."""
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         only = _ai_with_tools([{
             "name": "place_order", "args": {}, "id": "c1", "type": "tool_call",
         }])
         llm = MagicMock()
         llm.invoke.return_value = only
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(
                      has_active_cart=True, awaiting_confirmation=True,
                  ),
@@ -251,7 +252,7 @@ class TestGateClosedBlocksMutating:
                  return_value=_GATE_CLOSED,
              ), \
              patch(
-                 "app.agents.order_agent_tool_calling.set_awaiting_confirmation",
+                 "app.agents.order_agent.set_awaiting_confirmation",
              ) as set_flag:
             agent.execute(
                 message_body="sí",
@@ -274,7 +275,7 @@ class TestGateClosedAllowsBrowseWithActiveCart:
     inspect what they have and read the menu while waiting to reopen."""
 
     def test_view_cart_runs_normally_with_active_cart_on_closed_shop(self):
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         first = _ai_with_tools([{
             "name": "view_cart", "args": {}, "id": "c1", "type": "tool_call",
         }])
@@ -286,11 +287,11 @@ class TestGateClosedAllowsBrowseWithActiveCart:
         llm = MagicMock()
         llm.invoke.side_effect = [first, second]
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(has_active_cart=True),
              ), \
              patch(
@@ -298,7 +299,7 @@ class TestGateClosedAllowsBrowseWithActiveCart:
                  return_value=_GATE_CLOSED,
              ), \
              patch(
-                 "app.agents.order_agent_tool_calling.render_response",
+                 "app.agents.order_agent.render_response",
                  return_value={"type": "text", "body": "Tu carrito tiene 1 ítem."},
              ):
             output = agent.execute(
@@ -313,7 +314,7 @@ class TestGateClosedAllowsBrowseWithActiveCart:
         assert "ítem" in output.get("message", "").lower() or "item" in output.get("message", "").lower()
 
     def test_search_products_runs_normally_with_active_cart_on_closed_shop(self):
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         first = _ai_with_tools([{
             "name": "search_products", "args": {"query": "barracuda"},
             "id": "c1", "type": "tool_call",
@@ -326,11 +327,11 @@ class TestGateClosedAllowsBrowseWithActiveCart:
         llm = MagicMock()
         llm.invoke.side_effect = [first, second]
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(has_active_cart=True),
              ), \
              patch(
@@ -338,7 +339,7 @@ class TestGateClosedAllowsBrowseWithActiveCart:
                  return_value=_GATE_CLOSED,
              ), \
              patch(
-                 "app.agents.order_agent_tool_calling.render_response",
+                 "app.agents.order_agent.render_response",
                  return_value={"type": "text", "body": "BARRACUDA está en el menú"},
              ):
             output = agent.execute(
@@ -355,14 +356,14 @@ class TestGateClosedAllowsBrowseWithActiveCart:
         details encourages building a cart that fails at submit time
         (incident +573172908887, 2026-05-11). CS still answers menu
         URL on demand."""
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         llm = MagicMock()
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(),
              ), \
              patch(
@@ -388,7 +389,7 @@ class TestGateClosedAllowsBrowseWithActiveCart:
 
 class TestGateOpenOrDisabled:
     def test_gate_open_allows_mutating(self):
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         first = _ai_with_tools([{
             "name": "add_to_cart", "args": {"product_name": "X"},
             "id": "c1", "type": "tool_call",
@@ -401,11 +402,11 @@ class TestGateOpenOrDisabled:
         llm = MagicMock()
         llm.invoke.side_effect = [first, second]
 
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(),
              ), \
              patch(
@@ -413,7 +414,7 @@ class TestGateOpenOrDisabled:
                  return_value=_GATE_OPEN,
              ), \
              patch(
-                 "app.agents.order_agent_tool_calling.render_response",
+                 "app.agents.order_agent.render_response",
                  return_value={"type": "text", "body": "Listo"},
              ):
             output = agent.execute(
@@ -428,7 +429,7 @@ class TestGateOpenOrDisabled:
     def test_gate_disabled_via_settings_skips_compute(self):
         """``business.settings.order_gate_enabled = False`` opts out
         entirely. is_taking_orders_now must NOT be called."""
-        agent = OrderAgentToolCalling()
+        agent = OrderAgent()
         first = _ai_with_tools([{
             "name": "add_to_cart", "args": {"product_name": "X"},
             "id": "c1", "type": "tool_call",
@@ -442,11 +443,11 @@ class TestGateOpenOrDisabled:
         llm.invoke.side_effect = [first, second]
 
         gate_fn = MagicMock()
-        with patch.object(OrderAgentToolCalling, "llm", llm), \
-             patch("app.agents.order_agent_tool_calling.conversation_service"), \
-             patch("app.agents.order_agent_tool_calling.tracer"), \
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
              patch(
-                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 "app.agents.order_agent.build_turn_context",
                  return_value=_stub_turn_context(),
              ), \
              patch(
@@ -454,7 +455,7 @@ class TestGateOpenOrDisabled:
                  gate_fn,
              ), \
              patch(
-                 "app.agents.order_agent_tool_calling.render_response",
+                 "app.agents.order_agent.render_response",
                  return_value={"type": "text", "body": "Listo"},
              ):
             output = agent.execute(

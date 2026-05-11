@@ -1,759 +1,1674 @@
 """
-Unit tests for OrderAgent response-prompt building.
-Tests the branch logic in _build_response_prompt without any LLM or DB calls.
+Unit tests for OrderAgent — the chained tool-calling
+architecture (action agent + ``respond`` terminator + renderer).
+
+These tests mock the action-agent LLM AND the renderer LLM so we can
+drive specific tool_call sequences end-to-end and verify:
+  - ``respond(...)`` terminates the dispatch loop and the envelope is
+    handed to the renderer.
+  - The renderer's text body becomes the agent's final message.
+  - InjectedToolArg keeps ``injected_business_context`` out of the
+    model's tool schema.
+  - Tool exceptions become ToolMessages so the model can adapt.
+  - Operator-tagged history surfaces as a SystemMessage.
+  - Runaway loops cap out and synthesize a chat envelope.
+  - ``ready_to_confirm`` envelopes dispatch a Twilio CTA and return
+    ``__SUPPRESS_SEND__`` so the upstream sender skips the text path.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from app.agents.order_agent import OrderAgent, PLANNER_SYSTEM_TEMPLATE
-from app.orchestration.order_flow import (
-    CART_ACTION_ADDED,
-    RESULT_KIND_CART_CHANGE,
-    RESULT_KIND_ORDER_PLACED,
-    RESULT_KIND_PRODUCTS_LIST,
-)
+from app.agents.order_agent import OrderAgent
+from app.orchestration.turn_context import TurnContext
 
 
-class TestProductsListResponsePrompt:
-    """Verify the prompt instructions for RESULT_KIND_PRODUCTS_LIST."""
-
-    def _exec_result_with_descriptions(self):
-        return {
-            "products": [
-                {"name": "AL PASTOR", "price": 27000, "description": "Pan artesanal, 150gr carne, mozzarella, cerdo al pastor con piña, cebolla crispy, chipotle, papas."},
-                {"name": "AMERICANA", "price": 22000, "description": "Pan, carne, queso cheddar, tocineta, lechuga, tomate, papas."},
-                {"name": "ARRABBIATA", "price": 27000, "description": "Pan, carne, mozzarella, salsa arrabbiata picante, rúgula, papas."},
-                {"name": "BARRACUDA", "price": 28000, "description": "Doble carne, cheddar, tocineta, cebolla caramelizada, papas."},
-                {"name": "BETA", "price": 28000, "description": "Carne, queso azul, champiñones salteados, cebolla crispy, papas."},
-                {"name": "BIELA", "price": 28000, "description": "Carne, tocineta, huevo, cheddar, chipotle, papas."},
-                {"name": "BIMOTA", "price": 27000, "description": "Carne, mozzarella, pesto, rúgula, tomate seco, papas."},
-                {"name": "HONEY BURGER", "price": 28000, "description": "Carne, cheddar, tocineta, miel mostaza, cebolla caramelizada, papas."},
-            ],
-            "category_label": "HAMBURGUESAS",
-            "query_label": None,
-        }
-
-    def test_products_list_prompt_requires_descriptions_when_present(self):
-        """
-        Regression: when the category list has 8 burgers (>6) and each has a description,
-        the response system prompt must instruct the LLM to always include descriptions,
-        not summarize them away. Previously the rule said "si son muchos (>6), puedes
-        agrupar o resumir" which caused the bot to drop descriptions entirely.
-
-        With the 5-item cap, only the first 5 products are sent to the LLM
-        to keep WhatsApp messages readable. The remaining count is shown so
-        the LLM can tell the user there are more options.
-        """
-        agent = OrderAgent()
-        system, inp = agent._build_response_prompt(
-            result_kind=RESULT_KIND_PRODUCTS_LIST,
-            exec_result=self._exec_result_with_descriptions(),
-            message_body="qué hamburguesas tienes?",
-            business_context=None,
-            cart_summary_after="Pedido vacío.",
-        )
-
-        assert "INCLÚYELA SIEMPRE" in system, \
-            "Prompt must require always including descriptions when present"
-        assert "resumir" not in system, \
-            "Prompt must not allow summarizing descriptions away"
-
-        # First 5 products shown with descriptions
-        for name in ["AL PASTOR", "AMERICANA", "ARRABBIATA", "BARRACUDA", "BETA"]:
-            assert name in inp, f"Top-5 product must be in LLM input, missing: {name}"
-        assert "cebolla caramelizada" in inp, \
-            "Product descriptions must be passed to the LLM input"
-
-        # Remaining count communicated
-        assert "3 más" in inp, \
-            "LLM input must mention how many products are not shown"
-        assert "5 de 8" in inp, \
-            "LLM input must show X of Y products"
-
-    def test_products_list_prompt_without_descriptions_is_name_and_price_only(self):
-        """If products have no descriptions, the prompt still renders and just lists name+price."""
-        agent = OrderAgent()
-        exec_result = {
-            "products": [
-                {"name": "COCA COLA", "price": 5000, "description": None},
-                {"name": "AGUA", "price": 3000, "description": None},
-            ],
-            "category_label": "BEBIDAS",
-            "query_label": None,
-        }
-        system, inp = agent._build_response_prompt(
-            result_kind=RESULT_KIND_PRODUCTS_LIST,
-            exec_result=exec_result,
-            message_body="qué bebidas tienes?",
-            business_context=None,
-            cart_summary_after="Pedido vacío.",
-        )
-        assert "COCA COLA" in inp
-        assert "AGUA" in inp
-        assert "INCLÚYELA SIEMPRE" in system
+BIELA_CTX = {
+    "business_id": "biela",
+    "business": {"name": "Biela", "settings": {}},
+}
 
 
-class TestCartChangeResponsePromptDoesNotCrash:
-    """Regression: response prompt builders must not reference variables that
-    only exist in `execute()`. Crashes here surface as `❌ Error...` on the
-    customer's WhatsApp instead of the intended response.
+def _ai_with_tools(tool_calls):
+    """Convenience: build an AIMessage carrying the given tool_calls."""
+    return AIMessage(content="", tool_calls=tool_calls)
 
-    All preview_cart calls are stubbed because we don't want to hit the DB
-    from a unit test — the test is purely about the prompt's local-variable
-    bindings and template rendering.
+
+def _stub_turn_context(
+    has_active_cart=False,
+    cart_summary="",
+    awaiting_confirmation=False,
+    delivery_info=None,
+    order_state=None,
+):
+    """Build a TurnContext for tests so they don't hit the real DB.
+
+    Use as ``patch("app.agents.order_agent.build_turn_context",
+    return_value=_stub_turn_context(...))``.
     """
+    if order_state is None:
+        order_state = (
+            "READY_TO_PLACE"
+            if has_active_cart and (delivery_info or {}).get("payment_method")
+            else "ORDERING" if has_active_cart else "GREETING"
+        )
+    return TurnContext(
+        order_state=order_state,
+        has_active_cart=has_active_cart,
+        cart_summary=cart_summary,
+        delivery_info=delivery_info or {},
+        awaiting_confirmation=awaiting_confirmation,
+    )
 
-    def _stub_preview(self, items_count=2):
-        return {
-            "display_groups": [
-                {
-                    "kind": "promo_bundle",
-                    "promotion_name": "2 Honey Burger con papas",
-                    "promo_price": 30000.0,
-                    "discount_applied": 26000.0,
-                    "components": [
-                        {"name": "HONEY BURGER", "quantity": 2},
-                        {"name": "Papas", "quantity": 1},
+
+def _respond_call(kind, summary="", facts=None, call_id="resp_1"):
+    return {
+        "name": "respond",
+        "args": {"kind": kind, "summary": summary, "facts": facts or []},
+        "id": call_id,
+        "type": "tool_call",
+    }
+
+
+# ---------------------------------------------------------------------------
+# InjectedToolArg keeps business context out of the model schema
+# ---------------------------------------------------------------------------
+
+class TestToolSchema:
+    """``injected_business_context`` must NEVER appear in the JSON
+    schema sent to the model. Same constraint for the new ``respond``
+    tool — it has no business context arg at all."""
+
+    def test_no_action_tool_exposes_injected_business_context(self):
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+        from app.services.order_tools import order_tools
+        for t in order_tools:
+            spec = (
+                convert_to_openai_tool(t)
+                .get("function", {})
+                .get("parameters", {})
+                .get("properties", {})
+            )
+            assert "injected_business_context" not in spec, (
+                f"tool {t.name} exposes injected_business_context to the model"
+            )
+
+    def test_respond_tool_schema_is_minimal(self):
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+        from app.services.response_envelope import respond
+        spec = convert_to_openai_tool(respond).get("function", {})
+        props = spec.get("parameters", {}).get("properties", {})
+        assert set(props.keys()) == {"kind", "summary", "facts"}, (
+            f"respond schema unexpected: {set(props.keys())}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Single tool flow: action tool → respond → renderer text
+# ---------------------------------------------------------------------------
+
+class TestSingleToolFlow:
+    def test_data_tool_then_respond_calls_renderer(self):
+        """Most common shape: model emits view_cart, then respond. The
+        action loop captures the envelope; renderer turns it into text."""
+        agent = OrderAgent()
+
+        first = _ai_with_tools([{
+            "name": "view_cart", "args": {}, "id": "c1", "type": "tool_call",
+        }])
+        second = _ai_with_tools([_respond_call(
+            kind="cart_view",
+            summary="Cart shown",
+            facts=["Subtotal: $0"],
+        )])
+        llm = MagicMock()
+        llm.invoke.side_effect = [first, second]
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "Tu carrito está vacío. ¿Qué te provoca?"},
+             ) as render_mock:
+            output = agent.execute(
+                message_body="qué tengo en mi pedido",
+                wa_id="+573001234567",
+                name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        assert output["agent_type"] == "order"
+        assert "vacío" in output["message"].lower()
+        # Renderer received the envelope from respond(...)
+        envelope = render_mock.call_args.args[0]
+        assert envelope["kind"] == "cart_view"
+        assert "Subtotal: $0" in envelope["facts"]
+        # 2 LLM calls on the action agent: view_cart + respond
+        assert llm.invoke.call_count == 2
+
+    def test_respond_only_no_action_tools(self):
+        """Casual chat: model emits respond directly without other tools."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(
+            kind="chat", summary="Greeting back"
+        )])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "¡Con gusto! Cuéntame qué se te antoja."},
+             ):
+            output = agent.execute(
+                message_body="hola",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        assert output["message"].startswith("¡Con gusto")
+        assert llm.invoke.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Tool error handling — exception surfaces as ToolMessage, model adapts
+# ---------------------------------------------------------------------------
+
+class TestUnifiedTurnContextInjection:
+    """Replacement for the deleted keyword-guard test class. The
+    deterministic ``_looks_like_order_trigger`` block was removed in
+    favor of trusting the model with the unified turn context (cart,
+    delivery, awaiting_confirmation surfaced via render_for_prompt)
+    plus prompt rule 13. These tests verify the context block is in
+    fact present so the model has what it needs."""
+
+    def test_unified_state_block_includes_cart_when_present(self):
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="chat", summary="ok")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(
+                     has_active_cart=True,
+                     cart_summary="1x BARRACUDA. Subtotal: $28.000",
+                 ),
+             ), \
+             patch(
+                 "app.agents.order_agent.set_awaiting_confirmation"
+             ), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "ok"},
+             ):
+            agent.execute(
+                message_body="efectivo",
+                wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+
+        sent = llm.invoke.call_args.args[0]
+        state_blocks = [
+            m for m in sent
+            if isinstance(m, SystemMessage)
+            and "===== ESTADO Y HISTORIAL DEL TURNO =====" in m.content
+        ]
+        assert state_blocks, "expected unified state SystemMessage"
+        text = state_blocks[0].content
+        assert "Carrito actual" in text
+        assert "BARRACUDA" in text
+        assert "Subtotal: $28.000" in text
+
+    def test_unified_state_block_includes_delivery_info(self):
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="chat", summary="ok")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(
+                     has_active_cart=True,
+                     cart_summary="1x BARRACUDA. Subtotal: $28.000",
+                     delivery_info={
+                         "name": "Claudia",
+                         "address": "Cra 1",
+                         "phone": "+573001",
+                         "payment_method": "Nequi",
+                     },
+                 ),
+             ), \
+             patch(
+                 "app.agents.order_agent.set_awaiting_confirmation"
+             ), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "ok"},
+             ):
+            agent.execute(
+                message_body="ok",
+                wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+
+        sent = llm.invoke.call_args.args[0]
+        state_blocks = [
+            m for m in sent
+            if isinstance(m, SystemMessage)
+            and "===== ESTADO Y HISTORIAL DEL TURNO =====" in m.content
+        ]
+        assert state_blocks
+        text = state_blocks[0].content
+        assert "Datos de entrega ya guardados" in text
+        assert "(completos)" in text
+        assert "Claudia" in text
+        assert "Cra 1" in text
+        assert "Nequi" in text
+
+    def test_current_turn_message_has_explicit_marker(self):
+        """The user's current message must carry an explicit marker
+        so the model can never confuse it with the rendered history."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="chat", summary="ok")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(),
+             ), \
+             patch(
+                 "app.agents.order_agent.set_awaiting_confirmation"
+             ), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "ok"},
+             ):
+            agent.execute(
+                message_body="dame una barracuda",
+                wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+
+        sent = llm.invoke.call_args.args[0]
+        human_msgs = [m for m in sent if isinstance(m, HumanMessage)]
+        assert len(human_msgs) == 1, (
+            "exactly one HumanMessage expected — the current user turn. "
+            "History should be inside the SystemMessage state block."
+        )
+        assert "[MENSAJE ACTUAL DEL CLIENTE" in human_msgs[0].content
+        assert "dame una barracuda" in human_msgs[0].content
+
+
+class TestPaymentMethodNormalization:
+    """submit_delivery_info must canonicalize the user's payment-method
+    fragment ("breb", "efe", "transf") against the business's allowed
+    list before saving — even when the model passes the raw fragment.
+    Catches the production bug where 'breb' was dropped because it
+    didn't exact-match 'Llave BreB'."""
+
+    def test_match_payment_method_accepts_substring(self):
+        from app.services.order_tools import _match_payment_method
+        allowed = ["efectivo", "transferencia", "Nequi", "Llave BreB"]
+        assert _match_payment_method("breb", allowed) == "Llave BreB"
+        assert _match_payment_method("efe", allowed) == "efectivo"
+        assert _match_payment_method("transf", allowed) == "transferencia"
+        assert _match_payment_method("NEQUI", allowed) == "Nequi"
+
+    def test_match_payment_method_returns_none_for_unknown(self):
+        from app.services.order_tools import _match_payment_method
+        allowed = ["efectivo", "Nequi"]
+        assert _match_payment_method("paypal", allowed) is None
+        assert _match_payment_method("bitcoin", allowed) is None
+
+    def test_match_payment_method_empty_allowed_returns_none(self):
+        """No business list configured → no enforcement → caller falls
+        back to raw value (we don't pretend to canonicalize)."""
+        from app.services.order_tools import _match_payment_method
+        assert _match_payment_method("breb", []) is None
+
+    def test_submit_delivery_info_normalizes_payment_method(self):
+        """End-to-end: model passes 'breb' to submit_delivery_info,
+        the tool normalizes against the business list and saves
+        'Llave BreB' — the value the legacy executor and the customer
+        both see consistently."""
+        from app.services import order_tools
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "wa_id": "+57300",
+            "business": {
+                "settings": {
+                    "payment_methods": [
+                        "efectivo", "transferencia", "Nequi", "Llave BreB",
                     ],
                 },
-                {
-                    "kind": "item",
-                    "name": "Coca-Cola",
-                    "quantity": 2,
-                    "unit_price": 5500.0,
-                    "line_total": 11000.0,
-                    "notes": None,
-                },
-            ],
-            "subtotal_before_promos": 67000.0,
-            "promo_discount_total": 26000.0,
-            "subtotal": 41000.0,
-            "applications": [
-                {
-                    "promotion_id": "p1",
-                    "promotion_name": "2 Honey Burger con papas",
-                    "pricing_mode": "fixed_price",
-                    "discount_applied": 26000.0,
-                    "promo_group_id": "g1",
-                }
-            ],
-        }
-
-    def test_cart_change_renders_without_crashing_when_promo_just_added(self):
-        """The exact crash case: ADD_PROMO_TO_CART → cart_change → response
-        prompt builder. Used to NameError on `business_id` because the
-        variable only existed in execute()'s scope."""
-        agent = OrderAgent()
-        exec_result = {
-            "cart_change": {
-                "action": CART_ACTION_ADDED,
-                "added": [
-                    {
-                        "product_id": "honey",
-                        "name": "HONEY BURGER",
-                        "quantity": 2,
-                        "price": 28000,
-                        "promotion_id": "p1",
-                        "promo_group_id": "g1",
-                    },
-                ],
-                "removed": [],
-                "updated": [],
-                "cart_after": [
-                    {
-                        "product_id": "honey",
-                        "name": "HONEY BURGER",
-                        "quantity": 2,
-                        "price": 28000,
-                        "promotion_id": "p1",
-                        "promo_group_id": "g1",
-                    },
-                    {
-                        "product_id": "papas",
-                        "name": "Papas",
-                        "quantity": 1,
-                        "price": 8000,
-                        "promotion_id": "p1",
-                        "promo_group_id": "g1",
-                    },
-                ],
-                "total_after": 64000,
             },
         }
-        business_context = {"business_id": "biz-uuid", "business": {"name": "Biela"}}
 
-        with patch(
-            "app.agents.order_agent.promotion_service.preview_cart",
-            return_value=self._stub_preview(),
-        ):
-            system, inp = agent._build_response_prompt(
-                result_kind=RESULT_KIND_CART_CHANGE,
-                exec_result=exec_result,
-                message_body="dame una promo de honey",
-                business_context=business_context,
-                cart_summary_after="(unused on this branch)",
-            )
+        saved: dict = {}
 
-        # Bundle line should appear with the promo name + price, not the
-        # base-priced components as separate items.
-        assert "PROMO" in inp
-        assert "2 Honey Burger con papas" in inp
-        assert "$30.000" in inp
-        # Subtotal label must clarify it already reflects the promo.
-        assert "ya con promo" in inp
-        # System prompt must instruct the LLM not to redecompose the bundle
-        # or recompute totals.
-        assert "PROMO" in system
-        assert "promo" in system.lower()
+        def fake_save(wa_id, business_id, cart):
+            saved["cart"] = cart
 
-    def test_cart_change_renders_when_business_context_is_none(self):
-        """Same render path with a None business_context — must still not raise."""
-        agent = OrderAgent()
-        exec_result = {
-            "cart_change": {
-                "action": CART_ACTION_ADDED,
-                "added": [{"product_id": "x", "name": "AGUA", "quantity": 1, "price": 3000}],
-                "removed": [],
-                "updated": [],
-                "cart_after": [
-                    {"product_id": "x", "name": "AGUA", "quantity": 1, "price": 3000}
-                ],
-                "total_after": 3000,
-            },
-        }
-        with patch(
-            "app.agents.order_agent.promotion_service.preview_cart",
+        with patch.object(
+            order_tools, "_cart_from_session",
             return_value={
-                "display_groups": [
-                    {
-                        "kind": "item",
-                        "name": "AGUA",
-                        "quantity": 1,
-                        "unit_price": 3000.0,
-                        "line_total": 3000.0,
-                        "notes": None,
-                    }
-                ],
-                "subtotal_before_promos": 3000.0,
-                "promo_discount_total": 0.0,
-                "subtotal": 3000.0,
-                "applications": [],
+                "items": [{"product_id": "p1", "name": "X",
+                           "price": 1, "quantity": 1}],
+                "total": 1,
+                "delivery_info": {
+                    "name": "Claudia", "address": "Cra 1",
+                    "phone": "+57300",
+                },
             },
+        ), patch.object(
+            order_tools, "_save_cart", side_effect=fake_save,
+        ), patch.object(
+            order_tools, "_turn_cache",
         ):
-            system, inp = agent._build_response_prompt(
-                result_kind=RESULT_KIND_CART_CHANGE,
-                exec_result=exec_result,
-                message_body="agrega una agua",
-                business_context=None,
-                cart_summary_after="(unused)",
-            )
-        assert "AGUA" in inp
+            result = order_tools.submit_delivery_info.invoke({
+                "payment_method": "breb",
+                "injected_business_context": biz_ctx,
+            })
 
-    def test_order_placed_renders_without_crashing(self):
-        """Same regression on the order_placed branch. The previous template
-        also referenced `business_id` from outside its scope."""
-        agent = OrderAgent()
-        exec_result = {
-            "order_placed": {
-                "order_id_display": "ABC12345",
-                "items": [
-                    {
-                        "product_id": "honey",
-                        "name": "HONEY BURGER",
-                        "quantity": 2,
-                        "price": 28000,
-                        "promotion_id": "p1",
-                        "promo_group_id": "g1",
-                    },
-                    {
-                        "product_id": "papas",
-                        "name": "Papas",
-                        "quantity": 1,
-                        "price": 8000,
-                        "promotion_id": "p1",
-                        "promo_group_id": "g1",
-                    },
-                ],
-                "subtotal": 30000,
-                "promo_discount": 26000,
-                "applied_promos": ["2 Honey Burger con papas"],
-                "delivery_fee": 5000,
-                "total": 35000,
+        assert "all_present=true" in result, (
+            "expected complete-status signal in tool result"
+        )
+        # The CART persisted via _save_cart should carry the canonical
+        # payment_method, not the raw "breb" fragment.
+        persisted_pm = saved["cart"]["delivery_info"]["payment_method"]
+        assert persisted_pm == "Llave BreB", (
+            f"expected canonical 'Llave BreB', got {persisted_pm!r}"
+        )
+
+    def test_submit_delivery_info_falls_back_to_raw_when_no_match(self):
+        """If user provides something unmatched against a configured
+        list, save the raw value — let the model decide via the
+        delivery_info_collected envelope whether to re-prompt."""
+        from app.services import order_tools
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "wa_id": "+57300",
+            "business": {
+                "settings": {"payment_methods": ["efectivo", "Nequi"]},
             },
         }
-        business_context = {"business_id": "biz-uuid", "business": {"name": "Biela"}}
+        saved: dict = {}
 
-        with patch(
-            "app.agents.order_agent.promotion_service.preview_cart",
-            return_value=self._stub_preview(),
+        def fake_save(wa_id, business_id, cart):
+            saved["cart"] = cart
+
+        with patch.object(
+            order_tools, "_cart_from_session",
+            return_value={"items": [], "total": 0, "delivery_info": {}},
+        ), patch.object(
+            order_tools, "_save_cart", side_effect=fake_save,
+        ), patch.object(
+            order_tools, "_turn_cache",
         ):
-            system, inp = agent._build_response_prompt(
-                result_kind=RESULT_KIND_ORDER_PLACED,
-                exec_result=exec_result,
-                message_body="confirmar",
-                business_context=business_context,
-                cart_summary_after="(unused)",
+            order_tools.submit_delivery_info.invoke({
+                "payment_method": "paypal",
+                "injected_business_context": biz_ctx,
+            })
+
+        assert saved["cart"]["delivery_info"]["payment_method"] == "paypal"
+
+
+class TestImpossibleEnvelopeGuard:
+    """The agent must override ``ready_to_confirm`` / ``order_placed``
+    envelopes when they don't match the actual turn outcome — e.g.
+    after place_order clears the cart and a follow-up message gets
+    mis-routed back to order. Without the guard the renderer builds a
+    phantom confirm card from leftover customer-DB data."""
+
+    def test_ready_to_confirm_with_empty_cart_downgrades_to_chat(self):
+        from app.agents.order_agent import _guard_impossible_envelope
+        env = {"kind": "ready_to_confirm", "summary": "", "facts": []}
+        out = _guard_impossible_envelope(
+            envelope=env,
+            cart_was_empty_at_turn_start=True,
+            tool_outputs={},
+            wa_id="+57300",
+        )
+        assert out["kind"] == "chat"
+        assert "no hay un pedido activo" in out["summary"]
+
+    def test_ready_to_confirm_with_cart_passes_through(self):
+        from app.agents.order_agent import _guard_impossible_envelope
+        env = {"kind": "ready_to_confirm", "summary": "", "facts": []}
+        out = _guard_impossible_envelope(
+            envelope=env,
+            cart_was_empty_at_turn_start=False,
+            tool_outputs={},
+            wa_id="+57300",
+        )
+        assert out["kind"] == "ready_to_confirm"
+
+    def test_order_placed_without_successful_tool_output_downgrades(self):
+        """If the model emits order_placed but place_order didn't
+        return a ✅ receipt, the renderer would otherwise show a fake
+        confirmation. Override to ``error`` so the customer sees the
+        real status (e.g. 'falta confirmación')."""
+        from app.agents.order_agent import _guard_impossible_envelope
+        env = {"kind": "order_placed", "summary": "", "facts": []}
+        # place_order tool refused with the awaiting_confirmation guard
+        guard_msg = (
+            "❌ El cliente todavía no ha confirmado el pedido. "
+            "Llama respond(kind='ready_to_confirm') primero."
+        )
+        out = _guard_impossible_envelope(
+            envelope=env,
+            cart_was_empty_at_turn_start=False,
+            tool_outputs={"place_order": guard_msg},
+            wa_id="+57300",
+        )
+        assert out["kind"] == "error"
+        assert "no ha confirmado" in out["summary"]
+
+    def test_order_placed_with_successful_tool_output_passes_through(self):
+        from app.agents.order_agent import _guard_impossible_envelope
+        env = {"kind": "order_placed", "summary": "", "facts": []}
+        receipt = "✅ ¡Pedido confirmado! #ABCD1234\nSubtotal: $28.000\nTotal: $35.000"
+        out = _guard_impossible_envelope(
+            envelope=env,
+            cart_was_empty_at_turn_start=False,
+            tool_outputs={"place_order": receipt},
+            wa_id="+57300",
+        )
+        assert out["kind"] == "order_placed"
+
+    def test_renderer_build_confirm_text_returns_empty_when_no_cart_items(self):
+        """Defense in depth: even if the agent guard is bypassed, the
+        renderer's text-fallback for ready_to_confirm refuses to build
+        a recap when the cart is empty."""
+        from app.services import response_renderer
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        with patch.object(
+            response_renderer, "_has_cart_items", return_value=False,
+        ):
+            body = response_renderer._build_confirm_text(biz_ctx, "+57300")
+        assert body == "", (
+            "expected empty body when cart is empty; got phantom confirm prompt"
+        )
+
+
+class TestProductNotFoundRecovery:
+    def test_not_found_becomes_structured_data_not_exception(self):
+        """add_to_cart's ProductNotFoundError must NOT bubble to the
+        model as a generic exception string — the full hybrid search
+        already ran. Surface a NOT_FOUND|... ToolMessage with explicit
+        recovery instructions so the model lists alternatives instead
+        of giving up or fabricating an items_added envelope."""
+        from app.services.product_search import ProductNotFoundError
+        agent = OrderAgent()
+
+        first = _ai_with_tools([{
+            "name": "add_to_cart",
+            "args": {"product_name": "quatro", "quantity": 2},
+            "id": "c1", "type": "tool_call",
+        }])
+        second = _ai_with_tools([_respond_call(
+            kind="disambiguation",
+            summary="No tenemos quatro, opciones de bebidas",
+            facts=["Coca-Cola - $5.500", "Sprite - $5.500"],
+        )])
+        llm = MagicMock()
+        llm.invoke.side_effect = [first, second]
+
+        add_to_cart_mock = MagicMock()
+        add_to_cart_mock.name = "add_to_cart"
+        add_to_cart_mock.invoke.side_effect = ProductNotFoundError(query="quatro")
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.order_tools", [add_to_cart_mock]), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "No tenemos quatro. ¿Quieres una Coca-Cola o Sprite?"},
+             ):
+            output = agent.execute(
+                message_body="2 quatros",
+                wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
             )
-        # Receipt must reframe the discount as savings, not a math correction.
-        assert "Ahorro con promo" in system
-        assert "ABC12345" in inp
+
+        # Iter 2 must have seen a NOT_FOUND ToolMessage (not a generic
+        # "Error al ejecutar..." string).
+        second_call_messages = llm.invoke.call_args_list[1].args[0]
+        tool_msgs = [m for m in second_call_messages if isinstance(m, ToolMessage)]
+        assert tool_msgs, "expected ToolMessage from add_to_cart not-found"
+        assert tool_msgs[0].content.startswith("NOT_FOUND|"), (
+            f"expected NOT_FOUND structured result, got: {tool_msgs[0].content!r}"
+        )
+        assert "quatro" in tool_msgs[0].content
+        assert "list_category_products" in tool_msgs[0].content
+        assert "disambiguation" in tool_msgs[0].content
+
+        assert output["agent_type"] == "order"
+        assert "quatro" in output["message"].lower() or \
+               "coca" in output["message"].lower()
 
 
-class TestProductDetailsCartAware:
-    """RESULT_KIND_PRODUCT_DETAILS — response prompt branches on whether
-    the product is already in the customer's cart.
+class TestToolErrorRecovery:
+    def test_tool_exception_surfaced_to_model(self):
+        """When a non-terminator tool raises, the error becomes a
+        ToolMessage so the model can adapt and still call respond."""
+        agent = OrderAgent()
 
-    Production 2026-05-06 (Biela / +573159280840): customer asked for
-    ingredients of LA VUELTA which was already in cart, bot closed with
-    "¿Te gustaría agregarla al pedido?", customer said "Si", and the
-    order agent ADD_TO_CARTed a duplicate line. The fix: when in_cart_quantity
-    > 0, the prompt MUST NOT close with "¿agregarla?" — it must surface
-    that the product is already there and ask about another unit instead.
-    """
+        first = _ai_with_tools([{
+            "name": "place_order", "args": {}, "id": "c1", "type": "tool_call",
+        }])
+        second = _ai_with_tools([_respond_call(
+            kind="error", summary="place_order failed: kaboom"
+        )])
+        llm = MagicMock()
+        llm.invoke.side_effect = [first, second]
 
-    def _exec_result(self, in_cart_quantity: int):
-        return {
-            "product": {
-                "id": "p1",
-                "name": "LA VUELTA",
-                "price": 29000,
-                "description": "Pan, carne, tocineta crispy, papas.",
-            },
-            "in_cart_quantity": in_cart_quantity,
+        place_order_mock = MagicMock()
+        place_order_mock.name = "place_order"
+        place_order_mock.invoke.side_effect = RuntimeError("kaboom")
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.order_tools", [place_order_mock]), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "Lo siento, hubo un problema."},
+             ):
+            output = agent.execute(
+                message_body="confirmo",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        assert "siento" in output["message"].lower()
+        # The model's second invoke saw a ToolMessage with the error.
+        second_call_args = llm.invoke.call_args_list[1].args[0]
+        tool_msgs = [m for m in second_call_args if isinstance(m, ToolMessage)]
+        assert tool_msgs, "expected ToolMessage after tool error"
+        assert "kaboom" in tool_msgs[0].content.lower()
+
+
+# ---------------------------------------------------------------------------
+# History rendering — operator turns surface as a system note
+# ---------------------------------------------------------------------------
+
+class TestOperatorHistoryRendering:
+    def test_operator_assistant_turn_renders_as_system_note(self):
+        """Manually-typed operator turns must surface as SystemMessage,
+        not as the bot's own AIMessage — otherwise the model treats
+        them as authoritative reasoning."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="chat", summary="ok")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        history = [
+            {"role": "user", "message": "Hola"},
+            {"role": "assistant", "message": "Bienvenido"},
+            {"role": "assistant", "message": "Disculpa, soy Diego — ahora le aviso al chef.",
+             "agent_type": "operator"},
+            {"role": "user", "message": "Gracias"},
+        ]
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "ok"},
+             ):
+            agent.execute(
+                message_body="ok",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=history,
+            )
+
+        # History is now rendered inside the unified state block
+        # (via render_for_prompt). Operator turns get the
+        # "operador (humano)" label inline, bot turns get the "bot:"
+        # label — both visible in the same block, distinct from the
+        # current user turn.
+        sent_messages = llm.invoke.call_args.args[0]
+        ctx_blocks = [
+            m for m in sent_messages
+            if isinstance(m, SystemMessage) and "===== ESTADO Y HISTORIAL DEL TURNO =====" in m.content
+        ]
+        assert ctx_blocks, "expected unified ESTADO Y HISTORIAL SystemMessage"
+        ctx_text = ctx_blocks[0].content
+        assert "operador (humano)" in ctx_text, (
+            "operator turn should be labeled distinctly inside the state block"
+        )
+        assert "Bienvenido" in ctx_text, (
+            "bot's earlier real turn should still be visible in the state block"
+        )
+        assert "Diego" in ctx_text or "aviso al chef" in ctx_text
+
+
+# ---------------------------------------------------------------------------
+# Max iterations safety net + missing-respond fallback
+# ---------------------------------------------------------------------------
+
+class TestMaxIterationsAndFallback:
+    def test_runaway_tool_loop_synthesizes_chat_envelope(self):
+        """If the model never calls respond and never stops, the agent
+        caps out and synthesizes a chat envelope so the user still gets
+        a response (degraded but not a dead-end)."""
+        agent = OrderAgent()
+        forever = _ai_with_tools([{
+            "name": "view_cart", "args": {}, "id": "c1", "type": "tool_call",
+        }])
+        llm = MagicMock()
+        llm.invoke.return_value = forever
+
+        view_cart_mock = MagicMock()
+        view_cart_mock.name = "view_cart"
+        view_cart_mock.invoke.return_value = "Tu carrito está vacío."
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.order_tools", [view_cart_mock]), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "Listo. ¿En qué más puedo ayudarte?"},
+             ) as render_mock:
+            output = agent.execute(
+                message_body="loop",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        assert llm.invoke.call_count == 5
+        # Synthetic envelope must reach the renderer with kind=chat.
+        envelope = render_mock.call_args.args[0]
+        assert envelope["kind"] == "chat"
+        assert output["message"]
+
+    def test_model_emits_prose_without_respond_falls_through(self):
+        """If the model emits final text without calling respond, the
+        text becomes the synthetic chat envelope's summary."""
+        agent = OrderAgent()
+        prose = AIMessage(content="¡Con gusto!")
+        llm = MagicMock()
+        llm.invoke.return_value = prose
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "¡Con gusto!"},
+             ) as render_mock:
+            output = agent.execute(
+                message_body="hola",
+                wa_id="x", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        assert output["message"] == "¡Con gusto!"
+        env = render_mock.call_args.args[0]
+        assert env["kind"] == "chat"
+        assert "con gusto" in env["summary"].lower()
+
+
+# ---------------------------------------------------------------------------
+# CTA dispatch — ready_to_confirm + renderer returns CTA payload
+# ---------------------------------------------------------------------------
+
+class TestReadyToConfirmCTA:
+    def test_ready_to_confirm_dispatches_twilio_cta_and_suppresses_send(self):
+        """When the renderer returns type='cta', the agent fires the
+        Twilio Content Template and returns the SUPPRESS sentinel so
+        the upstream sender doesn't double-send the body as text."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(
+            kind="ready_to_confirm",
+            summary="All delivery data collected",
+        )])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        cta_payload = {
+            "type": "cta",
+            "body": "Tengo estos datos para tu pedido:\n*Total:* $33.500\n¿Confirmamos?",
+            "content_sid": "HXfake_sid",
+            "variables": {"1": "*Total:* $33.500"},
         }
 
-    def test_already_in_cart_avoids_agregarla_upsell(self):
-        from app.orchestration.order_flow import RESULT_KIND_PRODUCT_DETAILS
-        agent = OrderAgent()
-        system, inp = agent._build_response_prompt(
-            result_kind=RESULT_KIND_PRODUCT_DETAILS,
-            exec_result=self._exec_result(in_cart_quantity=1),
-            message_body="qué trae la vuelta?",
-            business_context=None,
-            cart_summary_after="(unused)",
-        )
-        # The system prompt must explicitly forbid the "¿agregarla?" upsell.
-        assert "NUNCA" in system
-        assert "agregarla" in system.lower()
-        # And it must instruct the LLM to mention the existing quantity.
-        assert "ya tiene" in system.lower() or "YA tiene" in system
-        # The input must include the in-cart quantity so the LLM can
-        # phrase the reply correctly.
-        assert "Ya tiene en el pedido: 1" in inp
-
-    def test_not_in_cart_keeps_agregarla_upsell(self):
-        from app.orchestration.order_flow import RESULT_KIND_PRODUCT_DETAILS
-        agent = OrderAgent()
-        system, inp = agent._build_response_prompt(
-            result_kind=RESULT_KIND_PRODUCT_DETAILS,
-            exec_result=self._exec_result(in_cart_quantity=0),
-            message_body="qué trae la vuelta?",
-            business_context=None,
-            cart_summary_after="(unused)",
-        )
-        # Original upsell wording stays for the not-in-cart path.
-        assert "agregar al pedido" in system
-        # And the in-cart hint MUST NOT be in the input — the LLM should
-        # not invent a quantity that isn't there.
-        assert "Ya tiene en el pedido" not in inp
-
-
-class TestOrderPlannerCartTotalTriggers:
-    """The order planner must route cart-total questions to VIEW_CART.
-
-    Production 2026-05-06 (Biela / +573108069647): customer said
-    "Cuánto es ??" mid-cart and the bot replied "no entendí". The fix
-    extends the VIEW_CART rule with explicit cart-total phrasings so
-    the planner LLM has the right examples in its prompt.
-    """
-
-    def test_planner_prompt_lists_total_phrasings(self):
-        # Direct check on the prompt template — these example phrasings
-        # MUST be present so the planner can disambiguate "cuánto es?"
-        # (cart total → VIEW_CART) from "cuánto vale la X?" (single
-        # product → GET_PRODUCT).
-        for phrase in [
-            "cuánto es",
-            "cuánto va",
-            "cuánto llevo",
-            "a cómo me sale",
-        ]:
-            assert phrase in PLANNER_SYSTEM_TEMPLATE, (
-                f"VIEW_CART rule must include the cart-total phrasing {phrase!r} "
-                "so the planner does not punt 'cuánto es?' to CHAT."
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value=cta_payload,
+             ), \
+             patch(
+                 "app.utils.whatsapp_utils.send_twilio_cta",
+                 return_value=MagicMock(sid="MSG123"),
+             ) as cta_send:
+            output = agent.execute(
+                message_body="listo",
+                wa_id="+573001234567",
+                name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
             )
 
-    def test_planner_prompt_distinguishes_view_cart_from_get_product(self):
-        # Make sure the rule explicitly tells the LLM that a price
-        # question NOT naming a product is VIEW_CART, not GET_PRODUCT.
-        assert "VIEW_CART" in PLANNER_SYSTEM_TEMPLATE
-        assert "NO confundas con GET_PRODUCT" in PLANNER_SYSTEM_TEMPLATE
+        assert output["message"] == "__SUPPRESS_SEND__"
+        cta_send.assert_called_once()
+        kwargs = cta_send.call_args.kwargs
+        assert kwargs["content_sid"] == "HXfake_sid"
+        assert kwargs["to"] == "+573001234567"
+
+    def test_cta_send_failure_falls_back_to_text(self):
+        """If send_twilio_cta returns None (failure), agent doesn't
+        suppress — it falls back to sending the rendered body as text."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="ready_to_confirm")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        cta_payload = {
+            "type": "cta",
+            "body": "¿Confirmamos el pedido?",
+            "content_sid": "HXfake",
+            "variables": {"1": "..."},
+        }
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value=cta_payload,
+             ), \
+             patch("app.utils.whatsapp_utils.send_twilio_cta", return_value=None):
+            output = agent.execute(
+                message_body="listo", wa_id="x", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+
+        assert output["message"] != "__SUPPRESS_SEND__"
+        assert "Confirmamos" in output["message"]
 
 
-class TestPhoneFormatFromWaId:
-    """Unit tests for wa_id → phone normalization used by <SENDER> substitution."""
+# ---------------------------------------------------------------------------
+# Registry: 'order' agent type resolves to the tool-calling agent
+# ---------------------------------------------------------------------------
 
-    def test_meta_style_digits_only(self):
-        from app.orchestration.order_flow import _format_phone_from_wa_id
-        assert _format_phone_from_wa_id("573001234567") == "+573001234567"
+class TestRegistryResolvesOrderAgent:
+    """After v1 deletion, the legacy ``OrderAgent`` module is gone. The
+    agent registry aliases ``OrderAgent`` as ``OrderAgent``
+    so any caller (router, dispatcher, handoff) doing
+    ``get_agent('order')`` receives the tool-calling agent."""
 
-    def test_twilio_style_with_plus(self):
-        from app.orchestration.order_flow import _format_phone_from_wa_id
-        assert _format_phone_from_wa_id("+573001234567") == "+573001234567"
+    def test_registry_order_type_is_tool_calling_agent(self):
+        from app.agents.registry import get_agent
+        from app.agents.order_agent import OrderAgent
+        agent = get_agent("order")
+        assert isinstance(agent, OrderAgent)
 
-    def test_twilio_prefix_stripped(self):
-        from app.orchestration.order_flow import _format_phone_from_wa_id
-        assert _format_phone_from_wa_id("whatsapp:+573001234567") == "+573001234567"
-
-    def test_empty(self):
-        from app.orchestration.order_flow import _format_phone_from_wa_id
-        assert _format_phone_from_wa_id("") == ""
-        assert _format_phone_from_wa_id(None) == ""
-
-
-class TestCategoryNormalization:
-    """Verify CATEGORY_MAP correctly normalizes Spanish category terms."""
-
-    def test_hamburguesas_de_pollo_full_phrase(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("hamburguesas de pollo") == "HAMBURGUESAS DE POLLO"
-
-    def test_hamburguesa_de_pollo_singular(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("hamburguesa de pollo") == "HAMBURGUESAS DE POLLO"
-
-    def test_hamburguesas_maps_to_hamburguesas(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("hamburguesas") == "HAMBURGUESAS"
-
-    def test_pollo_maps_to_chicken(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("pollo") == "HAMBURGUESAS DE POLLO"
-
-    def test_perros_calientes_full_phrase(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("perros calientes") == "PERROS CALIENTES"
-
-    def test_hot_dog_legacy(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("hot dogs") == "PERROS CALIENTES"
-
-    def test_parrilla(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("parrilla") == "PARRILLA"
-
-    def test_costillas_maps_to_parrilla(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("costillas") == "PARRILLA"
-
-    def test_postres(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("postres") == "POSTRES"
-
-    def test_salchipapas_unchanged(self):
-        from app.database.product_order_service import normalize_category
-        assert normalize_category("salchipapas") == "SALCHIPAPAS"
-
-    def test_full_phrase_wins_over_word_by_word(self):
-        """'hamburguesas de pollo' must match full phrase → HAMBURGUESAS DE POLLO,
-        not word-by-word → HAMBURGUESAS (from 'hamburguesas')."""
-        from app.database.product_order_service import normalize_category
-        result = normalize_category("hamburguesas de pollo")
-        assert result == "HAMBURGUESAS DE POLLO", (
-            f"Full phrase must win over word-by-word fallback, got {result!r}"
-        )
+    def test_legacy_orderagent_name_is_the_tool_calling_class(self):
+        """The ``OrderAgent`` name (still imported by some callers and
+        tests) is now an alias for ``OrderAgent`` — there is
+        no separate planner-based class anymore."""
+        from app.agents.registry import OrderAgent
+        from app.agents.order_agent import OrderAgent
+        assert OrderAgent is OrderAgent
 
 
-class TestPlannerPromptRules:
-    """Verify planner prompt contains the rules that route intents correctly."""
+# ---------------------------------------------------------------------------
+# Renderer module — CTA short-circuit + text fallback
+# ---------------------------------------------------------------------------
 
-    def test_planner_prompt_has_implicit_drinks_rule(self):
-        """
-        Regression: "qué hay para tomar?" should go straight to LIST_PRODUCTS with
-        category=bebidas, not GET_MENU_CATEGORIES (which makes the bot ask "¿quieres
-        ver las bebidas?" instead of just showing them).
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        assert "para tomar" in prompt, \
-            "Planner prompt must describe the implicit 'para tomar' → bebidas case"
-        assert "LIST_PRODUCTS" in prompt
+class TestRendererCTAShortCircuit:
+    def test_ready_to_confirm_with_sid_returns_cta_payload(self):
+        """When the business has confirm_order_content_sid set AND
+        delivery is complete, the renderer returns type='cta'."""
+        from app.services import response_renderer
 
-    def test_planner_prompt_has_sender_phone_rule(self):
-        """
-        Regression: when the user says "este número" / "este mismo" while the bot is
-        collecting delivery info, the planner must emit SUBMIT_DELIVERY_INFO with
-        phone="<SENDER>" (a literal marker) so the backend can substitute the
-        actual wa_id. Previously the bot kept asking for the phone because the
-        planner emitted params={} with no phone at all.
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        assert "<SENDER>" in prompt, "Planner prompt must describe the <SENDER> marker"
-        assert "este número" in prompt or "este mismo" in prompt
-        assert "SUBMIT_DELIVERY_INFO" in prompt
-
-    def test_planner_prompt_has_plural_details_rule(self):
-        """
-        Regression: "qué tiene cada una de esas hamburguesas?" must be classified as
-        LIST_PRODUCTS (showing all with descriptions), NOT GET_PRODUCT (which would
-        pick only the first match). The planner prompt must explicitly mention the
-        plural/collective case.
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        assert "cada una" in prompt, \
-            "Planner prompt must describe the 'qué tiene cada una' plural case"
-        assert "LIST_PRODUCTS" in prompt
-        lower = prompt.lower()
-        idx_plural = lower.find("cada una")
-        idx_list = lower.find("list_products", idx_plural - 200 if idx_plural > 200 else 0)
-        assert 0 <= idx_list, "LIST_PRODUCTS must be referenced near the 'cada una' rule"
-
-    def test_planner_prompt_has_category_attribute_exception(self):
-        """
-        Regression: "tienes hamburguesas picantes?" must route to
-        SEARCH_PRODUCTS (attribute search), NOT LIST_PRODUCTS (category).
-        The planner prompt must include the exception for category + adjective.
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        lower = prompt.lower()
-        assert "adjetivo" in lower or "modificador" in lower, \
-            "Planner prompt must describe the category+attribute exception"
-        assert "search_products" in lower
-        assert "hamburguesas picantes" in lower, \
-            "Planner prompt must use 'hamburguesas picantes' as an example"
-
-    def test_planner_prompt_routes_product_price_question_to_get_product(self):
-        """
-        Regression: "una picada que valor?" was being classified as CHAT
-        because no planner rule covered price-of-product questions. Once
-        routing was fixed, the order agent's planner still missed it. The
-        rule must extend GET_PRODUCT to cover price/value/cost phrasings,
-        with explicit guidance that ADD_TO_CART is NOT the right intent
-        when the customer is asking for the price (they're deciding,
-        not ordering yet).
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        lower = prompt.lower()
-        # The rule itself.
-        assert "precio" in lower, \
-            "Planner prompt must mention price/precio under GET_PRODUCT"
-        # Concrete examples the LLM can pattern-match against.
-        for example in (
-            "cuánto vale la x",
-            "qué valor tiene la x",
-            "una x qué valor",
-            "qué precio tiene la x",
+        biz_ctx = {
+            "business_id": "biz1",
+            "provider": "twilio",
+            "business": {
+                "name": "Biela",
+                "settings": {"confirm_order_content_sid": "HXabc"},
+            },
+        }
+        full_status = {
+            "name": "Yisela",
+            "address": "Cra 1 #2-3",
+            "phone": "+573001234567",
+            "payment_method": "Nequi",
+            "total": 33500,
+            "all_present": True,
+        }
+        with patch.object(
+            response_renderer, "_read_delivery_status",
+            return_value=full_status,
         ):
-            assert example in lower, f"Planner prompt missing example: {example!r}"
-        # Critical guardrail: don't accidentally ADD_TO_CART when asking
-        # for a price.
-        assert "una picada que valor" in lower, \
-            "Planner prompt must use 'una picada que valor?' as an example"
-        assert "no add_to_cart" in lower, \
-            "Planner prompt must explicitly forbid ADD_TO_CART for price questions"
+            out = response_renderer.render_response(
+                {"kind": "ready_to_confirm", "summary": "", "facts": []},
+                business_context=biz_ctx,
+                last_user_message="listo",
+                wa_id="+573001234567",
+            )
+        assert out["type"] == "cta"
+        assert out["content_sid"] == "HXabc"
+        assert "1" in (out["variables"] or {})
 
-    @pytest.mark.parametrize("status,expected_phrase_substr", [
-        ("pending", "cocina"),
-        ("confirmed", "disfrutes"),
-        ("out_for_delivery", "camino"),
-        ("completed", "disfrutado"),
-        ("cancelled", "vuelves"),
-    ])
-    def test_chat_response_prompt_uses_status_aware_closing(self, status, expected_phrase_substr):
-        """
-        Response generator's CHAT branch must produce a status-aware
-        closing instruction when ``latest_order_status`` is set, and
-        must NOT include the generic "¿qué te gustaría ordenar?"
-        invitation.
-        """
-        from app.agents.order_agent import OrderAgent
+    def test_ready_to_confirm_without_sid_renders_v1_structured_text(self):
+        """No SID configured → renderer must render the SAME structured
+        recap (Tengo estos datos para tu pedido + multi-line fields +
+        ¿Confirmamos?) the CTA card would have shown. Free-form LLM
+        text would lose the customer-facing fields."""
+        from app.services import response_renderer
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "provider": "twilio",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        full_status = {
+            "name": "Claudia Cerón",
+            "address": "calle 19 C No 40 A 26",
+            "phone": "3104078032",
+            "payment_method": "Llave BreB",
+            "total": 28000,
+            "all_present": True,
+        }
+        with patch.object(
+            response_renderer, "_read_delivery_status",
+            return_value=full_status,
+        ), patch.object(
+            response_renderer, "_has_cart_items", return_value=True,
+        ):
+            out = response_renderer.render_response(
+                {"kind": "ready_to_confirm", "summary": "", "facts": []},
+                business_context=biz_ctx,
+                last_user_message="listo",
+                wa_id="+573001234567",
+            )
+        assert out["type"] == "text"
+        body = out["body"]
+        assert "Tengo estos datos para tu pedido" in body
+        assert "Claudia Cerón" in body
+        assert "calle 19 C No 40 A 26" in body
+        assert "Llave BreB" in body
+        assert "$28.000" not in body
+        assert "Total" not in body
+        assert "¿Confirmamos el pedido?" in body
+
+
+# ---------------------------------------------------------------------------
+# Renderer: cart-mutation kinds get deterministic breakdown + LLM prelude
+# ---------------------------------------------------------------------------
+
+class TestCartBreakdownRendering:
+    def test_items_added_includes_canonical_cart_breakdown(self):
+        """Cart-mutation kinds get the cart breakdown rendered from
+        canonical session state — NOT from anything the model wrote.
+        Subtotal/total can never be hallucinated because the LLM never
+        sees them — the cart text is concatenated deterministically."""
+        from app.services import response_renderer
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        canonical_breakdown = (
+            "Tu pedido:\n\n"
+            "• 1x BARRACUDA - $28.000\n\n"
+            "Subtotal: $28.000\n"
+            "🛵 Domicilio: $7.000\n"
+            "**Total: $35.000**"
+        )
+        with patch.object(
+            response_renderer, "_build_cart_breakdown",
+            return_value=canonical_breakdown,
+        ), patch.object(
+            response_renderer, "_render_cart_prelude",
+            return_value="Listo, agregamos eso a tu pedido.",
+        ):
+            out = response_renderer.render_response(
+                {"kind": "items_added", "summary": "Added 1x BARRACUDA",
+                 "facts": ["1x BARRACUDA"]},
+                business_context=biz_ctx,
+                last_user_message="una barracuda",
+                wa_id="+57300",
+            )
+        assert out["type"] == "text"
+        # Prelude + canonical breakdown + closing question
+        assert "Listo, agregamos eso a tu pedido." in out["body"]
+        assert "Subtotal: $28.000" in out["body"]
+        assert "Total: $35.000" in out["body"]
+        assert "¿Te gustaría añadir algo más" in out["body"]
+
+    def test_cart_breakdown_omits_delivery_and_total_by_default(self):
+        """Cart-mutation kinds show items + subtotal only.
+        Delivery + total are address-dependent and only shown at
+        confirmation time."""
+        from app.services import response_renderer
+        from app.database.session_state_service import session_state_service
+        from app.services import promotion_service
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        with patch.object(
+            session_state_service, "load",
+            return_value={"session": {"order_context": {"items": [
+                {"product_id": "p1", "name": "BARRACUDA",
+                 "price": 28000, "quantity": 1},
+            ]}}},
+        ), patch.object(
+            promotion_service, "preview_cart",
+            return_value={
+                "subtotal": 28000,
+                "promo_discount_total": 0,
+                "display_groups": [{
+                    "kind": "single", "quantity": 1,
+                    "name": "BARRACUDA", "line_total": 28000,
+                }],
+            },
+        ):
+            breakdown = response_renderer._build_cart_breakdown(
+                biz_ctx, "+57300",
+            )
+        assert "Subtotal: $28.000" in breakdown
+        assert "Domicilio" not in breakdown, (
+            "delivery fee should NOT appear on cart-mutation turns"
+        )
+        assert "Total" not in breakdown, (
+            "grand total should NOT appear on cart-mutation turns"
+        )
+
+    def test_cart_breakdown_with_totals_includes_delivery_and_total(self):
+        """include_totals=True (used by ready_to_confirm fallback path
+        and order_placed) shows the full breakdown."""
+        from app.services import response_renderer
+        from app.database.session_state_service import session_state_service
+        from app.services import promotion_service
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        with patch.object(
+            session_state_service, "load",
+            return_value={"session": {"order_context": {"items": [
+                {"product_id": "p1", "name": "BARRACUDA",
+                 "price": 28000, "quantity": 1},
+            ]}}},
+        ), patch.object(
+            promotion_service, "preview_cart",
+            return_value={
+                "subtotal": 28000,
+                "promo_discount_total": 0,
+                "display_groups": [{
+                    "kind": "single", "quantity": 1,
+                    "name": "BARRACUDA", "line_total": 28000,
+                }],
+            },
+        ), patch(
+            "app.services.order_tools._get_delivery_fee",
+            return_value=7000,
+        ):
+            breakdown = response_renderer._build_cart_breakdown(
+                biz_ctx, "+57300", include_totals=True,
+            )
+        assert "Subtotal: $28.000" in breakdown
+        assert "Domicilio: $7.000" in breakdown
+        assert "Total: $35.000" in breakdown
+
+    def test_empty_cart_falls_back_to_plain_text(self):
+        """If breakdown comes back empty (cart cleared post-place_order
+        edge case), the renderer falls through to the generic text path."""
+        from app.services import response_renderer
+
+        biz_ctx = {
+            "business_id": "biz1",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        with patch.object(
+            response_renderer, "_build_cart_breakdown",
+            return_value="",
+        ), patch.object(
+            response_renderer, "_render_text",
+            return_value="Tu carrito está vacío.",
+        ) as text_mock:
+            out = response_renderer.render_response(
+                {"kind": "cart_view", "summary": "", "facts": []},
+                business_context=biz_ctx,
+                last_user_message="qué tengo",
+                wa_id="+57300",
+            )
+        assert out["body"] == "Tu carrito está vacío."
+        text_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# State machine: _save_cart auto-derives state from cart contents
+# ---------------------------------------------------------------------------
+
+class TestOrderStateAutoDerivation:
+    """v2 cart-mutating tools route through _save_cart. The save path
+    must auto-derive the correct order state from the merged contents
+    so we don't end up stuck on GREETING after items are added (which
+    is what was happening in production)."""
+
+    def test_compute_state_empty_cart_is_greeting(self):
+        from app.services.order_tools import _compute_order_state
+        from app.database.session_state_service import ORDER_STATE_GREETING
+        assert _compute_order_state([], {}) == ORDER_STATE_GREETING
+
+    def test_compute_state_items_only_is_ordering(self):
+        from app.services.order_tools import _compute_order_state
+        from app.database.session_state_service import ORDER_STATE_ORDERING
+        assert _compute_order_state(
+            [{"product_id": "p1", "name": "X", "price": 1, "quantity": 1}],
+            {},
+        ) == ORDER_STATE_ORDERING
+
+    def test_compute_state_items_plus_partial_delivery_is_ordering(self):
+        """Partial delivery (just address) must NOT mark READY_TO_PLACE
+        — we still need name, phone, payment."""
+        from app.services.order_tools import _compute_order_state
+        from app.database.session_state_service import ORDER_STATE_ORDERING
+        assert _compute_order_state(
+            [{"product_id": "p1", "name": "X", "price": 1, "quantity": 1}],
+            {"address": "Calle 18 #43 38"},
+        ) == ORDER_STATE_ORDERING
+
+    def test_compute_state_items_plus_complete_delivery_is_ready(self):
+        from app.services.order_tools import _compute_order_state
+        from app.database.session_state_service import ORDER_STATE_READY_TO_PLACE
+        assert _compute_order_state(
+            [{"product_id": "p1", "name": "X", "price": 1, "quantity": 1}],
+            {
+                "name": "Yisela", "address": "Cra 1",
+                "phone": "+57300", "payment_method": "Nequi",
+            },
+        ) == ORDER_STATE_READY_TO_PLACE
+
+    def test_save_cart_overrides_stale_greeting_when_items_added(self):
+        """Regression: previously _save_cart preserved the existing
+        GREETING state after add_to_cart, leaving sessions stuck on
+        GREETING despite items in the cart."""
+        from app.services import order_tools
+        from app.database.session_state_service import ORDER_STATE_GREETING
+
+        # The cache's get_session returns the loader's result. We
+        # short-circuit by giving back a stale-GREETING, empty-cart
+        # session — which is the production regression path.
+        cache = MagicMock()
+        cache.get_session.return_value = {
+            "session": {"order_context": {
+                "items": [],
+                "total": 0,
+                "state": ORDER_STATE_GREETING,
+                "delivery_info": None,
+            }},
+        }
+        saved: dict = {}
+
+        def fake_save(wa_id, business_id, update):
+            saved["update"] = update
+
+        with patch.object(
+            order_tools.session_state_service, "save", side_effect=fake_save,
+        ), patch.object(order_tools, "_turn_cache", return_value=cache):
+            order_tools._save_cart("+57300", "biz1", {
+                "items": [{"product_id": "p1", "name": "BARRACUDA",
+                           "price": 28000, "quantity": 1}],
+                "total": 28000,
+            })
+
+        new_state = saved["update"]["order_context"]["state"]
+        assert new_state == "ORDERING", (
+            f"expected ORDERING after add_to_cart, got {new_state!r} — "
+            "state derivation is regressing again"
+        )
+
+    def test_save_cart_always_derives_state_overriding_caller(self):
+        """After v1 deletion, _save_cart always derives state from
+        contents. A ``state`` value passed in by the caller (only the
+        legacy executor used to do this) is overwritten — no more
+        dual-source-of-truth for state."""
+        from app.services import order_tools
+
+        saved: dict = {}
+
+        def fake_save(wa_id, business_id, update):
+            saved["update"] = update
+
+        cache = MagicMock()
+        cache.get_session.return_value = {
+            "session": {"order_context": {
+                "items": [], "total": 0,
+                "state": "GREETING", "delivery_info": None,
+            }},
+        }
+        with patch.object(
+            order_tools.session_state_service, "save", side_effect=fake_save,
+        ), patch.object(order_tools, "_turn_cache", return_value=cache):
+            order_tools._save_cart("+57300", "biz1", {
+                "items": [{"product_id": "p1", "name": "X",
+                           "price": 1, "quantity": 1}],
+                "total": 1,
+                # Caller asks for a legacy-era state — derivation wins.
+                "state": "COLLECTING_DELIVERY",
+            })
+
+        assert saved["update"]["order_context"]["state"] == "ORDERING", (
+            "_save_cart must derive state from contents, not honor "
+            "the caller's explicit state field (legacy behavior is dead)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Renderer: order_placed emits place_order tool output verbatim
+# ---------------------------------------------------------------------------
+
+class TestOrderPlacedRendering:
+    def test_order_placed_uses_tool_output_verbatim(self):
+        """order_placed must emit the canonical receipt produced by
+        place_order — not an LLM rephrasing that drops the order ID
+        or subtotal/delivery fee."""
+        from app.services import response_renderer
+
+        canonical_receipt = (
+            "✅ ¡Pedido confirmado! #ABCD1234\n"
+            "Subtotal: $28.000\n"
+            "🛵 Domicilio: $7.000\n"
+            "Total: $35.000\n"
+            "Nos ponemos en contacto pronto para coordinar la entrega.\n"
+            "⏱ Tiempo estimado de entrega: 40 a 50 minutos."
+        )
+        out = response_renderer.render_response(
+            {"kind": "order_placed", "summary": "placed", "facts": []},
+            business_context={"business_id": "biz1",
+                              "business": {"name": "Biela", "settings": {}}},
+            last_user_message="Confirmar pedido",
+            wa_id="+57300",
+            tool_outputs={"place_order": canonical_receipt},
+        )
+        assert out["type"] == "text"
+        assert out["body"] == canonical_receipt
+
+    def test_order_placed_falls_back_when_no_tool_output(self):
+        """If no place_order tool output was captured (shouldn't happen
+        in the real flow), fall back to LLM render so the user still
+        gets a confirmation message instead of nothing."""
+        from app.services import response_renderer
+
+        with patch.object(
+            response_renderer, "_render_text",
+            return_value="Pedido confirmado.",
+        ) as text_mock:
+            out = response_renderer.render_response(
+                {"kind": "order_placed", "summary": "", "facts": []},
+                business_context={"business_id": "biz1",
+                                  "business": {"name": "Biela", "settings": {}}},
+                last_user_message="ok",
+                wa_id="+57300",
+                tool_outputs={},
+            )
+        assert out["body"] == "Pedido confirmado."
+        text_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# place_order state-machine guard
+# ---------------------------------------------------------------------------
+
+class TestPlaceOrderConfirmationGuard:
+    def test_place_order_refuses_without_awaiting_confirmation(self):
+        """place_order must refuse if the agent never sent the
+        ready_to_confirm prompt — protects against the model jumping
+        straight from cart-with-items to placing the order."""
+        from app.services import order_tools
+
+        with patch.object(
+            order_tools, "_cart_from_session",
+            return_value={
+                "items": [{"product_id": "p1", "name": "Barracuda",
+                           "price": 28000, "quantity": 1}],
+                "delivery_info": {
+                    "address": "Cra 1", "payment_method": "Nequi",
+                    "phone": "+57300", "name": "Yisela",
+                },
+                "awaiting_confirmation": False,
+            },
+        ), patch.object(
+            order_tools, "_read_awaiting_confirmation",
+            return_value=False,
+        ), patch.object(
+            order_tools, "_products_enabled", return_value=True,
+        ):
+            result = order_tools.place_order.invoke({
+                "injected_business_context": {
+                    "business_id": "biz1",
+                    "wa_id": "+57300",
+                    "business": {"settings": {}},
+                },
+            })
+        assert "no ha confirmado" in result.lower()
+        assert "ready_to_confirm" in result
+
+    def test_obsolete_legacy_bypass_key_is_ignored(self):
+        """The legacy executor used to pass ``legacy_bypass=True`` in
+        the injected context to skip the awaiting_confirmation guard.
+        After v1 deletion the key has no effect — the guard fires
+        unconditionally. This test pins that behavior so a stale
+        ``legacy_bypass=True`` in a DB row or stub can't quietly let
+        an unconfirmed order through."""
+        from app.services import order_tools
+
+        fake_create_order = MagicMock(return_value={"success": True})
+        with patch.object(
+            order_tools, "_cart_from_session",
+            return_value={
+                "items": [{"product_id": "p1", "name": "Barracuda",
+                           "price": 28000, "quantity": 1}],
+                "delivery_info": {
+                    "address": "Cra 1", "payment_method": "Nequi",
+                    "phone": "+57300", "name": "Yisela",
+                },
+            },
+        ), patch.object(
+            order_tools, "_read_awaiting_confirmation",
+            return_value=False,
+        ), patch.object(
+            order_tools, "_products_enabled", return_value=True,
+        ), patch.object(
+            order_tools.product_order_service,
+            "create_order", fake_create_order,
+        ):
+            result = order_tools.place_order.invoke({
+                "injected_business_context": {
+                    "business_id": "biz1",
+                    "wa_id": "+57300",
+                    "legacy_bypass": True,  # ignored
+                    "business": {"settings": {}},
+                },
+            })
+        assert "no ha confirmado" in result.lower(), (
+            "legacy_bypass must NOT skip the guard after v1 deletion — "
+            "the awaiting_confirmation interlock is unconditional now"
+        )
+        fake_create_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Agent arms awaiting_confirmation flag on successful CTA dispatch
+# ---------------------------------------------------------------------------
+
+class TestAgentArmsConfirmationFlag:
+    def test_cta_dispatch_arms_awaiting_confirmation(self):
+        """When ready_to_confirm dispatches a CTA successfully, the
+        agent persists awaiting_confirmation=True so the next-turn
+        place_order is allowed by the guard."""
         agent = OrderAgent()
-        system, _ = agent._build_response_prompt(
-            result_kind="chat",
-            exec_result={},
-            message_body="si gracias",
-            business_context=None,
-            cart_summary_after="Pedido vacío.",
-            latest_order_status=status,
-        )
-        # Status-aware section must be present.
-        assert "DESPEDIDA POST-PEDIDO" in system, (
-            f"system prompt must trigger the post-order despedida branch for status={status!r}"
-        )
-        # The "qué te gustaría ordenar" phrase IS in the system, but only
-        # as a NEGATIVE example ("NUNCA digas..."). Assert the negation
-        # framing is present so the LLM is told NOT to use it.
-        lower = system.lower()
-        assert "nunca" in lower and "te gustaría ordenar" in lower
-        # Branch-specific phrase guides the LLM toward the right tone.
-        assert expected_phrase_substr.lower() in lower
+        only = _ai_with_tools([_respond_call(kind="ready_to_confirm")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
 
-    def test_chat_response_prompt_no_latest_order_uses_default(self):
-        from app.agents.order_agent import OrderAgent
+        cta_payload = {
+            "type": "cta",
+            "body": "¿Confirmamos?",
+            "content_sid": "HXfake",
+            "variables": {"1": "..."},
+        }
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value=cta_payload,
+             ), \
+             patch(
+                 "app.utils.whatsapp_utils.send_twilio_cta",
+                 return_value=MagicMock(sid="MSG"),
+             ), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(has_active_cart=True, cart_summary="• 1x BARRACUDA - $28.000\nSubtotal: $28.000", awaiting_confirmation=False),
+             ), \
+             patch(
+                 "app.agents.order_agent.set_awaiting_confirmation"
+             ) as set_flag:
+            agent.execute(
+                message_body="listo", wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+        set_flag.assert_called_once()
+        assert set_flag.call_args.args[2] is True
+
+    def test_text_fallback_for_ready_to_confirm_also_arms_flag(self):
+        """Text fallback (no CTA SID) for ready_to_confirm still arms
+        the flag so the next-turn place_order is unblocked."""
         agent = OrderAgent()
-        system, _ = agent._build_response_prompt(
-            result_kind="chat",
-            exec_result={},
-            message_body="hola",
-            business_context=None,
-            cart_summary_after="Pedido vacío.",
-            latest_order_status=None,
-        )
-        # No status → fall back to the generic CHAT instructions.
-        assert "DESPEDIDA POST-PEDIDO" not in system
+        only = _ai_with_tools([_respond_call(kind="ready_to_confirm")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
 
-    def test_confirm_rule_is_contextual_not_keyword_only(self):
-        """
-        Regression: 2026-05-05 (Biela / 3147139789) — user wrote "porfsvor"
-        (typo for "por favor") after the bot asked "¿procedemos?".  The
-        old CONFIRM rule was a keyword whitelist; "por favor" wasn't on it,
-        so even when the message reached the order planner it would have
-        missed.
+        text_payload = {
+            "type": "text",
+            "body": "¿Confirmamos el pedido?",
+        }
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value=text_payload,
+             ), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(has_active_cart=True, cart_summary="• 1x BARRACUDA - $28.000\nSubtotal: $28.000", awaiting_confirmation=False),
+             ), \
+             patch(
+                 "app.agents.order_agent.set_awaiting_confirmation"
+             ) as set_flag:
+            agent.execute(
+                message_body="listo", wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+        set_flag.assert_called_once()
+        assert set_flag.call_args.args[2] is True
 
-        The new rule is contextual: anchor on the bot's prior continuation
-        question (visible via Historial reciente / 10-msg uniform window)
-        and treat ANY brief affirmative/courtesy/acceptance reply as
-        CONFIRM. The keyword list is illustrative, not exhaustive.
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        lower = prompt.lower()
-        # Rule heading + contextual framing.
-        assert "confirmación (regla principal" in lower
-        assert "historial reciente" in lower
-        # Must enumerate what counts as a continuation question (the
-        # anchor the LLM should look for).
-        for cue in ("¿procedemos?", "¿algo más?"):
-            assert cue.lower() in lower
-        # Politeness affirmatives explicitly covered (the production miss).
-        for word in ("por favor", "porfa", "please"):
-            assert word in lower
-        # The "ilustrativas, NO exhaustivas" framing — gives the LLM
-        # permission to generalize to typos like "porfsvor" or
-        # regional variants we didn't enumerate.
-        assert "ilustrativas" in lower
-        assert "no exhaustivas" in lower or "no exhaustivos" in lower
+    def test_non_confirm_envelope_clears_flag_when_previously_armed(self):
+        """If the flag was on (last turn was a confirmation prompt) and
+        this turn produces something else (e.g. user changed their mind
+        and we updated the cart), the flag must be cleared so the next
+        ready_to_confirm re-arms cleanly."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="cart_updated")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
 
-    def test_planner_prompt_routes_polite_close_after_recent_order_to_chat(self):
-        """
-        Regression: 2026-05-04 (Biela / 3177000722). User said "si gracias"
-        right after PLACE_ORDER. Planner classified as CONFIRM, response
-        template invited a new order ("¿qué te gustaría ordenar hoy?").
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "Actualizado."},
+             ), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(awaiting_confirmation=True),
+             ), \
+             patch(
+                 "app.agents.order_agent.set_awaiting_confirmation"
+             ) as set_flag:
+            agent.execute(
+                message_body="cambia a nequi", wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+        set_flag.assert_called_once()
+        assert set_flag.call_args.args[2] is False
 
-        And worse — same pattern on 2026-05-04 (Biela / 3108069647) caused
-        the CS planner to hallucinate CANCEL_ORDER and delete the order.
 
-        The planner prompt must classify polite-close turns as CHAT when
-        the cart is empty AND there's a recent placed order. NEVER as
-        CONFIRM (nothing to confirm, the order is already placed).
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        lower = prompt.lower()
-        # The rule heading.
-        assert "despedida / agradecimiento" in lower or "despedida" in lower, (
-            "Planner prompt must declare a despedida-after-recent-order rule"
-        )
-        # The signal it depends on (rendered by turn_context).
-        assert "último pedido (estado)" in lower or "ultimo pedido (estado)" in lower
-        # The classification target.
-        assert "intent\": \"chat\"" in lower
-        # The example phrases the LLM can pattern-match against.
-        for example in ("si gracias", "gracias", "ok gracias", "listo gracias"):
-            assert example in lower, f"Planner prompt missing example: {example!r}"
-        # Must explicitly forbid CONFIRM in this scenario.
-        assert "nunca uses confirm" in lower or "no uses confirm" in lower
-        # Must explicitly carve out REMOVE_FROM_CART and ABANDON_CART
-        # so they keep working.
-        assert "remove_from_cart" in lower
-        assert "abandon_cart" in lower
+# ---------------------------------------------------------------------------
+# Runtime state hint — agent tells the LLM about awaiting_confirmation
+# ---------------------------------------------------------------------------
 
-    def test_planner_prompt_has_latest_order_block_placeholder(self):
-        """
-        The PLANNER_SYSTEM_TEMPLATE must accept a {latest_order_block}
-        placeholder; older callers that don't pass one should pass an
-        empty string. We assert the placeholder is in the raw template.
-        """
-        from app.agents.order_agent import PLANNER_SYSTEM_TEMPLATE as T
-        assert "{latest_order_block}" in T
+class TestAwaitingConfirmationHint:
+    def test_hint_injected_when_flag_is_set(self):
+        """When the previous turn dispatched a confirm prompt, the
+        current turn's prompt must include a runtime SystemMessage
+        telling the model: \"if user affirms, call place_order — don't
+        re-send the card.\""""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="order_placed")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
 
-    def test_planner_prompt_honors_recognized_product_hint(self):
-        """
-        Regression: 2026-05-06 (Biela / 3147554464). User said
-        "Tienes la a la Vuelta?" right after the bot listed
-        "HONEY BURGER, MEXICAN BURGER, AL PASTOR, AMERICANA, ARRABBIATA"
-        (LA VUELTA wasn't in the listed slice). The planner's
-        RESOLUCIÓN DE NOMBRES ABREVIADOS rule kicked in and emitted
-        ADD_TO_CART {product_name: "HONEY BURGER", notes: "a la vuelta"}
-        because the LLM didn't recognize "la Vuelta" as a separate
-        real product.
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "Pedido confirmado."},
+             ), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(awaiting_confirmation=True),
+             ), \
+             patch("app.agents.order_agent.set_awaiting_confirmation"):
+            agent.execute(
+                message_body="Confirmar pedido", wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
 
-        After the router's multi-word product-name short-circuit,
-        the turn context now carries
-        ``Producto reconocido en el mensaje: LA VUELTA``. The planner
-        must have a max-priority rule that uses that hint and
-        explicitly OVERRIDES the abbreviated-name rule.
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        lower = prompt.lower()
-        # The new max-priority rule heading.
-        assert "producto reconocido" in lower
-        # Must reference the exact context line emitted by
-        # render_for_prompt so the LLM can pattern-match against it.
-        assert "producto reconocido en el mensaje:" in lower
-        # Must explicitly forbid redirecting to a listed option.
-        assert "nunca lo reemplaces" in lower
-        # Must explicitly carve out the abbreviated-name rule —
-        # state that it does NOT apply when the hint is present.
-        assert "resolución de nombres abreviados" in lower
-        # Must scope notes correctly so the product name doesn't
-        # end up in notes (the production failure mode).
-        assert "nunca pongas el nombre del producto en `notes`" in lower or \
-               "nunca pongas el nombre del producto en notes" in lower
+        sent_messages = llm.invoke.call_args.args[0]
+        # Behavioral hint when awaiting_confirmation is armed. The
+        # state itself is in the unified CONTEXTO block ("Esperando
+        # confirmación: SÍ"); this separate SystemMessage tells the
+        # model what to *do* with that state.
+        hints = [
+            m for m in sent_messages
+            if isinstance(m, SystemMessage) and "ACCIÓN ESPERADA" in m.content
+        ]
+        assert hints, "expected awaiting_confirmation behavioral hint as SystemMessage"
+        assert "place_order" in hints[0].content
 
-    def test_planner_prompt_does_not_split_default_side_into_separate_item(self):
-        """
-        Regression: production observation 2026-05-04 (Biela / 3145798093)
-        — "Quiero una barracuda con papas" was decomposed into two cart
-        items (BARRACUDA + papas). The executor then resolved 'papas'
-        against the catalog, hit 5 ambiguous matches (SALCHIPAPA, BIELA
-        FRIES, CHEESE FRIES, SPECIAL FRIES, PAPAS PERGRETTI), added the
-        BARRACUDA, and asked the user to disambiguate. But every burger
-        at Biela includes fries by default — "con papas" was a redundant
-        confirmation, not a second line.
+    def test_no_hint_when_flag_not_set(self):
+        """No hint when the flag is off — keeps the prompt small for
+        the common case."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(kind="chat")])
+        llm = MagicMock()
+        llm.invoke.return_value = only
 
-        The planner prompt must rule that when a default-included
-        accompaniment is mentioned with "con", it does NOT become a
-        separate cart item.
-        """
-        prompt = PLANNER_SYSTEM_TEMPLATE
-        lower = prompt.lower()
-        # The rule heading.
-        assert "acompañamientos incluidos por default" in lower, (
-            "Planner prompt must call out default-included accompaniments "
-            "as a non-decomposable case"
-        )
-        # The exact regression example.
-        assert "una barracuda con papas" in lower, (
-            "Planner prompt must use 'una barracuda con papas' as the "
-            "canonical example of the no-split rule"
-        )
-        # Must reference the business-rules section so the planner
-        # knows where the inclusion fact comes from.
-        assert "reglas y contexto del negocio" in lower
-        # Must enumerate the trigger words for the affirmative form.
-        for word in ("con", "papas"):
-            assert word in lower
-        # Must explicitly call out the negation form (which uses notes).
-        assert "sin papas" in lower, (
-            "Planner prompt must show that 'sin papas' goes in notes, "
-            "not as an item"
-        )
-        # Must enumerate the explicit exceptions (so the rule doesn't
-        # over-apply).
-        assert "biela fries" in lower or "salchipapa" in lower, (
-            "Planner prompt must show explicit-name catalog requests "
-            "DO get split into separate items"
-        )
-        assert "extras" in lower or "aparte" in lower, (
-            "Planner prompt must show extra/additional sides DO get split"
-        )
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "ok"},
+             ), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(awaiting_confirmation=False),
+             ), \
+             patch("app.agents.order_agent.set_awaiting_confirmation"):
+            agent.execute(
+                message_body="hola", wa_id="+57300", name="X",
+                business_context=BIELA_CTX, conversation_history=[],
+            )
+
+        sent_messages = llm.invoke.call_args.args[0]
+        hints = [
+            m for m in sent_messages
+            if isinstance(m, SystemMessage) and "ESTADO ACTUAL" in m.content
+        ]
+        assert not hints, "should not inject hint when flag is off"
+
+
+# ---------------------------------------------------------------------------
+# Out-of-zone delivery → handoff to customer_service
+# ---------------------------------------------------------------------------
+
+class TestOutOfZoneHandoff:
+    """When the action agent emits ``out_of_scope`` with summary
+    ``out_of_zone:<city>`` and a phone fact, the agent skips the
+    renderer entirely and returns a dispatcher-style handoff to CS.
+    The CS agent's ``reason='out_of_zone'`` fast-path then builds the
+    polished redirect message — no LLM in the loop, no hallucinated
+    phone number."""
+
+    def test_out_of_zone_envelope_returns_handoff_to_cs(self):
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(
+            kind="out_of_scope",
+            summary="out_of_zone:Ipiales",
+            facts=["city:Ipiales", "phone:3239609582"],
+        )])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(),
+             ), \
+             patch(
+                 "app.agents.order_agent.render_response",
+             ) as render_mock:
+            output = agent.execute(
+                message_body="quiero pedir a Ipiales",
+                wa_id="+573001234567",
+                name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        # Renderer skipped — handoff path bypasses it entirely.
+        render_mock.assert_not_called()
+        assert output["agent_type"] == "order"
+        assert output["message"] == ""
+        hand = output.get("handoff") or {}
+        assert hand.get("to") == "customer_service"
+        ctx = hand.get("context") or {}
+        assert ctx.get("reason") == "out_of_zone"
+        assert ctx.get("city") == "Ipiales"
+        assert ctx.get("phone") == "3239609582"
+
+    def test_out_of_zone_envelope_missing_phone_falls_through_to_render(self):
+        """If the model emits ``out_of_zone:`` without a phone fact, we
+        can't safely redirect — fall back to the renderer so the user
+        gets *some* coherent reply instead of a broken handoff."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(
+            kind="out_of_scope",
+            summary="out_of_zone:Ipiales",
+            facts=["city:Ipiales"],  # phone missing
+        )])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(),
+             ), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "ok"},
+             ) as render_mock:
+            output = agent.execute(
+                message_body="quiero pedir a Ipiales",
+                wa_id="+573001234567",
+                name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        render_mock.assert_called_once()
+        assert "handoff" not in output
+
+    def test_normal_out_of_scope_does_not_handoff(self):
+        """``out_of_scope`` for non-redirect reasons (queja, pedido pasado)
+        must still go through the renderer — only the ``out_of_zone:``
+        summary triggers the handoff."""
+        agent = OrderAgent()
+        only = _ai_with_tools([_respond_call(
+            kind="out_of_scope",
+            summary="customer asked about old order",
+            facts=[],
+        )])
+        llm = MagicMock()
+        llm.invoke.return_value = only
+
+        with patch.object(OrderAgent, "llm", llm), \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"), \
+             patch(
+                 "app.agents.order_agent.build_turn_context",
+                 return_value=_stub_turn_context(),
+             ), \
+             patch(
+                 "app.agents.order_agent.render_response",
+                 return_value={"type": "text", "body": "Para consultas de pedidos pasados..."},
+             ) as render_mock:
+            output = agent.execute(
+                message_body="dónde está mi pedido de ayer",
+                wa_id="+573001234567",
+                name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        render_mock.assert_called_once()
+        assert "handoff" not in output
+
+
+class TestOutOfZonePromptSurface:
+    """``format_business_info_for_prompt`` must surface the
+    ``out_of_zone_delivery_contacts`` setting so the model knows which
+    cities trigger the redirect, with the city/phone values it should
+    cite verbatim in the envelope facts."""
+
+    def test_out_of_zone_contacts_render_in_prompt(self):
+        from app.services.business_info_service import format_business_info_for_prompt
+        ctx = {
+            "business_id": "biela",
+            "business": {
+                "name": "Biela",
+                "settings": {
+                    "out_of_zone_delivery_contacts": [
+                        {"city": "Ipiales", "phone": "3239609582"},
+                    ],
+                },
+            },
+        }
+        rendered = format_business_info_for_prompt(ctx)
+        assert "Ipiales" in rendered
+        assert "3239609582" in rendered
+        assert "out_of_zone:" in rendered  # respond-kind hint for the model
+
+    def test_no_out_of_zone_contacts_omits_block(self):
+        from app.services.business_info_service import format_business_info_for_prompt
+        ctx = {
+            "business_id": "biela",
+            "business": {"name": "Biela", "settings": {}},
+        }
+        rendered = format_business_info_for_prompt(ctx)
+        assert "out_of_zone" not in rendered
+        assert "FUERA de cobertura" not in rendered

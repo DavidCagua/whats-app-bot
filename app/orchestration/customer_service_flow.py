@@ -1,8 +1,10 @@
 """
 Customer service flow: handlers that back the CS agent's tools.
 
-Parallel to order_flow.py but much simpler — every operation here is
-READ-ONLY except cancel_order. No cart mutation, no order creation.
+Read-only by design except for cancel_order — no cart mutation, no
+order creation. Each handler returns a small result dict that the
+tool wrapper turns into a FINAL or HANDOFF sentinel for the CS
+agent's dispatch loop.
 
 Each ``_handle_*`` function is invoked from a ``@tool`` wrapper in
 ``app/services/cs_tools.py``. The wrapper extracts per-turn context
