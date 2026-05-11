@@ -396,6 +396,49 @@ def is_taking_orders_now(
     }
 
 
+def is_fully_closed_today(status: Dict[str, Any]) -> bool:
+    """
+    True iff today is a "no service" day — the business has no opening
+    window at all today. Distinguishes from a mid-day break (closed now
+    but opens later today, ``opens_at`` set) where customers will be
+    served in a few hours.
+
+    Used to decide when to append the alt-branch contact line and to
+    drop the menu URL / Twilio welcome card on the greeting.
+    """
+    if not status or not status.get("has_data"):
+        return False
+    if status.get("is_open"):
+        return False
+    # ``opens_at`` is set ONLY in the "closed but opens later today"
+    # branch of compute_open_status. When today has no schedule row at
+    # all (e.g. Sunday for a Mon-Sat business), opens_at stays None.
+    if status.get("opens_at") is not None:
+        return False
+    return True
+
+
+def format_closed_alt_contact_suffix(business: Optional[Dict[str, Any]]) -> str:
+    """
+    Render the "if you need to order today, contact <sibling branch>"
+    suffix used on fully-closed-today greetings and order_closed handoffs.
+
+    Reads ``business.settings.closed_day_alt_contact = {name, phone}``.
+    Returns an empty string when the contact isn't configured.
+    """
+    if not business:
+        return ""
+    settings = (business.get("settings") or {}) if isinstance(business, dict) else {}
+    alt = settings.get("closed_day_alt_contact") or {}
+    if not isinstance(alt, dict):
+        return ""
+    name = (alt.get("name") or "").strip()
+    phone = (alt.get("phone") or "").strip()
+    if not name or not phone:
+        return ""
+    return f" Si necesitas pedir hoy, escríbele a {name} al {phone}."
+
+
 def format_open_status_sentence(status: Dict[str, Any]) -> str:
     """
     One-liner Spanish sentence summarizing whether the business is

@@ -196,17 +196,17 @@ class TestOrderClosedGate:
         "now_local": None,
     }
 
-    def test_closed_blocks_add_to_cart(self):
-        """ADD_TO_CART while closed → handoff to customer_service with
-        reason=order_closed and the message body intact."""
+    def test_closed_no_cart_short_circuits_before_planner(self):
+        """Closed shop + no active cart → handoff to customer_service
+        BEFORE the planner LLM runs. Previously the gate only fired on
+        a mutating-intent emission, letting "para un domicilio" openers
+        slip through to a friendly model reply ("¿Qué te gustaría
+        pedir?") that misled customers into building a cart on a closed
+        day (incident +573172908887, 2026-05-11)."""
         agent = OrderAgent()
-        llm = MagicMock()
-        # Planner emits singleton ADD_TO_CART.
-        llm.invoke.return_value = _llm_response(
-            '{"intents":[{"intent":"ADD_TO_CART","params":{"product_name":"BARRACUDA","quantity":1}}]}'
-        )
-        with patch.object(OrderAgent, "llm", llm), \
-             patch.object(OrderAgent, "planner_llm", llm), \
+        planner_llm = MagicMock()
+        with patch.object(OrderAgent, "llm", MagicMock()), \
+             patch.object(OrderAgent, "planner_llm", planner_llm), \
              patch(
                  "app.services.business_info_service.is_taking_orders_now",
                  return_value=self._CLOSED_GATE,
@@ -222,40 +222,30 @@ class TestOrderClosedGate:
                 session={"order_context": {"items": []}},
             )
 
-        # Executor must NOT have run for the blocked mutating intent.
+        # Planner LLM must NOT have run — early short-circuit.
+        planner_llm.invoke.assert_not_called()
         exec_mock.assert_not_called()
-        # Handoff to customer_service with order_closed reason.
         hand = output.get("handoff") or {}
         assert hand.get("to") == "customer_service"
         assert hand.get("segment") == "una barracuda"
         ctx = hand.get("context") or {}
         assert ctx.get("reason") == "order_closed"
         assert ctx.get("has_active_cart") is False
-        assert "ADD_TO_CART" in (ctx.get("blocked_intents") or [])
 
-    def test_closed_lets_browse_intent_through(self):
-        """GET_PRODUCT (browse) while closed → executor runs normally,
-        no handoff. Customers can read the menu while the shop is closed."""
+    def test_closed_short_circuits_browse_intent_too(self):
+        """Closed shop + no cart → even browse intents like "qué trae la
+        barracuda" short-circuit to CS. Surfacing menu details on a
+        closed day encourages a multi-step order path that fails at
+        submit time; CS still answers menu-URL requests on demand."""
         agent = OrderAgent()
-        llm = MagicMock()
-        llm.invoke.side_effect = [
-            _llm_response('{"intents":[{"intent":"GET_PRODUCT","params":{"product_name":"BARRACUDA"}}]}'),
-            _llm_response("La BARRACUDA cuesta $28.000."),
-        ]
-        product_details_result = {
-            "result_kind": "product_details",
-            "success": True,
-            "product_details": {"name": "BARRACUDA", "price": 28000},
-            "state_after": "GREETING",
-            "cart_summary": "Pedido vacío.",
-        }
-        with patch.object(OrderAgent, "llm", llm), \
-             patch.object(OrderAgent, "planner_llm", llm), \
+        planner_llm = MagicMock()
+        with patch.object(OrderAgent, "llm", MagicMock()), \
+             patch.object(OrderAgent, "planner_llm", planner_llm), \
              patch(
                  "app.services.business_info_service.is_taking_orders_now",
                  return_value=self._CLOSED_GATE,
              ), \
-             patch("app.agents.order_agent.execute_order_intent", return_value=product_details_result), \
+             patch("app.agents.order_agent.execute_order_intent") as exec_mock, \
              patch("app.agents.order_agent.conversation_service"), \
              patch("app.agents.order_agent.tracer"):
             output = agent.execute(
@@ -266,8 +256,48 @@ class TestOrderClosedGate:
                 session={"order_context": {"items": []}},
             )
 
-        assert output.get("handoff") is None
-        assert "28.000" in output["message"]
+        planner_llm.invoke.assert_not_called()
+        exec_mock.assert_not_called()
+        hand = output.get("handoff") or {}
+        assert hand.get("to") == "customer_service"
+        assert (hand.get("context") or {}).get("reason") == "order_closed"
+
+    def test_closed_with_active_cart_runs_planner_and_uses_in_loop_gate(self):
+        """When the cart already has items, the early short-circuit does
+        NOT fire (returning customers can still browse / view cart). The
+        existing in-loop gate guards mutating intents."""
+        agent = OrderAgent()
+        llm = MagicMock()
+        llm.invoke.return_value = _llm_response(
+            '{"intents":[{"intent":"ADD_TO_CART","params":{"product_name":"BARRACUDA","quantity":1}}]}'
+        )
+        with patch.object(OrderAgent, "llm", llm), \
+             patch.object(OrderAgent, "planner_llm", llm), \
+             patch(
+                 "app.services.business_info_service.is_taking_orders_now",
+                 return_value=self._CLOSED_GATE,
+             ), \
+             patch("app.agents.order_agent.execute_order_intent") as exec_mock, \
+             patch("app.agents.order_agent.conversation_service"), \
+             patch("app.agents.order_agent.tracer"):
+            output = agent.execute(
+                message_body="dame otra barracuda",
+                wa_id="+573001234567", name="David",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+                session={"order_context": {"items": [{"name": "BARRACUDA", "quantity": 1}]}},
+            )
+
+        # Planner ran because the cart is non-empty.
+        assert llm.invoke.called
+        # In-loop gate still blocks the mutating intent.
+        exec_mock.assert_not_called()
+        hand = output.get("handoff") or {}
+        assert hand.get("to") == "customer_service"
+        ctx = hand.get("context") or {}
+        assert ctx.get("reason") == "order_closed"
+        assert ctx.get("has_active_cart") is True
+        assert "ADD_TO_CART" in (ctx.get("blocked_intents") or [])
 
     def test_open_is_no_op(self):
         """Open business → gate is a no-op. ADD_TO_CART runs normally,

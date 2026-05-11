@@ -1622,6 +1622,62 @@ class OrderAgent(BaseAgent):
         try:
             tracer.start_run(run_id=run_id, user_id=wa_id, message_id=message_id, business_id=str(business_id))
 
+            # Closed-shop short-circuit. The per-intent gate further down
+            # only fires when the planner emits a mutating intent. For
+            # order openers like "Buenas noches para un domicilio", the
+            # planner often emits CHAT (no mutation), so the LLM happily
+            # replies "¿Qué te gustaría pedir?" — leading the customer
+            # into a multi-message ordering path that fails at submit
+            # time. Production incident: +573172908887, 2026-05-11.
+            #
+            # When the shop is closed and the customer has no active
+            # cart, skip the planner LLM entirely and hand off to CS so
+            # the canonical "estamos cerrados…" reply (with the
+            # alt-branch contact line on fully-closed days) lands as the
+            # very first response. Customers with an active cart still
+            # fall through to the planner: they may want VIEW_CART or
+            # to browse, and the in-loop gate guards mutations.
+            _early_gate_opt_in = True
+            try:
+                _early_settings = ((business_context or {}).get("business") or {}).get("settings") or {}
+                _early_gate_opt_in = _early_settings.get("order_gate_enabled", True) is not False
+            except Exception:
+                _early_gate_opt_in = True
+            if _early_gate_opt_in and not items:
+                try:
+                    from ..services import business_info_service as _bi_svc_early
+                    _early_gate = _bi_svc_early.is_taking_orders_now(str(business_id))
+                except Exception as exc:
+                    logging.warning(
+                        "[ORDER_GATE] business=%s wa_id=%s early-gate compute failed: %s",
+                        business_id, wa_id, exc,
+                    )
+                    _early_gate = None
+                if _early_gate is not None and not _early_gate.get("can_take_orders"):
+                    logging.warning(
+                        "[ORDER_GATE] business=%s wa_id=%s closed-shop short-circuit "
+                        "(no active cart) → handoff customer_service reason=order_closed",
+                        business_id, wa_id,
+                    )
+                    tracer.end_run(
+                        run_id, success=True,
+                        latency_ms=(time.time() - start_time) * 1000,
+                    )
+                    return {
+                        "agent_type": self.agent_type,
+                        "message": "",
+                        "state_update": {"active_agents": ["order"]},
+                        "handoff": {
+                            "to": "customer_service",
+                            "segment": message_body,
+                            "context": {
+                                "reason": "order_closed",
+                                "has_active_cart": False,
+                                "blocked_intents": [],
+                            },
+                        },
+                    }
+
             # Handoff fast-path: when we got here via a customer-service
             # handoff that already resolved a promo (e.g. user said "dame
             # esa" after CS listed promos), skip the planner LLM and

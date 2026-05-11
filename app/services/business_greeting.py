@@ -86,7 +86,10 @@ _LEGACY_DEFAULT_BUSINESS_NAME = "BIELA FAST FOOD"
 _LEGACY_DEFAULT_MENU_URL = "https://gixlink.com/Biela"
 
 
-def _closed_sentence_from_gate(gate: Optional[dict]) -> str:
+def _closed_sentence_from_gate(
+    gate: Optional[dict],
+    business: Optional[dict] = None,
+) -> str:
     """
     Render the live "we're closed, opens at X" sentence from the gate
     payload returned by ``business_info_service.is_taking_orders_now``.
@@ -96,6 +99,11 @@ def _closed_sentence_from_gate(gate: Optional[dict]) -> str:
     Mirrors ``business_info_service.format_open_status_sentence`` so
     the closed prose is identical across the welcome greeting and the
     CS ``order_closed`` handoff branch.
+
+    When ``business`` is provided AND today is fully closed (no opening
+    window at all) AND ``business.settings.closed_day_alt_contact`` is
+    configured, appends "Si necesitas pedir hoy, escríbele a <name> al
+    <phone>." — same suffix used by the CS order_closed handoff.
     """
     if not gate or gate.get("can_take_orders") or gate.get("reason") != "closed":
         return ""
@@ -113,9 +121,31 @@ def _closed_sentence_from_gate(gate: Optional[dict]) -> str:
             "next_open_time": gate.get("next_open_time"),
             "now_local": gate.get("now_local"),
         }
-        return _bi_svc.format_open_status_sentence(synthesized)
+        sentence = _bi_svc.format_open_status_sentence(synthesized)
+        if business is not None and _bi_svc.is_fully_closed_today(synthesized):
+            sentence = sentence + _bi_svc.format_closed_alt_contact_suffix(business)
+        return sentence
     except Exception:
         return "Por ahora estamos cerrados."
+
+
+def _is_fully_closed_today_from_gate(gate: Optional[dict]) -> bool:
+    """Lightweight wrapper so callers don't have to synthesize the status shape."""
+    if not gate or gate.get("can_take_orders") or gate.get("reason") != "closed":
+        return False
+    try:
+        from . import business_info_service as _bi_svc
+        return _bi_svc.is_fully_closed_today({
+            "is_open": False,
+            "has_data": True,
+            "opens_at": gate.get("opens_at"),
+            "closes_at": None,
+            "next_open_dow": gate.get("next_open_dow"),
+            "next_open_time": gate.get("next_open_time"),
+            "now_local": gate.get("now_local"),
+        })
+    except Exception:
+        return False
 
 
 def get_greeting(
@@ -150,7 +180,11 @@ def get_greeting(
     has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
     opener = f"Hola {first} " if has_real_name else "Hola "
 
-    closed_sentence = _closed_sentence_from_gate(gate)
+    business_for_suffix = (
+        (business_context or {}).get("business") if business_context else None
+    )
+    closed_sentence = _closed_sentence_from_gate(gate, business=business_for_suffix)
+    fully_closed = _is_fully_closed_today_from_gate(gate)
     if closed_sentence:
         body = (
             f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
@@ -164,7 +198,11 @@ def get_greeting(
             f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
             "¿Qué se te antoja hoy? Estamos listos para ayudarte"
         )
-    if menu_url:
+    # On a fully-closed-today greeting, do NOT append the menu URL.
+    # The customer can still request it via CS later; surfacing it here
+    # encourages a multi-step order path that ends in disappointment
+    # (production incident: +573172908887 on 2026-05-11).
+    if menu_url and not fully_closed:
         body += f"\n\n{menu_url}"
     return body
 
@@ -209,15 +247,24 @@ def cta_welcome_payload(
     opener = f"Hola {first} " if has_real_name else "Hola "
 
     is_closed = bool(gate and not gate.get("can_take_orders") and gate.get("reason") == "closed")
+    fully_closed_today = _is_fully_closed_today_from_gate(gate)
 
     if is_closed:
+        # On a fully-closed-today greeting, intentionally skip the Twilio
+        # CTA. The card's "Ver carta" button entices customers to browse
+        # and build a cart only to discover at submit time that the shop
+        # is closed (production incident: +573172908887 on 2026-05-11).
+        # Plain-text greeting handles closed days; it renders the closed
+        # sentence + alt-branch contact line inline via get_greeting.
+        if fully_closed_today:
+            return None
         closed_sid = (settings.get("welcome_closed_content_sid") or "").strip()
         if not closed_sid:
             # No closed-state template configured — caller falls back
             # to the plain-text greeting, which renders the closed
             # sentence inline via get_greeting(gate=...).
             return None
-        closed_sentence = _closed_sentence_from_gate(gate) or "Por ahora estamos cerrados."
+        closed_sentence = _closed_sentence_from_gate(gate, business=biz) or "Por ahora estamos cerrados."
         variables = {"1": business_name, "2": opener, "3": closed_sentence}
         rendered_body = (
             f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"

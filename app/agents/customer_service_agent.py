@@ -744,10 +744,16 @@ class CustomerServiceAgent(BaseAgent):
                 "handoff blocked_intents=%s has_active_cart=%s",
                 business_id, wa_id, blocked_intents, has_active_cart,
             )
+            fully_closed_today = False
+            alt_contact_suffix = ""
             try:
                 from ..services import business_info_service as _bi_svc
                 status = _bi_svc.compute_open_status(str(business_id))
                 sentence = _bi_svc.format_open_status_sentence(status)
+                fully_closed_today = _bi_svc.is_fully_closed_today(status)
+                if fully_closed_today:
+                    biz = (business_context or {}).get("business")
+                    alt_contact_suffix = _bi_svc.format_closed_alt_contact_suffix(biz)
             except Exception as exc:
                 logging.warning(
                     "[ORDER_GATE] business=%s wa_id=%s open-status compute failed: %s",
@@ -765,7 +771,10 @@ class CustomerServiceAgent(BaseAgent):
                     " Mientras tanto puedo contarte del menú o resolverte "
                     "cualquier duda."
                 )
-            message = base + tail
+            # Alt-contact suffix sits between the closed sentence and the
+            # tail so the redirect lands BEFORE the "talk about the menu"
+            # offer — the redirect is the more actionable answer.
+            message = base + alt_contact_suffix + tail
             try:
                 conversation_service.store_conversation_message(
                     wa_id, message, "assistant", business_id=business_id,

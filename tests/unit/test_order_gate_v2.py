@@ -117,16 +117,15 @@ class TestMutatingToolNames:
 # ---------------------------------------------------------------------------
 
 class TestGateClosedBlocksMutating:
-    def test_add_to_cart_blocked_returns_handoff_to_cs(self):
+    def test_closed_no_cart_short_circuits_before_llm(self):
+        """Closed + no active cart → short-circuit handoff to CS BEFORE
+        the LLM is invoked. blocked_intents is empty because no tools
+        ever got dispatched. Replaces the older test that asserted
+        post-LLM blocked_intents — order openers like "quiero una
+        barracuda" can now slip the planner without calling a mutating
+        tool, so the only reliable gate is the pre-LLM short-circuit."""
         agent = OrderAgentToolCalling()
-        only = _ai_with_tools([{
-            "name": "add_to_cart",
-            "args": {"product_name": "BARRACUDA"},
-            "id": "c1",
-            "type": "tool_call",
-        }])
         llm = MagicMock()
-        llm.invoke.return_value = only
 
         with patch.object(OrderAgentToolCalling, "llm", llm), \
              patch("app.agents.order_agent_tool_calling.conversation_service"), \
@@ -146,6 +145,8 @@ class TestGateClosedBlocksMutating:
                 conversation_history=[],
             )
 
+        # LLM must NOT have been invoked.
+        llm.invoke.assert_not_called()
         assert output["agent_type"] == "order"
         assert output["message"] == ""
         hand = output.get("handoff") or {}
@@ -153,7 +154,6 @@ class TestGateClosedBlocksMutating:
         ctx = hand.get("context") or {}
         assert ctx.get("reason") == "order_closed"
         assert ctx.get("has_active_cart") is False
-        assert "add_to_cart" in (ctx.get("blocked_intents") or [])
 
     def test_place_order_blocked_returns_handoff(self):
         agent = OrderAgentToolCalling()
@@ -186,10 +186,12 @@ class TestGateClosedBlocksMutating:
         # saved, we'll resume when we open."
         assert hand.get("context", {}).get("has_active_cart") is True
 
-    def test_blocked_intents_includes_every_mutating_call_in_turn(self):
-        """If the model emitted multiple mutating tool calls in one turn
-        (e.g. add_to_cart + submit_delivery_info), CS gets the FULL list
-        so its message can reference all of them, not just the first."""
+    def test_blocked_intents_with_active_cart_lists_every_mutating_call(self):
+        """When the cart already has items, the pre-LLM short-circuit
+        does NOT fire (returning customer; they may want VIEW_CART).
+        The in-loop gate is the safety net here and it lists every
+        mutating tool emitted that turn so the CS message references
+        all of them."""
         agent = OrderAgentToolCalling()
         only = _ai_with_tools([
             {"name": "add_to_cart", "args": {"product_name": "X"},
@@ -206,7 +208,7 @@ class TestGateClosedBlocksMutating:
              patch("app.agents.order_agent_tool_calling.tracer"), \
              patch(
                  "app.agents.order_agent_tool_calling.build_turn_context",
-                 return_value=_stub_turn_context(),
+                 return_value=_stub_turn_context(has_active_cart=True),
              ), \
              patch(
                  "app.services.business_info_service.is_taking_orders_now",
@@ -265,17 +267,20 @@ class TestGateClosedBlocksMutating:
 # Gate closed + browse tool → tool runs, no handoff
 # ---------------------------------------------------------------------------
 
-class TestGateClosedAllowsBrowse:
-    def test_view_cart_runs_normally_on_closed_shop(self):
-        """Browse intents must work even while closed — customers can
-        still read the menu / check what they have."""
+class TestGateClosedAllowsBrowseWithActiveCart:
+    """With an active cart, the closed-shop short-circuit does NOT fire
+    (returning customer; we don't want to handoff every browse). Browse
+    tools (view_cart, search_products) run normally so the customer can
+    inspect what they have and read the menu while waiting to reopen."""
+
+    def test_view_cart_runs_normally_with_active_cart_on_closed_shop(self):
         agent = OrderAgentToolCalling()
         first = _ai_with_tools([{
             "name": "view_cart", "args": {}, "id": "c1", "type": "tool_call",
         }])
         second = _ai_with_tools([{
             "name": "respond",
-            "args": {"kind": "cart_view", "summary": "Tu carrito está vacío."},
+            "args": {"kind": "cart_view", "summary": "Tu carrito tiene 1 ítem."},
             "id": "r1", "type": "tool_call",
         }])
         llm = MagicMock()
@@ -286,7 +291,7 @@ class TestGateClosedAllowsBrowse:
              patch("app.agents.order_agent_tool_calling.tracer"), \
              patch(
                  "app.agents.order_agent_tool_calling.build_turn_context",
-                 return_value=_stub_turn_context(),
+                 return_value=_stub_turn_context(has_active_cart=True),
              ), \
              patch(
                  "app.services.business_info_service.is_taking_orders_now",
@@ -294,7 +299,7 @@ class TestGateClosedAllowsBrowse:
              ), \
              patch(
                  "app.agents.order_agent_tool_calling.render_response",
-                 return_value={"type": "text", "body": "Tu carrito está vacío."},
+                 return_value={"type": "text", "body": "Tu carrito tiene 1 ítem."},
              ):
             output = agent.execute(
                 message_body="qué tengo",
@@ -305,9 +310,9 @@ class TestGateClosedAllowsBrowse:
 
         # No handoff fired; the turn ran to its renderer.
         assert "handoff" not in output or not output["handoff"]
-        assert "vacío" in output.get("message", "").lower()
+        assert "ítem" in output.get("message", "").lower() or "item" in output.get("message", "").lower()
 
-    def test_search_products_runs_normally_on_closed_shop(self):
+    def test_search_products_runs_normally_with_active_cart_on_closed_shop(self):
         agent = OrderAgentToolCalling()
         first = _ai_with_tools([{
             "name": "search_products", "args": {"query": "barracuda"},
@@ -326,7 +331,7 @@ class TestGateClosedAllowsBrowse:
              patch("app.agents.order_agent_tool_calling.tracer"), \
              patch(
                  "app.agents.order_agent_tool_calling.build_turn_context",
-                 return_value=_stub_turn_context(),
+                 return_value=_stub_turn_context(has_active_cart=True),
              ), \
              patch(
                  "app.services.business_info_service.is_taking_orders_now",
@@ -343,6 +348,38 @@ class TestGateClosedAllowsBrowse:
                 conversation_history=[],
             )
         assert "handoff" not in output or not output["handoff"]
+
+    def test_no_cart_browse_intent_short_circuits_to_cs(self):
+        """No active cart + closed shop: even a pure browse message
+        ("tienes barracuda?") short-circuits to CS. Surfacing menu
+        details encourages building a cart that fails at submit time
+        (incident +573172908887, 2026-05-11). CS still answers menu
+        URL on demand."""
+        agent = OrderAgentToolCalling()
+        llm = MagicMock()
+
+        with patch.object(OrderAgentToolCalling, "llm", llm), \
+             patch("app.agents.order_agent_tool_calling.conversation_service"), \
+             patch("app.agents.order_agent_tool_calling.tracer"), \
+             patch(
+                 "app.agents.order_agent_tool_calling.build_turn_context",
+                 return_value=_stub_turn_context(),
+             ), \
+             patch(
+                 "app.services.business_info_service.is_taking_orders_now",
+                 return_value=_GATE_CLOSED,
+             ):
+            output = agent.execute(
+                message_body="tienes barracuda?",
+                wa_id="+57300", name="X",
+                business_context=BIELA_CTX,
+                conversation_history=[],
+            )
+
+        llm.invoke.assert_not_called()
+        hand = output.get("handoff") or {}
+        assert hand.get("to") == "customer_service"
+        assert (hand.get("context") or {}).get("reason") == "order_closed"
 
 
 # ---------------------------------------------------------------------------

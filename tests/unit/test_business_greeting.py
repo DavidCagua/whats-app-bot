@@ -211,6 +211,8 @@ class TestClosedGreeting:
       else returns None to force plain-text fallback.
     """
 
+    # Fully closed today (no opening window at all — Sunday-style closure).
+    # opens_at is None and the next open is on a different weekday.
     _CLOSED_GATE_TODAY = {
         "can_take_orders": False,
         "reason": "closed",
@@ -218,6 +220,16 @@ class TestClosedGreeting:
         "next_open_dow": 5,           # Friday
         "next_open_time": __import__("datetime").time(9, 0),
         "now_local": __import__("datetime").datetime(2026, 5, 7, 18, 0),
+    }
+    # Mid-day break: today HAS a window but the customer is messaging
+    # before it opens. opens_at is set, so is_fully_closed_today=False.
+    _CLOSED_GATE_BREAK = {
+        "can_take_orders": False,
+        "reason": "closed",
+        "opens_at": __import__("datetime").time(17, 0),
+        "next_open_dow": 4,           # Thursday (same weekday as now_local)
+        "next_open_time": __import__("datetime").time(17, 0),
+        "now_local": __import__("datetime").datetime(2026, 5, 7, 14, 0),
     }
     _OPEN_GATE = {
         "can_take_orders": True,
@@ -281,9 +293,12 @@ class TestClosedGreeting:
         assert out["kind"] == "open_cta"
         assert "cerrados" not in out["rendered_body"].lower()
 
-    def test_cta_closed_with_closed_sid_uses_closed_template(self):
+    def test_cta_closed_mid_day_break_uses_closed_template(self):
+        """During a mid-day break (today's window opens later), the
+        closed CTA fires normally — customers can browse while waiting
+        a few hours for the shop to reopen."""
         out = business_greeting.cta_welcome_payload(
-            self.BIELA_BOTH_SIDS_CTX, "Yisela", gate=self._CLOSED_GATE_TODAY,
+            self.BIELA_BOTH_SIDS_CTX, "Yisela", gate=self._CLOSED_GATE_BREAK,
         )
         assert out is not None
         assert out["content_sid"] == "HXclosed456"
@@ -295,12 +310,22 @@ class TestClosedGreeting:
         assert "Hola Yisela" in out["rendered_body"]
         assert "cerrados" in out["rendered_body"].lower()
 
+    def test_cta_fully_closed_today_returns_none_even_with_closed_sid(self):
+        """On a fully-closed-today greeting (Sunday-style closure), the
+        Twilio CTA is suppressed even when the closed SID is configured.
+        Plain-text greeting handles the day — its 'Ver carta' button
+        would encourage building a cart that fails at submit time."""
+        out = business_greeting.cta_welcome_payload(
+            self.BIELA_BOTH_SIDS_CTX, "Yisela", gate=self._CLOSED_GATE_TODAY,
+        )
+        assert out is None
+
     def test_cta_closed_without_closed_sid_returns_none(self):
         """When no closed-state SID is configured, return None so the
         caller falls back to the plain-text greeting (which appends the
         closed sentence inline via get_greeting)."""
         out = business_greeting.cta_welcome_payload(
-            self.BIELA_OPEN_ONLY_CTX, "Yisela", gate=self._CLOSED_GATE_TODAY,
+            self.BIELA_OPEN_ONLY_CTX, "Yisela", gate=self._CLOSED_GATE_BREAK,
         )
         assert out is None
 
@@ -311,3 +336,57 @@ class TestClosedGreeting:
         assert out is not None
         assert out["content_sid"] == "HXopen123"
         assert out["kind"] == "open_cta"
+
+    # ── Fully-closed-today alt-contact + menu URL drop ───────────
+
+    BIELA_WITH_ALT_CONTACT_CTX = {
+        "provider": "twilio",
+        "business": {
+            "name": "Biela",
+            "settings": {
+                "welcome_content_sid": "HXopen123",
+                "menu_url": "https://example.com/menu",
+                "closed_day_alt_contact": {
+                    "name": "Sede Las Cuadras",
+                    "phone": "+573026722877",
+                },
+            },
+        },
+    }
+
+    def test_get_greeting_fully_closed_appends_alt_contact_line(self):
+        out = business_greeting.get_greeting(
+            self.BIELA_WITH_ALT_CONTACT_CTX, "Yisela",
+            gate=self._CLOSED_GATE_TODAY,
+        )
+        assert "Sede Las Cuadras" in out
+        assert "+573026722877" in out
+        assert "Si necesitas pedir hoy" in out
+
+    def test_get_greeting_fully_closed_drops_menu_url(self):
+        out = business_greeting.get_greeting(
+            self.BIELA_WITH_ALT_CONTACT_CTX, "Yisela",
+            gate=self._CLOSED_GATE_TODAY,
+        )
+        # Menu URL is intentionally suppressed on fully-closed-today
+        # greetings — encourages the redirect over a self-serve loop.
+        assert "example.com/menu" not in out
+
+    def test_get_greeting_mid_day_break_keeps_menu_url_no_alt_contact(self):
+        """Mid-day break (opens later today) is NOT fully closed —
+        menu URL stays, alt-contact suffix does not fire."""
+        out = business_greeting.get_greeting(
+            self.BIELA_WITH_ALT_CONTACT_CTX, "Yisela",
+            gate=self._CLOSED_GATE_BREAK,
+        )
+        assert "example.com/menu" in out
+        assert "Sede Las Cuadras" not in out
+
+    def test_get_greeting_fully_closed_without_alt_contact_no_suffix(self):
+        out = business_greeting.get_greeting(
+            self.BIELA_OPEN_ONLY_CTX, "Yisela",
+            gate=self._CLOSED_GATE_TODAY,
+        )
+        assert "cerrados" in out.lower()
+        assert "Sede Las Cuadras" not in out
+        assert "Si necesitas pedir hoy" not in out

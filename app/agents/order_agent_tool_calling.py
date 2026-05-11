@@ -336,6 +336,41 @@ class OrderAgentToolCalling(BaseAgent):
             )
             order_gate = None
 
+        # Closed-shop short-circuit (v2 mirror of v1). When the shop is
+        # closed AND the customer has no active cart, skip the LLM loop
+        # entirely and hand off to CS. Order openers like "para un
+        # domicilio" otherwise get a friendly model reply that never
+        # calls a mutating tool, so the in-loop gate never fires.
+        # Production incident: +573172908887, 2026-05-11.
+        if (
+            order_gate is not None
+            and not order_gate.get("can_take_orders")
+            and not cart_has_items
+        ):
+            logging.warning(
+                "[ORDER_GATE] business=%s wa_id=%s closed-shop short-circuit "
+                "(no active cart) → handoff customer_service reason=order_closed (v2)",
+                business_id, wa_id,
+            )
+            tracer.end_run(
+                run_id, success=True,
+                latency_ms=(time.time() - start_time) * 1000,
+            )
+            return {
+                "agent_type": self.agent_type,
+                "message": "",
+                "state_update": {"active_agents": ["order"]},
+                "handoff": {
+                    "to": "customer_service",
+                    "segment": message_body,
+                    "context": {
+                        "reason": "order_closed",
+                        "has_active_cart": False,
+                        "blocked_intents": [],
+                    },
+                },
+            }
+
         try:
             messages = self._build_initial_messages(
                 business_context=business_context,
