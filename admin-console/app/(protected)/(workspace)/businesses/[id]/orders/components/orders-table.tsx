@@ -28,6 +28,7 @@ import { format } from "date-fns"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
 import { updateOrderStatus } from "@/lib/actions/orders"
+import { canSetStatus } from "@/lib/order-status-gating"
 import {
   type OrderStatus,
   STATUS_LABELS,
@@ -347,6 +348,17 @@ export function OrdersTable({
   }, [alertsEnabled, handleActivateAlerts])
 
   async function handleStatusChange(orderId: string, status: OrderStatus) {
+    // Time-gate defense in case the Select's disabled attribute is
+    // bypassed (e.g. via keyboard / future API). The dropdown should
+    // already filter these out — this is just a safety net.
+    const order = orders.find((o) => o.id === orderId)
+    const gate = canSetStatus(status, order?.created_at ?? null, Date.now())
+    if (!gate.allowed) {
+      toast.error(
+        `Disponible en ${gate.minutesRemaining} min (mínimo ${gate.thresholdMinutes} min desde el pedido).`
+      )
+      return
+    }
     setUpdating(orderId)
     pendingStatusRef.current.set(orderId, status)
     setOrders((prev) =>
@@ -625,11 +637,23 @@ export function OrdersTable({
                         <SelectItem value={order.status} disabled>
                           {labelFor(order.status)}
                         </SelectItem>
-                        {nextStates.map((s) => (
-                          <SelectItem key={s} value={s}>
-                            {STATUS_LABELS[s]}
-                          </SelectItem>
-                        ))}
+                        {nextStates.map((s) => {
+                          const gate = canSetStatus(s, order.created_at, now)
+                          return (
+                            <SelectItem
+                              key={s}
+                              value={s}
+                              disabled={!gate.allowed}
+                            >
+                              {STATUS_LABELS[s]}
+                              {!gate.allowed && (
+                                <span className="ml-1 text-xs text-muted-foreground">
+                                  (en {gate.minutesRemaining} min)
+                                </span>
+                              )}
+                            </SelectItem>
+                          )
+                        })}
                       </SelectContent>
                     </Select>
                   </TableCell>
