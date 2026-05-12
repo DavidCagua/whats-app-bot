@@ -7,12 +7,13 @@ so we never end up with, e.g., a 'completed' order moved back to
 'pending'.
 
 State graph:
-    pending ──────► confirmed ──────► out_for_delivery ──────► completed
-       │              │                      │
-       └────► cancelled ◄────────────────────┘
+    delivery: pending ─► confirmed ─► out_for_delivery ─► completed
+    pickup:   pending ─► confirmed ─► ready_for_pickup  ─► completed
+    cancelled is reachable from any non-terminal state.
 
-Pickup vs delivery: pickup orders skip 'out_for_delivery' and go
-confirmed → completed directly. Same machine handles both.
+Same machine handles both fulfillment types. The bot picks the right
+mid-state from `orders.fulfillment_type`; the admin UI filters the
+status dropdown so operators never see the wrong-fulfillment option.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import Dict, FrozenSet, Optional, Tuple
 STATUS_PENDING = "pending"
 STATUS_CONFIRMED = "confirmed"
 STATUS_OUT_FOR_DELIVERY = "out_for_delivery"
+STATUS_READY_FOR_PICKUP = "ready_for_pickup"
 STATUS_COMPLETED = "completed"
 STATUS_CANCELLED = "cancelled"
 
@@ -30,6 +32,7 @@ ALL_STATUSES: FrozenSet[str] = frozenset({
     STATUS_PENDING,
     STATUS_CONFIRMED,
     STATUS_OUT_FOR_DELIVERY,
+    STATUS_READY_FOR_PICKUP,
     STATUS_COMPLETED,
     STATUS_CANCELLED,
 })
@@ -43,10 +46,12 @@ _ALLOWED_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     STATUS_PENDING: frozenset({STATUS_CONFIRMED, STATUS_CANCELLED}),
     STATUS_CONFIRMED: frozenset({
         STATUS_OUT_FOR_DELIVERY,
+        STATUS_READY_FOR_PICKUP,
         STATUS_COMPLETED,
         STATUS_CANCELLED,
     }),
     STATUS_OUT_FOR_DELIVERY: frozenset({STATUS_COMPLETED, STATUS_CANCELLED}),
+    STATUS_READY_FOR_PICKUP: frozenset({STATUS_COMPLETED, STATUS_CANCELLED}),
     STATUS_COMPLETED: frozenset(),
     STATUS_CANCELLED: frozenset(),
 }
@@ -95,9 +100,13 @@ def timestamp_field_for(status: str) -> Optional[str]:
 
     `out_for_delivery` intentionally has no dedicated timestamp — it's
     a transient state and `confirmed_at`/`completed_at` bracket it.
+    `ready_for_pickup` does have its own timestamp because the gap
+    between "ready" and "picked up" matters for pickup-line analytics
+    (how long are customers letting their food sit?).
     """
     return {
         STATUS_CONFIRMED: "confirmed_at",
+        STATUS_READY_FOR_PICKUP: "ready_at",
         STATUS_COMPLETED: "completed_at",
         STATUS_CANCELLED: "cancelled_at",
     }.get(status)

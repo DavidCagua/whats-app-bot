@@ -19,6 +19,7 @@ import type { OrderStatus } from "./order-status"
 
 export const STATUS_MIN_MINUTES: Partial<Record<OrderStatus, number>> = {
   out_for_delivery: 25,
+  ready_for_pickup: 15,
   completed: 40,
 }
 

@@ -162,16 +162,34 @@ def _business_phone(injected_business_context: Optional[Dict]) -> str:
         return ""
 
 
-def _status_sentence(status: str, cancellation_reason: Optional[str] = None) -> str:
-    """Map an order status to its canonical customer-facing sentence."""
+def _status_sentence(
+    status: str,
+    fulfillment_type: Optional[str] = None,
+    cancellation_reason: Optional[str] = None,
+) -> str:
+    """
+    Map an order status to its canonical customer-facing sentence.
+
+    Branches on ``fulfillment_type`` for the cases where pickup and
+    delivery semantically diverge: a pickup customer is told "your
+    order is ready, come pick it up" / "you already picked it up";
+    a delivery customer is told "your order is on the way" / "your
+    order was delivered". ``pending`` / ``confirmed`` / ``cancelled``
+    read the same for both fulfillment types.
+    """
     s = (status or "").lower()
+    is_pickup = (fulfillment_type or "").lower() == "pickup"
     if s == "pending":
         return "Tu pedido quedó registrado y está pendiente de confirmación. En un momento te avisamos."
     if s == "confirmed":
         return "Tu pedido ya fue confirmado y lo estamos preparando con cuidado."
     if s == "out_for_delivery":
         return "Tu pedido va en camino, ya casi llega."
+    if s == "ready_for_pickup":
+        return "Tu pedido ya está listo, te esperamos en el local para recogerlo."
     if s == "completed":
+        if is_pickup:
+            return "Ya recogiste tu pedido, gracias por venir. ¿Hay algo más en lo que te podamos ayudar?"
         return "Tu pedido ya fue entregado. ¿Hay algo más en lo que te podamos ayudar?"
     if s == "cancelled":
         if cancellation_reason:
@@ -385,16 +403,35 @@ def _render_order_status(
 ) -> str:
     """Compose the FINAL reply for an order-status answer."""
     status = (order.get("status") or "").lower()
+    fulfillment_type = (order.get("fulfillment_type") or "delivery").lower()
+    is_pickup = fulfillment_type == "pickup"
     cancellation_reason = (order.get("cancellation_reason") or "").strip() or None
     eta_minutes = order.get("eta_minutes")
 
-    sentence = _status_sentence(status, cancellation_reason)
+    sentence = _status_sentence(status, fulfillment_type, cancellation_reason)
 
     parts: List[str] = [sentence]
 
     if asked_about_time:
-        if eta_minutes is not None and status in {"pending", "confirmed", "out_for_delivery"}:
-            parts.append(f"Tiempo aproximado: {int(eta_minutes)} minutos.")
+        # Pickup: ETA means "ready in X min" while preparing; no ETA
+        # once the order is already in ready_for_pickup state.
+        # Delivery: ETA means "arrives in X min" while in flight.
+        in_flight_with_eta = (
+            status in {"pending", "confirmed", "out_for_delivery"}
+            if not is_pickup
+            else status in {"pending", "confirmed"}
+        )
+        if eta_minutes is not None and in_flight_with_eta:
+            if is_pickup:
+                parts.append(
+                    f"Estará listo en aproximadamente {int(eta_minutes)} minutos."
+                )
+            else:
+                parts.append(f"Tiempo aproximado: {int(eta_minutes)} minutos.")
+        elif is_pickup and status == "ready_for_pickup":
+            # Already ready — no ETA line; the status sentence already
+            # tells them to come pick it up.
+            pass
         else:
             parts.append(
                 "No tengo un tiempo exacto en este momento, pero estamos pendientes."
@@ -534,11 +571,18 @@ def cancel_order(
     if kind == RESULT_KIND_CANCEL_NOT_ALLOWED:
         order = result.get("order") or {}
         status = (order.get("status") or "").lower()
+        is_pickup = (order.get("fulfillment_type") or "").lower() == "pickup"
         phone = _business_phone(injected_business_context)
         if status == "out_for_delivery":
             base = "Tu pedido ya va en camino, ya no lo podemos cancelar desde acá."
+        elif status == "ready_for_pickup":
+            base = "Tu pedido ya está listo en el local, ya no lo podemos cancelar desde acá."
         elif status == "completed":
-            base = "Tu pedido ya fue entregado, no se puede cancelar."
+            base = (
+                "Ya recogiste tu pedido, no se puede cancelar."
+                if is_pickup else
+                "Tu pedido ya fue entregado, no se puede cancelar."
+            )
         elif status == "cancelled":
             base = "Tu pedido ya estaba cancelado."
         else:

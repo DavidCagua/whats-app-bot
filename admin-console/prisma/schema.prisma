@@ -233,6 +233,7 @@ model orders {
   fulfillment_type            String                        @default("delivery")
   display_number              Int
   display_date                DateTime                      @db.Date
+  ready_at                    DateTime?                     @db.Timestamptz(6)
   conversation_daily_analyses conversation_daily_analyses[]
   order_items                 order_items[]
   order_promotions            order_promotions[]
@@ -514,6 +515,7 @@ enum order_status {
   pending
   confirmed
   out_for_delivery
+  ready_for_pickup
   completed
   cancelled
 }

@@ -5,6 +5,7 @@ export const ORDER_STATUSES = [
   "pending",
   "confirmed",
   "out_for_delivery",
+  "ready_for_pickup",
   "completed",
   "cancelled",
 ] as const
@@ -13,8 +14,14 @@ export type OrderStatus = (typeof ORDER_STATUSES)[number]
 
 const ALLOWED_NEXT: Record<OrderStatus, ReadonlySet<OrderStatus>> = {
   pending: new Set<OrderStatus>(["confirmed", "cancelled"]),
-  confirmed: new Set<OrderStatus>(["out_for_delivery", "completed", "cancelled"]),
+  confirmed: new Set<OrderStatus>([
+    "out_for_delivery",
+    "ready_for_pickup",
+    "completed",
+    "cancelled",
+  ]),
   out_for_delivery: new Set<OrderStatus>(["completed", "cancelled"]),
+  ready_for_pickup: new Set<OrderStatus>(["completed", "cancelled"]),
   completed: new Set<OrderStatus>(),
   cancelled: new Set<OrderStatus>(),
 }
@@ -58,12 +65,32 @@ export function adminCanTransition(
   return adminAllowedNext(from).has(to)
 }
 
+/**
+ * Filter a status set by fulfillment type. Pickup orders never go
+ * `out_for_delivery` (the courier path), and delivery orders never go
+ * `ready_for_pickup` (the counter path). Use this on top of
+ * `adminAllowedNext` / `allowedNext` when rendering the operator
+ * dropdown so wrong-fulfillment options never appear.
+ */
+export function filterStatusesByFulfillment<T extends Iterable<OrderStatus>>(
+  statuses: T,
+  fulfillmentType: string | null | undefined,
+): OrderStatus[] {
+  const isPickup = (fulfillmentType ?? "").toLowerCase() === "pickup"
+  const excluded: OrderStatus = isPickup ? "out_for_delivery" : "ready_for_pickup"
+  return Array.from(statuses).filter((s) => s !== excluded)
+}
+
 // Returns the column on `orders` that should be set to NOW() when
 // entering this status. null = no dedicated timestamp.
-export function timestampFieldFor(status: OrderStatus): "confirmed_at" | "completed_at" | "cancelled_at" | null {
+export function timestampFieldFor(
+  status: OrderStatus
+): "confirmed_at" | "ready_at" | "completed_at" | "cancelled_at" | null {
   switch (status) {
     case "confirmed":
       return "confirmed_at"
+    case "ready_for_pickup":
+      return "ready_at"
     case "completed":
       return "completed_at"
     case "cancelled":
@@ -77,6 +104,7 @@ export const STATUS_LABELS: Record<OrderStatus, string> = {
   pending: "Pendiente",
   confirmed: "Confirmado",
   out_for_delivery: "En camino",
+  ready_for_pickup: "Listo para recoger",
   completed: "Completado",
   cancelled: "Cancelado",
 }

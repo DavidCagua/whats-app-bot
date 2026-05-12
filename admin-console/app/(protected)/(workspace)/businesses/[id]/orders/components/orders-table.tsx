@@ -33,6 +33,7 @@ import {
   type OrderStatus,
   STATUS_LABELS,
   adminAllowedNext,
+  filterStatusesByFulfillment,
   isValidStatus,
 } from "@/lib/order-status"
 import { useEventSource } from "@/lib/use-event-source"
@@ -70,7 +71,9 @@ const ELAPSED_TICK_MS = 30_000
 // In-flight statuses get "X min ago" framing — staff cares about how long
 // the order has been hanging. Terminal statuses (completed, cancelled) get
 // the concrete date because the elapsed time stops being actionable.
-const IN_FLIGHT_STATUSES = new Set(["pending", "confirmed", "out_for_delivery"])
+const IN_FLIGHT_STATUSES = new Set([
+  "pending", "confirmed", "out_for_delivery", "ready_for_pickup",
+])
 
 const formatElapsedSince = (iso: string, now: number): string => {
   const startedAt = new Date(iso).getTime()
@@ -100,6 +103,7 @@ const statusVariant = (
     case "completed":
       return "default"
     case "out_for_delivery":
+    case "ready_for_pickup":
     case "confirmed":
       return "secondary"
     case "pending":
@@ -586,7 +590,10 @@ export function OrdersTable({
             </TableRow>
           ) : (
             orders.map((order) => {
-              const nextStates = Array.from(adminAllowedNext(order.status))
+              const nextStates = filterStatusesByFulfillment(
+                adminAllowedNext(order.status),
+                order.fulfillment_type,
+              )
               // Bot's "terminal" set still gates the edit-items dialog —
               // we don't want admins rewriting completed/cancelled order
               // contents. The status badge itself is always editable.

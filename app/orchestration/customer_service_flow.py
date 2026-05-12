@@ -62,9 +62,14 @@ def _delivery_handoff_threshold_min() -> int:
 
 
 # Order statuses that count as "in-flight" — i.e. the customer is
-# legitimately worried because the food hasn't arrived yet. Terminal
-# states (completed, cancelled) never trigger a handoff.
-_IN_FLIGHT_STATUSES = frozenset({"pending", "confirmed", "out_for_delivery"})
+# legitimately worried because the food hasn't arrived (or hasn't been
+# picked up) yet. Terminal states (completed, cancelled) never trigger
+# a handoff. `ready_for_pickup` is included so a "is my order ready?"
+# question >50min after placement still escalates — staff often want
+# to know when a customer is running late on a counter pickup.
+_IN_FLIGHT_STATUSES = frozenset({
+    "pending", "confirmed", "out_for_delivery", "ready_for_pickup",
+})
 
 
 # Result kinds — handlers tag their return dicts so the tool wrapper

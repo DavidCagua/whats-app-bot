@@ -577,6 +577,7 @@ ORDER_STATUS_VALUES = (
     'pending',
     'confirmed',
     'out_for_delivery',
+    'ready_for_pickup',
     'completed',
     'cancelled',
 )
@@ -611,6 +612,7 @@ class Order(Base):
     cancellation_reason = Column(Text, nullable=True)
     promo_discount_amount = Column(Numeric(12, 2), nullable=False, default=0, server_default='0')
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    ready_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
@@ -637,6 +639,7 @@ class Order(Base):
             'cancellation_reason': self.cancellation_reason,
             'promo_discount_amount': float(self.promo_discount_amount) if self.promo_discount_amount is not None else 0,
             'confirmed_at': self.confirmed_at.isoformat() if self.confirmed_at else None,
+            'ready_at': self.ready_at.isoformat() if self.ready_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'cancelled_at': self.cancelled_at.isoformat() if self.cancelled_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,

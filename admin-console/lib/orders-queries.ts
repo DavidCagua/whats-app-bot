@@ -126,7 +126,7 @@ export async function getOrderBannerCounts(
     prisma.orders.count({
       where: {
         business_id: businessId,
-        status: { in: ["confirmed", "out_for_delivery"] },
+        status: { in: ["confirmed", "out_for_delivery", "ready_for_pickup"] },
       },
     }),
     prisma.conversation_agent_settings.count({
