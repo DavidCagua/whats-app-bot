@@ -1686,6 +1686,76 @@ def place_order(injected_business_context: Annotated[dict, InjectedToolArg]) -> 
 
 
 @tool
+def list_promos(
+    *,
+    injected_business_context: Annotated[dict, InjectedToolArg],
+) -> str:
+    """
+    List the business's active promos right now (and upcoming this week
+    if any). Use when the customer asks about promos / offers / combos
+    without naming a specific one ("me das una promo", "qué promos
+    tienen", "tienen ofertas", "qué combos manejan").
+
+    Do NOT use when the customer already named a specific promo — call
+    add_promo_to_cart(promo_query=...) instead.
+
+    Returns text the LLM reads (active list + upcoming-this-week tail).
+    The LLM should follow up with respond(kind='menu_info' or
+    'disambiguation', summary=..., facts=[...promo names...]) — never
+    call add_promo_to_cart unless the customer explicitly picks one.
+    """
+    logger.info("[ORDER_TOOL] list_promos")
+    try:
+        business_id, _ = _get_context(injected_business_context)
+        if not _products_enabled(injected_business_context):
+            return "❌ Los pedidos no están habilitados en este momento."
+        if not business_id:
+            return "❌ No se pudo identificar el negocio."
+
+        tz_name = promotion_service.timezone_from_business_context(injected_business_context)
+        try:
+            buckets = promotion_service.list_promos_for_listing(
+                business_id, timezone_name=tz_name,
+            )
+        except Exception as exc:
+            logger.warning("[ORDER_TOOL] list_promos_for_listing failed: %s", exc)
+            return "❌ No pude consultar las promos en este momento."
+
+        active = buckets.get("active_now") or []
+        upcoming = buckets.get("upcoming") or []
+
+        if not active and not upcoming:
+            return "Sin promos activas ni próximas esta semana."
+
+        def _line(p: Dict, idx: int) -> str:
+            name = p.get("name") or ""
+            if p.get("fixed_price") is not None:
+                return f"{idx}. {name} — {_format_price(p['fixed_price'])}"
+            if p.get("discount_amount") is not None:
+                return f"{idx}. {name} — descuento {_format_price(p['discount_amount'])}"
+            if p.get("discount_pct") is not None:
+                return f"{idx}. {name} — {int(p['discount_pct'])}% off"
+            return f"{idx}. {name}"
+
+        parts: List[str] = []
+        if active:
+            lines = "\n".join(_line(p, i) for i, p in enumerate(active, start=1))
+            parts.append(f"Promos activas hoy:\n{lines}")
+        if upcoming:
+            up_parts: List[str] = []
+            for p in upcoming[:5]:
+                name = p.get("name") or ""
+                day = _DAY_NAMES_ES.get(int(p.get("next_active_day") or 0))
+                up_parts.append(f"{name} ({day})" if day else name)
+            parts.append(f"Esta semana también viene: {', '.join(up_parts)}.")
+
+        return "\n\n".join(parts)
+    except Exception as e:
+        logger.error(f"[ORDER_TOOL] list_promos error: {e}", exc_info=True)
+        return f"❌ Error al listar promos: {str(e)}"
+
+
+@tool
 def add_promo_to_cart(
     promo_id: str = "",
     promo_query: str = "",
@@ -1805,6 +1875,7 @@ order_tools = [
     search_products,
     get_product_details,
     add_to_cart,
+    list_promos,
     add_promo_to_cart,
     view_cart,
     update_cart_item,

@@ -18,9 +18,9 @@ Deterministic fast-paths run before the tool loop:
   - Pre-loop safety nets: price-of-product, post-order despedida,
     stuck-article typos → hand off to order agent.
 
-Per-tool guards:
-  - cancel_order refuses unless the message has an explicit cancel
-    keyword AND the user has a cancellable placed order.
+Per-tool guards live inside the tool body (see cs_tools.cancel_order) so
+the destructive action and its safety check live together — no caller
+can bypass the gate.
 """
 
 import logging
@@ -41,7 +41,6 @@ from langchain_core.messages import (
 from .base_agent import BaseAgent, AgentOutput
 from ..database.conversation_service import conversation_service
 from ..services import business_info_service
-from ..services.cancel_keywords import has_explicit_cancel_keyword
 from ..services.cs_tools import (
     cs_tools,
     set_tool_context,
@@ -147,6 +146,11 @@ Herramientas disponibles:
 - get_order_status(asked_about_time, asked_for_breakdown): estado del pedido del cliente. Pon `asked_about_time=true` SOLO si preguntó por tiempo explícitamente; `asked_for_breakdown=true` SOLO si pidió el detalle por ítem.
 - get_order_history(): pedidos pasados del cliente.
 - cancel_order(): SOLO cuando el cliente pide EXPLÍCITAMENTE cancelar un pedido ya confirmado ("cancela", "anula", "ya no lo quiero"). NO la llames sin un verbo de cancelación.
+  ⚠️ AMBIGÜEDAD COLOMBIANA: en Colombia "cancelar" también significa "pagar" ("cancelar la cuenta", "le cancelo al domiciliario", "¿cancelo de una vez?"). Antes de llamar cancel_order, lee la estructura del mensaje:
+    - Forma de pregunta (signo `?`, modal `puedo / podría / debería`, alternativa `o le ... o ...`, `o de una vez o al ...`) → probablemente PREGUNTA, no orden de cancelar.
+    - Co-ocurrencia de pago (`pago / pagar / al domiciliario / de una vez / efectivo / Nequi / tarjeta / contraentrega / transferencia`) → casi seguro significa "pagar", NO "cancelar el pedido".
+  Si el mensaje cae en alguno de esos patrones, NO llames cancel_order. Responde para aclarar la intención del cliente (pregúntale si quiere cancelar el pedido o pagar) y espera su respuesta.
+  Ejemplo (caso real): "Vale, puedo cancelar en este momento o le cancelo al domiciliario?" → forma de pregunta + co-ocurrencia "al domiciliario" → el cliente pregunta sobre PAGAR. Acción correcta: responder algo como "Puedes pagar al domiciliario contraentrega cuando llegue el pedido. ¿Te queda alguna otra duda?" — NO llames cancel_order.
 - get_promos(): cuando preguntan SI HAY promos/ofertas/combos sin nombrar una específica.
 - select_listed_promo(selector, query, promo_id): cuando el cliente elige UNA promo (ordinal "primera"/"segunda", o nombre parcial "la del honey", o id).
 
@@ -321,20 +325,6 @@ class CustomerServiceAgent(BaseAgent):
                 for tc in tool_calls:
                     tool_name, tool_args, tool_id = _unpack_tool_call(tc)
                     executed_tools.append(tool_name)
-
-                    # CANCEL_ORDER guard: refuse unless message has an
-                    # explicit cancel keyword AND the user has a cancellable
-                    # placed order. Belt-and-suspenders against destructive
-                    # LLM mis-classification (Biela 2026-05-04 incident).
-                    if tool_name == "cancel_order":
-                        guard_msg = self._cancel_order_guard(
-                            message_body, turn_ctx,
-                        )
-                        if guard_msg is not None:
-                            messages.append(ToolMessage(
-                                content=guard_msg, tool_call_id=tool_id,
-                            ))
-                            continue
 
                     tool_fn = tool_map.get(tool_name)
                     if tool_fn is None:
@@ -565,49 +555,6 @@ class CustomerServiceAgent(BaseAgent):
                 "[CS_AGENT] stuck-article safety net failed: %s", exc,
             )
 
-        return None
-
-    def _cancel_order_guard(
-        self,
-        message_body: str,
-        turn_ctx: Optional[object],
-    ) -> Optional[str]:
-        """
-        Return a ToolMessage payload telling the LLM that cancel_order is
-        refused — or None when the guards pass and the tool may run.
-
-        Guards (both must hold):
-          (a) message has an explicit cancel keyword (verb of cancellation).
-          (b) the user has a recent cancellable placed order.
-        """
-        if not has_explicit_cancel_keyword(message_body):
-            logging.warning(
-                "[CS_AGENT] cancel_order refused: no explicit cancel "
-                "keyword in message=%r",
-                (message_body or "")[:120],
-            )
-            return (
-                "REFUSED|reason=no_cancel_keyword. El cliente no usó una "
-                "palabra explícita de cancelación. NO uses cancel_order. "
-                "Responde al cliente de forma natural — si tiene dudas "
-                "sobre su pedido, ofrece ayudarle."
-            )
-        if (
-            turn_ctx is not None
-            and not getattr(turn_ctx, "has_recent_cancellable_order", False)
-        ):
-            logging.warning(
-                "[CS_AGENT] cancel_order refused: no cancellable placed order "
-                "(state=%s active_cart=%s)",
-                getattr(turn_ctx, "order_state", "?"),
-                getattr(turn_ctx, "has_active_cart", False),
-            )
-            return (
-                "REFUSED|reason=no_cancellable_order. No hay un pedido "
-                "confirmado pendiente que se pueda cancelar. NO uses "
-                "cancel_order. Responde al cliente que no encuentras un "
-                "pedido cancelable y ofrece ayudarle."
-            )
         return None
 
     def _handle_order_closed(

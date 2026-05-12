@@ -53,6 +53,7 @@ from ..orchestration.customer_service_flow import (
     RESULT_KIND_INTERNAL_ERROR,
 )
 from . import business_info_service
+from .cancel_keywords import has_explicit_cancel_keyword
 
 
 logger = logging.getLogger(__name__)
@@ -470,6 +471,48 @@ def cancel_order(
     ctx = _ctx(injected_business_context)
     wa_id = ctx.get("wa_id") or ""
     business_id = ctx.get("business_id") or ""
+    message_body = ctx.get("message_body") or ""
+    turn_ctx = ctx.get("turn_ctx")
+
+    # Two-AND safety gate, co-located with the destructive action so no
+    # caller can bypass it. The LLM has emitted cancel_order on bare
+    # affirmations ("Si\nGracias") and on payment-questions where the
+    # customer used "cancelar" in the Colombian sense of "pagar"
+    # (Biela 2026-05-12 / Angela Enriquez, order #9CF8AB56). The LLM is
+    # also taught the cancelar=pagar disambiguation upstream, but this
+    # gate is the floor — destructive actions require an explicit
+    # cancel verb AND a cancellable placed order.
+    if not has_explicit_cancel_keyword(message_body):
+        logging.warning(
+            "[CS_TOOL] cancel_order refused: no explicit cancel keyword "
+            "(wa_id=%s, msg=%r)", wa_id, (message_body or "")[:120],
+        )
+        return (
+            "REFUSED|reason=no_cancel_keyword. El cliente no usó una "
+            "palabra explícita de cancelación. NO uses cancel_order. "
+            "En Colombia 'cancelar' a veces significa 'pagar' — si el "
+            "mensaje es una pregunta o menciona pago/domiciliario, "
+            "pregúntale al cliente qué quiere hacer (cancelar el pedido, "
+            "pagar, u otra cosa) y espera su respuesta."
+        )
+
+    if (
+        turn_ctx is not None
+        and not getattr(turn_ctx, "has_recent_cancellable_order", False)
+    ):
+        logging.warning(
+            "[CS_TOOL] cancel_order refused: no cancellable placed order "
+            "(wa_id=%s, order_state=%s, has_active_cart=%s)",
+            wa_id,
+            getattr(turn_ctx, "order_state", "?"),
+            getattr(turn_ctx, "has_active_cart", False),
+        )
+        return (
+            "REFUSED|reason=no_cancellable_order. No hay un pedido "
+            "confirmado pendiente que se pueda cancelar. NO uses "
+            "cancel_order. Responde al cliente que no encuentras un "
+            "pedido cancelable y ofrece ayudarle."
+        )
 
     result = _handle_cancel_order(wa_id, business_id)
     kind = result.get("result_kind")
