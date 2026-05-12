@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma"
 import { Prisma } from "@prisma/client"
+import type { DateRange } from "@/lib/orders-date-range"
+import { rangeToUtc } from "@/lib/orders-date-range"
 
 // Constants the dashboard treats as fixed for every business today.
 // When we eventually persist them per business (orders.delivery_fee,
@@ -12,8 +14,6 @@ export const DEMORA_THRESHOLD_MIN = 50
 // the average.
 const BOT_RESPONSE_CAP_SEC = 300
 
-const RECURRING_WINDOW_DAYS = 30
-const PERFORMANCE_WINDOW_DAYS = 7
 const TOP_PRODUCTS_LIMIT = 5
 
 // Anything matching this regex on `payment_method` (case-insensitive)
@@ -22,7 +22,7 @@ const TOP_PRODUCTS_LIMIT = 5
 const CASH_PAYMENT_REGEX = "^(efectivo|cash|contado|plata)"
 
 export type DashboardKpis = {
-  today: {
+  summary: {
     uniqueChats: number
     orders: number
     conversionPct: number | null
@@ -52,12 +52,10 @@ export type DashboardKpis = {
   constants: {
     deliveryFeeCop: number
     demoraThresholdMin: number
-    recurringWindowDays: number
-    performanceWindowDays: number
   }
 }
 
-type TodayRow = {
+type SummaryRow = {
   unique_chats: bigint
   orders: bigint
   orders_bot: bigint
@@ -101,88 +99,93 @@ function secsToMin(s: number | null | undefined): number | null {
 }
 
 /**
- * Fetch every KPI the dashboard shows in a single business hop.
+ * Fetch every KPI the dashboard shows for the given Bogotá-local range,
+ * in a single business hop.
  *
- * Three independent queries run in parallel:
- *   1. Today's snapshot (Bogotá-local day) — counts, sums, mix.
- *   2. Performance window (last 7 days completed orders + last 7 days
- *      bot conversation latency).
- *   3. Catalog window (last 30 days top products + recurring customers).
+ * Four independent queries run in parallel against the same range:
+ *   1. Summary — counts, sums, mix, promos.
+ *   2. Performance — prep/dispatch/total times, demora count, bot
+ *      response time, time-to-order.
+ *   3. Top products — order-item rollup.
+ *   4. Recurring customers — customer-grouped order count.
  *
  * Time math is done in Postgres with `AT TIME ZONE 'America/Bogota'`
- * so day boundaries don't drift if the server clock is UTC.
+ * for the conversations filter, and the orders filter rides on
+ * `display_date` (a Bogotá-local Date column) so day boundaries don't
+ * drift if the server clock is UTC.
  *
- * The new analytics columns (created_via, cancelled_by,
- * out_for_delivery_at) are populated from the migration cutover
+ * The analytics columns added in alembic p1k3l6m8n0j4 (created_via,
+ * cancelled_by, out_for_delivery_at) are populated from that cutover
  * forward — pre-migration orders show up as `created_via='bot'`
- * (DB default) and NULL cancelled_by, which is the right behaviour
- * for historical-but-bot-only traffic.
+ * (DB default) and NULL `cancelled_by`, which is the right behaviour
+ * for historical bot-only traffic.
  */
 export async function getDashboardKpis(
-  businessId: string
+  businessId: string,
+  range: DateRange
 ): Promise<DashboardKpis> {
-  const [todayRows, performanceRows, topProductRows, recurringRows] =
+  const { fromUtc, toUtc } = rangeToUtc(range)
+  const fromDate = range.from
+  const toDate = range.to
+
+  const [summaryRows, performanceRows, topProductRows, recurringRows] =
     await Promise.all([
-      prisma.$queryRaw<TodayRow[]>(Prisma.sql`
-        WITH today AS (
-          SELECT (now() AT TIME ZONE 'America/Bogota')::date AS d
-        ),
-        orders_today AS (
+      prisma.$queryRaw<SummaryRow[]>(Prisma.sql`
+        WITH range_orders AS (
           SELECT *
-          FROM orders, today
+          FROM orders
           WHERE business_id = ${businessId}::uuid
-            AND display_date = today.d
+            AND display_date BETWEEN ${fromDate}::date AND ${toDate}::date
         ),
-        chats_today AS (
+        range_chats AS (
           SELECT COUNT(DISTINCT whatsapp_id)::bigint AS unique_chats
-          FROM conversations, today
+          FROM conversations
           WHERE business_id = ${businessId}::uuid
-            AND (timestamp AT TIME ZONE 'America/Bogota')::date = today.d
+            AND (timestamp AT TIME ZONE 'America/Bogota')::date
+                BETWEEN ${fromDate}::date AND ${toDate}::date
         ),
-        promos_today AS (
+        range_promos AS (
           SELECT COUNT(*)::bigint AS promos_count
           FROM order_promotions op
-          JOIN orders_today o ON o.id = op.order_id
+          JOIN range_orders o ON o.id = op.order_id
         )
         SELECT
-          (SELECT unique_chats FROM chats_today) AS unique_chats,
-          (SELECT COUNT(*)::bigint FROM orders_today) AS orders,
-          (SELECT COUNT(*)::bigint FROM orders_today WHERE created_via = 'bot') AS orders_bot,
-          (SELECT COUNT(*)::bigint FROM orders_today WHERE created_via <> 'bot') AS orders_admin,
-          (SELECT COUNT(*)::bigint FROM orders_today
+          (SELECT unique_chats FROM range_chats) AS unique_chats,
+          (SELECT COUNT(*)::bigint FROM range_orders) AS orders,
+          (SELECT COUNT(*)::bigint FROM range_orders WHERE created_via = 'bot') AS orders_bot,
+          (SELECT COUNT(*)::bigint FROM range_orders WHERE created_via <> 'bot') AS orders_admin,
+          (SELECT COUNT(*)::bigint FROM range_orders
              WHERE status NOT IN ('completed', 'cancelled')) AS incomplete,
-          (SELECT COUNT(*)::bigint FROM orders_today
+          (SELECT COUNT(*)::bigint FROM range_orders
              WHERE status = 'cancelled' AND cancelled_by = 'business') AS cancelled_by_business,
-          (SELECT COUNT(*)::bigint FROM orders_today
+          (SELECT COUNT(*)::bigint FROM range_orders
              WHERE status = 'cancelled' AND cancelled_by = 'customer') AS cancelled_by_customer,
-          (SELECT COUNT(*)::bigint FROM orders_today
+          (SELECT COUNT(*)::bigint FROM range_orders
              WHERE status = 'cancelled'
                AND (cancelled_by IS NULL OR cancelled_by NOT IN ('business', 'customer'))) AS cancelled_other,
           (SELECT AVG(
              CASE WHEN fulfillment_type = 'delivery'
                   THEN GREATEST(total_amount - ${DELIVERY_FEE_COP}, 0)
                   ELSE total_amount END
-           )::float8 FROM orders_today
+           )::float8 FROM range_orders
            WHERE status NOT IN ('cancelled')) AS avg_ticket_no_delivery,
-          (SELECT COALESCE(SUM(total_amount), 0)::float8 FROM orders_today
+          (SELECT COALESCE(SUM(total_amount), 0)::float8 FROM range_orders
             WHERE status = 'completed'
               AND payment_method IS NOT NULL
               AND payment_method ~* ${CASH_PAYMENT_REGEX}) AS cash_revenue,
-          (SELECT promos_count FROM promos_today) AS promos_count,
-          (SELECT COALESCE(SUM(promo_discount_amount), 0)::float8 FROM orders_today
+          (SELECT promos_count FROM range_promos) AS promos_count,
+          (SELECT COALESCE(SUM(promo_discount_amount), 0)::float8 FROM range_orders
             WHERE status NOT IN ('cancelled')) AS discount_total,
-          (SELECT COALESCE(SUM(total_amount), 0)::float8 FROM orders_today
+          (SELECT COALESCE(SUM(total_amount), 0)::float8 FROM range_orders
             WHERE status NOT IN ('cancelled')) AS revenue_total
       `),
       prisma.$queryRaw<PerformanceRow[]>(Prisma.sql`
-        WITH perf_window AS (
-          SELECT now() - INTERVAL '${Prisma.raw(String(PERFORMANCE_WINDOW_DAYS))} days' AS since
-        ),
-        perf_orders AS (
+        WITH range_orders AS (
           SELECT *
-          FROM orders, perf_window
+          FROM orders
           WHERE business_id = ${businessId}::uuid
-            AND created_at >= perf_window.since
+            AND created_at >= ${fromUtc}
+            AND created_at <  ${toUtc}
         ),
         prep_times AS (
           -- Preparation = confirmed_at → ready/out_for_delivery, depending
@@ -196,25 +199,25 @@ export async function getDashboardKpis(
                 completed_at
               ) - confirmed_at
             )) AS prep_sec
-          FROM perf_orders
+          FROM range_orders
           WHERE confirmed_at IS NOT NULL
             AND (ready_at IS NOT NULL OR out_for_delivery_at IS NOT NULL OR completed_at IS NOT NULL)
         ),
         dispatch_times AS (
           SELECT
             EXTRACT(EPOCH FROM (completed_at - out_for_delivery_at)) AS dispatch_sec
-          FROM perf_orders
+          FROM range_orders
           WHERE fulfillment_type = 'delivery'
             AND out_for_delivery_at IS NOT NULL
             AND completed_at IS NOT NULL
         ),
         total_times AS (
           SELECT EXTRACT(EPOCH FROM (completed_at - confirmed_at)) AS total_sec
-          FROM perf_orders
+          FROM range_orders
           WHERE confirmed_at IS NOT NULL AND completed_at IS NOT NULL
         ),
         bot_pairs AS (
-          -- Adjacent user → assistant message pairs in the last window.
+          -- Adjacent user → assistant message pairs in the range.
           -- LEAD() walks the conversation forward so we don't need a
           -- correlated subquery per message row.
           SELECT EXTRACT(EPOCH FROM (next_ts - ts)) AS response_sec
@@ -230,7 +233,8 @@ export async function getDashboardKpis(
               ) AS next_ts
             FROM conversations
             WHERE business_id = ${businessId}::uuid
-              AND timestamp >= (SELECT since FROM perf_window)
+              AND timestamp >= ${fromUtc}
+              AND timestamp <  ${toUtc}
           ) c
           WHERE role = 'user'
             AND next_role = 'assistant'
@@ -243,7 +247,8 @@ export async function getDashboardKpis(
           WHERE o.business_id = ${businessId}::uuid
             AND o.confirmed_at IS NOT NULL
             AND cda.first_msg_at IS NOT NULL
-            AND o.created_at >= (SELECT since FROM perf_window)
+            AND o.created_at >= ${fromUtc}
+            AND o.created_at <  ${toUtc}
         )
         SELECT
           (SELECT AVG(prep_sec)::float8 FROM prep_times) AS avg_prep_sec,
@@ -262,7 +267,7 @@ export async function getDashboardKpis(
         JOIN products p ON p.id = oi.product_id
         WHERE o.business_id = ${businessId}::uuid
           AND o.status NOT IN ('cancelled')
-          AND o.created_at >= now() - INTERVAL '${Prisma.raw(String(RECURRING_WINDOW_DAYS))} days'
+          AND o.display_date BETWEEN ${fromDate}::date AND ${toDate}::date
         GROUP BY p.id, p.name
         ORDER BY qty DESC
         LIMIT ${TOP_PRODUCTS_LIMIT}
@@ -275,35 +280,35 @@ export async function getDashboardKpis(
           WHERE business_id = ${businessId}::uuid
             AND customer_id IS NOT NULL
             AND status NOT IN ('cancelled')
-            AND created_at >= now() - INTERVAL '${Prisma.raw(String(RECURRING_WINDOW_DAYS))} days'
+            AND display_date BETWEEN ${fromDate}::date AND ${toDate}::date
           GROUP BY customer_id
           HAVING COUNT(*) > 1
         ) recurring
       `),
     ])
 
-  const t = todayRows[0] ?? ({} as TodayRow)
+  const s = summaryRows[0] ?? ({} as SummaryRow)
   const p = performanceRows[0] ?? ({} as PerformanceRow)
 
-  const uniqueChats = toNumber(t.unique_chats)
-  const ordersToday = toNumber(t.orders)
-  const revenueTotal = toNumber(t.revenue_total ?? 0)
-  const discountTotal = toNumber(t.discount_total ?? 0)
+  const uniqueChats = toNumber(s.unique_chats)
+  const ordersInRange = toNumber(s.orders)
+  const revenueTotal = toNumber(s.revenue_total ?? 0)
+  const discountTotal = toNumber(s.discount_total ?? 0)
 
   return {
-    today: {
+    summary: {
       uniqueChats,
-      orders: ordersToday,
-      conversionPct: pct(ordersToday, uniqueChats),
-      ordersBot: toNumber(t.orders_bot),
-      ordersAdmin: toNumber(t.orders_admin),
-      incompletePct: pct(toNumber(t.incomplete), ordersToday),
-      cancelledByBusiness: toNumber(t.cancelled_by_business),
-      cancelledByCustomer: toNumber(t.cancelled_by_customer),
-      cancelledOther: toNumber(t.cancelled_other),
-      avgTicketNoDelivery: t.avg_ticket_no_delivery ?? null,
-      cashRevenue: toNumber(t.cash_revenue ?? 0),
-      promosCount: toNumber(t.promos_count),
+      orders: ordersInRange,
+      conversionPct: pct(ordersInRange, uniqueChats),
+      ordersBot: toNumber(s.orders_bot),
+      ordersAdmin: toNumber(s.orders_admin),
+      incompletePct: pct(toNumber(s.incomplete), ordersInRange),
+      cancelledByBusiness: toNumber(s.cancelled_by_business),
+      cancelledByCustomer: toNumber(s.cancelled_by_customer),
+      cancelledOther: toNumber(s.cancelled_other),
+      avgTicketNoDelivery: s.avg_ticket_no_delivery ?? null,
+      cashRevenue: toNumber(s.cash_revenue ?? 0),
+      promosCount: toNumber(s.promos_count),
       discountPctOfRevenue: pct(discountTotal, revenueTotal),
     },
     performance: {
@@ -324,8 +329,6 @@ export async function getDashboardKpis(
     constants: {
       deliveryFeeCop: DELIVERY_FEE_COP,
       demoraThresholdMin: DEMORA_THRESHOLD_MIN,
-      recurringWindowDays: RECURRING_WINDOW_DAYS,
-      performanceWindowDays: PERFORMANCE_WINDOW_DAYS,
     },
   }
 }

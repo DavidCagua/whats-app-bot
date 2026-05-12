@@ -20,9 +20,16 @@ import {
   type LucideIcon,
 } from "lucide-react"
 import { getDashboardKpis } from "@/lib/dashboard-kpis"
+import {
+  detectKind,
+  formatRangeLabel,
+  parseRange,
+} from "@/lib/orders-date-range"
+import { DashboardRangePicker } from "./components/dashboard-range-picker"
 
 interface BusinessOverviewPageProps {
   params: Promise<{ id: string }>
+  searchParams: Promise<{ from?: string; to?: string }>
 }
 
 const COP_FMT = new Intl.NumberFormat("es-CO", {
@@ -67,92 +74,96 @@ type Kpi = {
 
 export default async function BusinessOverviewPage({
   params,
+  searchParams,
 }: BusinessOverviewPageProps) {
   const { id } = await params
+  const sp = await searchParams
   const session = await auth()
 
   if (!canAccessBusiness(session, id)) {
     redirect("/businesses")
   }
 
+  const range = parseRange({ from: sp.from, to: sp.to })
+  const rangeKind = detectKind(range)
+  const rangeLabel = formatRangeLabel(range, rangeKind)
+
   const [business, kpis] = await Promise.all([
     prisma.businesses.findUniqueOrThrow({ where: { id } }),
-    getDashboardKpis(id),
+    getDashboardKpis(id, range),
   ])
 
-  const { today, performance, catalog, constants } = kpis
+  const { summary, performance, catalog, constants } = kpis
 
-  // Group 1 — Today (Bogotá-local day).
-  const todayKpis: Kpi[] = [
+  const summaryKpis: Kpi[] = [
     {
-      title: "Chats → pedidos (hoy)",
-      value: formatPct(today.conversionPct),
-      description: `${today.orders} pedidos / ${today.uniqueChats} chats`,
+      title: "Chats → pedidos",
+      value: formatPct(summary.conversionPct),
+      description: `${summary.orders} pedidos / ${summary.uniqueChats} chats`,
       icon: MessageSquare,
     },
     {
       title: "Pedidos automáticos vs total",
-      value: `${today.ordersBot} / ${today.orders}`,
+      value: `${summary.ordersBot} / ${summary.orders}`,
       description:
-        today.orders > 0
-          ? `${formatPct((today.ordersBot / today.orders) * 100)} por el bot`
-          : "Sin pedidos hoy",
+        summary.orders > 0
+          ? `${formatPct((summary.ordersBot / summary.orders) * 100)} por el bot`
+          : "Sin pedidos en el rango",
       icon: Bot,
     },
     {
       title: "Pedidos sin completar",
-      value: formatPct(today.incompletePct),
+      value: formatPct(summary.incompletePct),
       description: "Pendientes o en curso (excluye completados/cancelados)",
       icon: ClipboardList,
     },
     {
-      title: "Cancelados (hoy)",
+      title: "Cancelados",
       value: formatNumber(
-        today.cancelledByBusiness +
-          today.cancelledByCustomer +
-          today.cancelledOther
+        summary.cancelledByBusiness +
+          summary.cancelledByCustomer +
+          summary.cancelledOther
       ),
-      description: `Negocio ${today.cancelledByBusiness} · Cliente ${today.cancelledByCustomer} · Otro ${today.cancelledOther}`,
+      description: `Negocio ${summary.cancelledByBusiness} · Cliente ${summary.cancelledByCustomer} · Otro ${summary.cancelledOther}`,
       icon: Ban,
     },
     {
       title: "Ticket promedio sin domicilio",
-      value: formatCop(today.avgTicketNoDelivery),
+      value: formatCop(summary.avgTicketNoDelivery),
       description: `Domicilio fijo: ${formatCop(constants.deliveryFeeCop)}`,
       icon: ShoppingCart,
     },
     {
-      title: "Ingreso diario en efectivo",
-      value: formatCop(today.cashRevenue),
-      description: "Solo pedidos completados con pago en efectivo",
+      title: "Ingreso en efectivo",
+      value: formatCop(summary.cashRevenue),
+      description: "Pedidos completados con pago en efectivo",
       icon: Wallet,
     },
     {
-      title: "Promos aplicadas hoy",
-      value: formatNumber(today.promosCount),
-      description: `${formatPct(today.discountPctOfRevenue)} de la facturación en descuentos`,
+      title: "Promos aplicadas",
+      value: formatNumber(summary.promosCount),
+      description: `${formatPct(summary.discountPctOfRevenue)} de la facturación en descuentos`,
       icon: Tag,
     },
   ]
 
-  // Group 2 — Last 7 days operations.
   const perfKpis: Kpi[] = [
     {
       title: "Tiempo de preparación",
       value: formatMinutes(performance.avgPrepMin),
-      description: "Promedio desde confirmado hasta listo (7 días)",
+      description: "Promedio desde confirmado hasta listo",
       icon: Hourglass,
     },
     {
       title: "Tiempo de despacho",
       value: formatMinutes(performance.avgDispatchMin),
-      description: "Promedio entre salida y entrega (7 días, delivery)",
+      description: "Entre salida y entrega (delivery)",
       icon: Clock,
     },
     {
       title: "Tiempo total de entrega",
       value: formatMinutes(performance.avgTotalDeliveryMin),
-      description: "Confirmado → entregado (7 días)",
+      description: "Confirmado → entregado",
       icon: Clock,
     },
     {
@@ -164,43 +175,49 @@ export default async function BusinessOverviewPage({
     {
       title: "Tiempo de respuesta del bot",
       value: formatSeconds(performance.avgBotResponseSec),
-      description: "Promedio entre mensaje del cliente y respuesta (7 días)",
+      description: "Promedio entre mensaje del cliente y respuesta",
       icon: Bot,
     },
     {
       title: "Tiempo en concretar pedido",
       value: formatMinutes(performance.avgTimeToOrderMin),
-      description: "Primer mensaje del cliente → pedido confirmado (7 días)",
+      description: "Primer mensaje del cliente → pedido confirmado",
       icon: Percent,
     },
   ]
 
-  // Group 3 — Catalog/customer rollups (last 30 days).
   const recurringKpi: Kpi = {
     title: "Clientes recurrentes",
     value: formatNumber(catalog.recurringCustomers),
-    description: `Clientes con más de 1 pedido en ${constants.recurringWindowDays} días`,
+    description: `Clientes con más de 1 pedido en el rango`,
     icon: Users,
   }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Resumen</h1>
-        <p className="text-sm text-muted-foreground">
-          {business.name} — KPIs del bot y la operación
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Resumen</h1>
+          <p className="text-sm text-muted-foreground">
+            {business.name} — KPIs del bot y la operación
+          </p>
+        </div>
+        <DashboardRangePicker range={range} />
       </div>
 
-      <Section title="Hoy">
-        <KpiGrid kpis={todayKpis} />
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">
+        Rango: <span className="font-medium normal-case">{rangeLabel}</span>
+      </p>
+
+      <Section title="Conversión y ventas">
+        <KpiGrid kpis={summaryKpis} />
       </Section>
 
-      <Section title={`Operación · últimos ${constants.performanceWindowDays} días`}>
+      <Section title="Operación">
         <KpiGrid kpis={perfKpis} />
       </Section>
 
-      <Section title={`Catálogo y clientes · últimos ${constants.recurringWindowDays} días`}>
+      <Section title="Catálogo y clientes">
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <Card className="h-full lg:col-span-2">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -212,7 +229,7 @@ export default async function BusinessOverviewPage({
             <CardContent>
               {catalog.topProducts.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                  Aún no hay pedidos en la ventana.
+                  Aún no hay pedidos en el rango.
                 </p>
               ) : (
                 <ol className="space-y-2">
