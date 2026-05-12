@@ -85,12 +85,20 @@ export function filterStatusesByFulfillment<T extends Iterable<OrderStatus>>(
 // entering this status. null = no dedicated timestamp.
 export function timestampFieldFor(
   status: OrderStatus
-): "confirmed_at" | "ready_at" | "completed_at" | "cancelled_at" | null {
+):
+  | "confirmed_at"
+  | "ready_at"
+  | "out_for_delivery_at"
+  | "completed_at"
+  | "cancelled_at"
+  | null {
   switch (status) {
     case "confirmed":
       return "confirmed_at"
     case "ready_for_pickup":
       return "ready_at"
+    case "out_for_delivery":
+      return "out_for_delivery_at"
     case "completed":
       return "completed_at"
     case "cancelled":

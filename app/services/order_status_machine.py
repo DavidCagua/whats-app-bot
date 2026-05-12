@@ -98,15 +98,16 @@ def timestamp_field_for(status: str) -> Optional[str]:
     Return the column name that should be set to NOW() when the order
     enters this status. None means no dedicated timestamp.
 
-    `out_for_delivery` intentionally has no dedicated timestamp — it's
-    a transient state and `confirmed_at`/`completed_at` bracket it.
-    `ready_for_pickup` does have its own timestamp because the gap
-    between "ready" and "picked up" matters for pickup-line analytics
-    (how long are customers letting their food sit?).
+    `ready_for_pickup` has its own timestamp because the gap between
+    "ready" and "picked up" matters for pickup-line analytics. The
+    `out_for_delivery_at` column was added later so the dashboard can
+    separate prep time (confirmed → out_for_delivery) from dispatch
+    time (out_for_delivery → completed) for delivery orders.
     """
     return {
         STATUS_CONFIRMED: "confirmed_at",
         STATUS_READY_FOR_PICKUP: "ready_at",
+        STATUS_OUT_FOR_DELIVERY: "out_for_delivery_at",
         STATUS_COMPLETED: "completed_at",
         STATUS_CANCELLED: "cancelled_at",
     }.get(status)

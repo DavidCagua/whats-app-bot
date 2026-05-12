@@ -613,8 +613,15 @@ class Order(Base):
     promo_discount_amount = Column(Numeric(12, 2), nullable=False, default=0, server_default='0')
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
     ready_at = Column(DateTime(timezone=True), nullable=True)
+    out_for_delivery_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    # Provenance + cancel attribution for dashboard KPIs. `created_via`
+    # defaults to 'bot' at the DB layer because that's how every order
+    # arrives today; the admin console overrides it on staff-created
+    # orders. `cancelled_by` stays NULL until a cancel transition fires.
+    created_via = Column(String(20), nullable=False, default='bot', server_default='bot')
+    cancelled_by = Column(String(20), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
@@ -640,8 +647,11 @@ class Order(Base):
             'promo_discount_amount': float(self.promo_discount_amount) if self.promo_discount_amount is not None else 0,
             'confirmed_at': self.confirmed_at.isoformat() if self.confirmed_at else None,
             'ready_at': self.ready_at.isoformat() if self.ready_at else None,
+            'out_for_delivery_at': self.out_for_delivery_at.isoformat() if self.out_for_delivery_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'cancelled_at': self.cancelled_at.isoformat() if self.cancelled_at else None,
+            'created_via': self.created_via,
+            'cancelled_by': self.cancelled_by,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

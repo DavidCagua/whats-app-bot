@@ -198,6 +198,7 @@ export async function createOrder(
           delivery_address: isPickup ? null : input.deliveryAddress?.trim() || null,
           contact_phone: input.contactPhone?.trim() || null,
           payment_method: isPickup ? null : input.paymentMethod?.trim() || null,
+          created_via: "admin",
           order_items: {
             create: input.items.map((i) => ({
               product_id: i.productId,

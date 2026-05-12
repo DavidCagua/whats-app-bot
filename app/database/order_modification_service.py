@@ -33,14 +33,19 @@ class OrderNotFound(Exception):
 def cancel_order(
     order_id: str,
     reason: str,
+    cancelled_by: str = "customer",
 ) -> Dict[str, Any]:
     """
-    Move an order to `cancelled`. Sets `cancelled_at` and
-    `cancellation_reason`. Rejects illegal transitions.
+    Move an order to `cancelled`. Sets `cancelled_at`, `cancelled_by`,
+    and `cancellation_reason`. Rejects illegal transitions.
 
     Returns the updated order dict (`Order.to_dict()` shape) on success.
     Raises `InvalidStatusTransition` if the current status doesn't
     allow cancellation. Raises `OrderNotFound` if the id is unknown.
+
+    `cancelled_by` defaults to 'customer' because this code path is
+    invoked from the WhatsApp customer-service flow. The admin console
+    cancels through its own server action and passes 'business'.
 
     Caller is responsible for the customer-vs-admin policy gate
     (see `order_modification_policy.can_customer_cancel`).
@@ -65,6 +70,7 @@ def cancel_order(
         now = datetime.now(timezone.utc)
         order.status = STATUS_CANCELLED
         order.cancelled_at = now
+        order.cancelled_by = cancelled_by
         order.cancellation_reason = reason
         order.updated_at = now
 

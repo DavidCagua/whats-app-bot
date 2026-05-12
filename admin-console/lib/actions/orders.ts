@@ -65,6 +65,10 @@ export async function updateOrderStatus(
   }
   if (status === "cancelled") {
     data.cancellation_reason = options.cancellationReason ?? null
+    // Admin-initiated cancel — always 'business'. Customer cancels go
+    // through the bot path (order_modification_service.cancel_order)
+    // which stamps 'customer' on the same column.
+    data.cancelled_by = "business"
   }
 
   try {
