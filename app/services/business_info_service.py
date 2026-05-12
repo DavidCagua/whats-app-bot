@@ -285,6 +285,10 @@ def compute_open_status(
       - ``next_open_dow`` / ``next_open_time`` — the next weekday +
         time the business reopens (used when closed for the rest of
         today, or closed today entirely).
+      - ``today_had_window`` (bool) — True when today has a schedule
+        row at all, regardless of whether it's open right now. Lets
+        callers distinguish "fully no-service today" from "past
+        today's close" without re-querying the rows.
       - ``now_local`` — the timezone-aware Bogotá datetime the
         decision was made against (handy for tests).
     """
@@ -295,6 +299,7 @@ def compute_open_status(
         "closes_at": None,
         "next_open_dow": None,
         "next_open_time": None,
+        "today_had_window": False,
         "now_local": None,
     }
     if not business_id:
@@ -312,6 +317,7 @@ def compute_open_status(
     # 0=Sun..6=Sat (matches Postgres extract(dow)). Convert.
     dow_today = (now_local.weekday() + 1) % 7
     today_window = _row_window_for_dow(rows, dow_today)
+    base["today_had_window"] = today_window is not None
     cur_time = now_local.time().replace(microsecond=0)
 
     if today_window is not None:
@@ -392,6 +398,9 @@ def is_taking_orders_now(
         "opens_at": status.get("opens_at"),
         "next_open_dow": status.get("next_open_dow"),
         "next_open_time": status.get("next_open_time"),
+        # Carry today_had_window through so the greeting helper can
+        # distinguish past-close-but-had-slot from fully-closed-today.
+        "today_had_window": status.get("today_had_window", False),
         "now_local": status.get("now_local"),
     }
 
@@ -399,20 +408,32 @@ def is_taking_orders_now(
 def is_fully_closed_today(status: Dict[str, Any]) -> bool:
     """
     True iff today is a "no service" day — the business has no opening
-    window at all today. Distinguishes from a mid-day break (closed now
-    but opens later today, ``opens_at`` set) where customers will be
-    served in a few hours.
+    window today AT ALL. Distinguishes from:
+      - mid-day break (closed now but opens later today; ``opens_at`` set)
+      - past today's close (had a window earlier; ``today_had_window=True``)
+    in either of which customers will be served the same calendar day OR
+    were eligible to be served on it.
 
     Used to decide when to append the alt-branch contact line and to
-    drop the menu URL / Twilio welcome card on the greeting.
+    drop the menu URL / Twilio welcome card on the greeting. The rule
+    is operator-stated: alt-branch is for "no service that day at all"
+    days (Sunday-style closures), NOT for late-night post-close
+    messages where today did have hours.
     """
     if not status or not status.get("has_data"):
         return False
     if status.get("is_open"):
         return False
-    # ``opens_at`` is set ONLY in the "closed but opens later today"
-    # branch of compute_open_status. When today has no schedule row at
-    # all (e.g. Sunday for a Mon-Sat business), opens_at stays None.
+    # Today had a schedule row (open earlier today, or opens later today).
+    # Either way the day isn't a "no service" day. Production 2026-05-11
+    # (Biela / 3177000722): Monday 9am-10pm shop, message at 10:20pm —
+    # used to fall through to fully_closed=True and offer the alt-branch.
+    if status.get("today_had_window"):
+        return False
+    # Legacy fallback for callers that haven't been updated to populate
+    # today_had_window: opens_at being set still means "today has a slot",
+    # so treat as not-fully-closed. The today_had_window check above is
+    # the source of truth going forward.
     if status.get("opens_at") is not None:
         return False
     return True

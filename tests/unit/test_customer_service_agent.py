@@ -276,27 +276,51 @@ class TestOutOfZoneFastPath:
 
 
 class TestCancelOrderGuard:
+    """
+    The cancel_order safety gate now lives INSIDE the tool body
+    (cs_tools.cancel_order) so no caller — agent, dispatcher, or future
+    code path — can bypass it. Tests invoke the tool directly with a
+    per-turn context that carries `turn_ctx` + `message_body`.
+    """
+
+    def _invoke(self, message_body, turn_ctx):
+        ictx = _tool_ctx(message_body=message_body, turn_ctx=turn_ctx)
+        token = cs_tools.set_tool_context(ictx)
+        try:
+            return cs_tools.cancel_order.invoke({
+                "injected_business_context": ictx,
+            })
+        finally:
+            cs_tools.reset_tool_context(token)
+
     def test_refuses_without_explicit_keyword(self):
-        agent = CustomerServiceAgent()
         # turn_ctx has a cancellable order — only the keyword guard should fire.
         tctx = TurnContext(has_recent_cancellable_order=True)
-        out = agent._cancel_order_guard("gracias bro", tctx)
+        out = self._invoke("gracias bro", tctx)
         assert out is not None
         assert "no_cancel_keyword" in out
 
     def test_refuses_without_cancellable_order(self):
-        agent = CustomerServiceAgent()
-        tctx = TurnContext(has_recent_cancellable_order=False)
         # Real cancel verb but nothing to cancel.
-        out = agent._cancel_order_guard("cancela mi pedido", tctx)
+        tctx = TurnContext(has_recent_cancellable_order=False)
+        out = self._invoke("cancela mi pedido", tctx)
         assert out is not None
         assert "no_cancellable_order" in out
 
     def test_passes_when_both_conditions_hold(self):
-        agent = CustomerServiceAgent()
+        # Both guards open; the tool body runs _handle_cancel_order which
+        # in turn hits order_lookup_service. Mock it to return None so we
+        # land in the RESULT_KIND_NO_ORDER → "no tengo registro" branch
+        # — proves the guard did NOT short-circuit.
         tctx = TurnContext(has_recent_cancellable_order=True)
-        out = agent._cancel_order_guard("cancela mi pedido", tctx)
-        assert out is None
+        with patch(
+            "app.orchestration.customer_service_flow.order_lookup_service.get_latest_order",
+            return_value=None,
+        ):
+            out = self._invoke("cancela mi pedido", tctx)
+        assert not out.startswith("REFUSED"), (
+            f"Guard incorrectly fired for valid cancel intent: {out!r}"
+        )
 
 
 class TestDespedidaSafetyNet:

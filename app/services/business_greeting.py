@@ -109,18 +109,7 @@ def _closed_sentence_from_gate(
         return ""
     try:
         from . import business_info_service as _bi_svc
-        # format_open_status_sentence expects the compute_open_status
-        # shape; gate's fields are a strict superset, so we can pass it
-        # as-is for the closed branch.
-        synthesized = {
-            "is_open": False,
-            "has_data": True,
-            "opens_at": gate.get("opens_at"),
-            "closes_at": None,
-            "next_open_dow": gate.get("next_open_dow"),
-            "next_open_time": gate.get("next_open_time"),
-            "now_local": gate.get("now_local"),
-        }
+        synthesized = _status_from_gate(gate)
         sentence = _bi_svc.format_open_status_sentence(synthesized)
         if business is not None and _bi_svc.is_fully_closed_today(synthesized):
             sentence = sentence + _bi_svc.format_closed_alt_contact_suffix(business)
@@ -129,21 +118,45 @@ def _closed_sentence_from_gate(
         return "Por ahora estamos cerrados."
 
 
+def _status_from_gate(gate: dict) -> dict:
+    """
+    Synthesize the ``compute_open_status`` shape from a gate dict.
+
+    Shared by ``_closed_sentence_from_gate`` and
+    ``_is_fully_closed_today_from_gate`` so the two can't drift on
+    which fields they thread through. Production 2026-05-11 / Biela:
+    the two helpers used to inline-build their dicts and one was
+    updated for ``today_had_window`` while the other wasn't — the
+    closed CTA's `{{3}}` variable then incorrectly carried the
+    alt-branch contact line for past-close-with-window cases. DRYing
+    here removes the drift surface.
+
+    Caller MUST have already verified ``gate`` is the closed payload
+    (``can_take_orders=False`` AND ``reason='closed'``).
+    """
+    return {
+        "is_open": False,
+        "has_data": True,
+        "opens_at": gate.get("opens_at"),
+        "closes_at": None,
+        "next_open_dow": gate.get("next_open_dow"),
+        "next_open_time": gate.get("next_open_time"),
+        # Distinguishes past-close-but-had-slot (Monday 9am-10pm shop,
+        # message at 10:20pm — NOT fully closed) from no-slot-today
+        # (Sunday for a Mon-Sat shop — fully closed). is_taking_orders_now
+        # populates this field; gates from older code paths may not.
+        "today_had_window": gate.get("today_had_window", False),
+        "now_local": gate.get("now_local"),
+    }
+
+
 def _is_fully_closed_today_from_gate(gate: Optional[dict]) -> bool:
     """Lightweight wrapper so callers don't have to synthesize the status shape."""
     if not gate or gate.get("can_take_orders") or gate.get("reason") != "closed":
         return False
     try:
         from . import business_info_service as _bi_svc
-        return _bi_svc.is_fully_closed_today({
-            "is_open": False,
-            "has_data": True,
-            "opens_at": gate.get("opens_at"),
-            "closes_at": None,
-            "next_open_dow": gate.get("next_open_dow"),
-            "next_open_time": gate.get("next_open_time"),
-            "now_local": gate.get("now_local"),
-        })
+        return _bi_svc.is_fully_closed_today(_status_from_gate(gate))
     except Exception:
         return False
 
@@ -184,7 +197,6 @@ def get_greeting(
         (business_context or {}).get("business") if business_context else None
     )
     closed_sentence = _closed_sentence_from_gate(gate, business=business_for_suffix)
-    fully_closed = _is_fully_closed_today_from_gate(gate)
     if closed_sentence:
         body = (
             f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
@@ -198,11 +210,14 @@ def get_greeting(
             f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
             "¿Qué se te antoja hoy? Estamos listos para ayudarte"
         )
-    # On a fully-closed-today greeting, do NOT append the menu URL.
-    # The customer can still request it via CS later; surfacing it here
-    # encourages a multi-step order path that ends in disappointment
-    # (production incident: +573172908887 on 2026-05-11).
-    if menu_url and not fully_closed:
+    # Suppress the menu URL on ANY closed-state greeting (fully closed,
+    # mid-day break, past today's close). Surfacing it encourages a
+    # multi-step order path that ends in disappointment at submit time
+    # — same rationale that retired the Twilio CTA on closed states.
+    # Customers can still request the menu via CS while closed.
+    # Production incident: +573172908887 on 2026-05-11; extended to
+    # all closed states 2026-05-12.
+    if menu_url and not closed_sentence:
         body += f"\n\n{menu_url}"
     return body
 
@@ -225,17 +240,23 @@ def cta_welcome_payload(
       Same {{1}}/{{2}} plus ``{{3}}`` carrying the live closed
       sentence. Selected when ``gate`` says ``can_take_orders=False``.
 
-    Selection rules when ``gate`` indicates closed:
-      1. ``welcome_closed_content_sid`` set → render closed CTA.
-      2. Otherwise → return None so the caller falls back to the
-         plain-text greeting (which will include the closed sentence
-         via ``get_greeting`` + ``gate``).
+    Selection rules:
+      - Open shop → render open CTA via ``welcome_content_sid``.
+      - Any closed state (fully closed OR closed-for-a-period) →
+        return None so the caller falls back to the plain-text greeting.
+
+    The "Ver carta" button on either card encourages a browse-and-build
+    loop that ends in disappointment when submit-time hits the closed
+    gate. Plain text + a clear closed sentence is the safer surface
+    while closed — same reasoning that already retired the card on
+    fully-closed days (production incident +573172908887 / 2026-05-11),
+    now extended to past-close and mid-day break.
 
     Returns: ``{"content_sid", "variables", "rendered_body", "kind"}``.
     ``rendered_body`` is the plain-text version persisted to
     conversation history; must match what the customer sees on
-    WhatsApp so the inbox UI stays consistent. ``kind`` is one of
-    ``"open_cta"`` / ``"closed_cta"`` for log/trace.
+    WhatsApp so the inbox UI stays consistent. ``kind`` is
+    ``"open_cta"`` for log/trace.
     """
     if not business_context or business_context.get("provider") != "twilio":
         return None
@@ -246,39 +267,11 @@ def cta_welcome_payload(
     has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
     opener = f"Hola {first} " if has_real_name else "Hola "
 
+    # Closed in ANY shape → no CTA. Plain-text greeting via get_greeting()
+    # handles the closed sentence (and alt-branch on fully-closed days).
     is_closed = bool(gate and not gate.get("can_take_orders") and gate.get("reason") == "closed")
-    fully_closed_today = _is_fully_closed_today_from_gate(gate)
-
     if is_closed:
-        # On a fully-closed-today greeting, intentionally skip the Twilio
-        # CTA. The card's "Ver carta" button entices customers to browse
-        # and build a cart only to discover at submit time that the shop
-        # is closed (production incident: +573172908887 on 2026-05-11).
-        # Plain-text greeting handles closed days; it renders the closed
-        # sentence + alt-branch contact line inline via get_greeting.
-        if fully_closed_today:
-            return None
-        closed_sid = (settings.get("welcome_closed_content_sid") or "").strip()
-        if not closed_sid:
-            # No closed-state template configured — caller falls back
-            # to the plain-text greeting, which renders the closed
-            # sentence inline via get_greeting(gate=...).
-            return None
-        closed_sentence = _closed_sentence_from_gate(gate, business=biz) or "Por ahora estamos cerrados."
-        variables = {"1": business_name, "2": opener, "3": closed_sentence}
-        rendered_body = (
-            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
-            f"\n"
-            f"{closed_sentence}\n"
-            f"\n"
-            "Mientras tanto puedo contarte del menú o resolverte cualquier duda."
-        )
-        return {
-            "content_sid": closed_sid,
-            "variables": variables,
-            "rendered_body": rendered_body,
-            "kind": "closed_cta",
-        }
+        return None
 
     # Open-state path: requires the open-template SID.
     content_sid = (settings.get("welcome_content_sid") or "").strip()

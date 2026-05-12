@@ -324,6 +324,7 @@ class TestComputeOpenStatus:
         assert s["has_data"] is True
         assert s["is_open"] is True
         assert s["closes_at"] == _time(22, 0)
+        assert s["today_had_window"] is True
 
     def test_closed_before_open_today(self):
         # Tuesday 14:45 — before today's 17:00 open.
@@ -332,6 +333,7 @@ class TestComputeOpenStatus:
         assert s["opens_at"] == _time(17, 0)
         assert s["next_open_dow"] == 2  # Tuesday
         assert s["next_open_time"] == _time(17, 0)
+        assert s["today_had_window"] is True
 
     def test_closed_after_close_today(self):
         # Tuesday 22:30 — after Tue's 22:00 close. Next open: Wed 17:00.
@@ -340,6 +342,16 @@ class TestComputeOpenStatus:
         # next_open should be Wednesday (3), not Tuesday.
         assert s["next_open_dow"] == 3
         assert s["next_open_time"] == _time(17, 0)
+        # Today DID have a window (Tuesday's 17:00-22:00), just past.
+        # is_fully_closed_today consumes this to skip the alt-branch line.
+        assert s["today_had_window"] is True
+
+    def test_sunday_inactive_marks_today_had_no_window(self):
+        # Sunday 19:00 — Sun row is inactive. today_had_window must be
+        # False so is_fully_closed_today returns True and the alt-branch
+        # contact appears in the greeting.
+        s = self._run("2026-05-10T19:00:00")
+        assert s["today_had_window"] is False
 
     def test_post_midnight_same_day_in_db_terms(self):
         # Wednesday 00:42 Bogotá — the original production bug timestamp.
@@ -449,6 +461,74 @@ class TestIsTakingOrdersNow:
         gate = self._run("2026-05-05T17:00:00")
         assert gate["can_take_orders"] is True
         assert gate["reason"] == "open"
+
+
+class TestIsFullyClosedToday:
+    """
+    The alt-branch contact line is ONLY appended on "no service today"
+    days (e.g. Sunday for a Mon-Sat shop). Other "closed right now"
+    states — mid-day break, past today's close, open now — must NOT
+    trip the gate.
+
+    Regression: production 2026-05-11 (Biela / 3177000722). Biela's
+    Monday schedule is 9:00 AM-10:00 PM; at 10:20 PM the bot greeting
+    included "Si necesitas pedir hoy, escríbele a Sede Las Cuadras..."
+    because the old logic treated "past today's close" as "fully
+    closed today". today_had_window now distinguishes the two.
+    """
+
+    def test_fully_closed_no_window_today_returns_true(self):
+        s = {
+            "has_data": True, "is_open": False,
+            "opens_at": None, "today_had_window": False,
+            "next_open_dow": 2, "next_open_time": _time(17, 0),
+        }
+        assert bis.is_fully_closed_today(s) is True
+
+    def test_mid_day_break_returns_false(self):
+        # Closed before today's open (e.g. 2pm, shop opens 5pm).
+        s = {
+            "has_data": True, "is_open": False,
+            "opens_at": _time(17, 0), "today_had_window": True,
+            "next_open_dow": 2, "next_open_time": _time(17, 0),
+        }
+        assert bis.is_fully_closed_today(s) is False
+
+    def test_past_close_with_today_window_returns_false(self):
+        # The production case: today HAD a window (e.g. Monday 9am-10pm),
+        # but we're past close (10:20pm). MUST be False so the alt-branch
+        # line doesn't appear — today wasn't a "no service" day.
+        s = {
+            "has_data": True, "is_open": False,
+            "opens_at": None, "today_had_window": True,
+            "next_open_dow": 3, "next_open_time": _time(9, 0),
+        }
+        assert bis.is_fully_closed_today(s) is False
+
+    def test_open_now_returns_false(self):
+        s = {
+            "has_data": True, "is_open": True,
+            "opens_at": None, "today_had_window": True,
+            "closes_at": _time(22, 0),
+        }
+        assert bis.is_fully_closed_today(s) is False
+
+    def test_no_data_returns_false(self):
+        # No availability rows configured at all — operator-opt-in
+        # surface; don't trigger the alt-branch line by default.
+        s = {"has_data": False, "is_open": False}
+        assert bis.is_fully_closed_today(s) is False
+
+    def test_legacy_opens_at_still_blocks_when_today_had_window_missing(self):
+        # Callers that haven't been updated to populate today_had_window
+        # still benefit from the legacy opens_at check — opens_at being
+        # set means "today has a slot, just not now".
+        s = {
+            "has_data": True, "is_open": False,
+            "opens_at": _time(17, 0),
+            # today_had_window deliberately absent.
+        }
+        assert bis.is_fully_closed_today(s) is False
 
 
 class TestFormatOpenStatusSentence:
