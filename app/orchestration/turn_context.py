@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..database import order_lookup_service
 from ..database.conversation_service import conversation_service
+from ..database.customer_service import customer_service
 from ..database.session_state_service import (
     derive_order_state,
     session_state_service,
@@ -39,8 +40,9 @@ logger = logging.getLogger(__name__)
 # context within this window. Without it, a months-old `completed`
 # order would forever bias every fresh greeting toward thank-you
 # templates. Active-status orders (pending / confirmed /
-# out_for_delivery) are always relevant — a customer asking about a
-# delivery 90 min later is still talking about that order.
+# out_for_delivery / ready_for_pickup) are always relevant — a
+# customer asking about an order 90 min later is still talking about
+# that order.
 _TERMINAL_RELEVANCE_MINUTES = 30
 
 
@@ -185,6 +187,55 @@ def build_turn_context(
         if raw_ftype in ("delivery", "pickup"):
             fulfillment_type = raw_ftype
         order_notes = (order_context.get("notes") or "").strip()
+
+        # Hydrate session.delivery_info from the customer DB when an
+        # order is in progress. Returning customers have name / address /
+        # phone / payment on file but those never land in the session
+        # cart until submit_delivery_info is called explicitly — which
+        # leaves place_order, the renderer, and the agent prompt
+        # disagreeing about what's "on file". By merging at the boundary
+        # and writing through, every downstream consumer reads a single
+        # complete source. Session fields always win over DB fields, so
+        # an explicit submit_delivery_info edit is never clobbered.
+        # Pickup mode only needs name; address / phone / payment_method
+        # don't apply.
+        if has_active_cart:
+            try:
+                cust = customer_service.get_customer(wa_id) or {}
+            except Exception as exc:
+                logger.warning("[TURN_CONTEXT] customer load failed: %s", exc)
+                cust = {}
+            candidate_fields = (
+                ("name",)
+                if fulfillment_type == "pickup"
+                else ("name", "address", "phone", "payment_method")
+            )
+            hydrated: Dict[str, str] = {}
+            for fld in candidate_fields:
+                if delivery_info.get(fld):
+                    continue
+                raw = cust.get(fld)
+                if isinstance(raw, (str, int)):
+                    val = str(raw).strip()
+                    if val:
+                        hydrated[fld] = val
+            if hydrated:
+                delivery_info = {**delivery_info, **hydrated}
+                try:
+                    merged_di = dict(raw_di) if isinstance(raw_di, dict) else {}
+                    for fld, val in hydrated.items():
+                        if not (merged_di.get(fld) or ""):
+                            merged_di[fld] = val
+                    session_state_service.save(
+                        wa_id,
+                        str(business_id),
+                        {"order_context": {"delivery_info": merged_di}},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[TURN_CONTEXT] delivery_info hydration writeback failed: %s",
+                        exc,
+                    )
     except Exception as exc:
         logger.warning("[TURN_CONTEXT] session load failed: %s", exc)
 

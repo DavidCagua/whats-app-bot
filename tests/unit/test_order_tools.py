@@ -481,6 +481,79 @@ class TestSubmitDeliveryInfo:
     # Case: Submit overwrites previous value (e.g. update address)
     # Case: Partial update preserves previously submitted fields
 
+    def test_routes_to_place_order_when_already_awaiting_confirmation(
+        self, fake_session, business_context
+    ):
+        # If awaiting_confirmation is already true, the customer has
+        # already seen the confirmation card and is responding to it —
+        # we should not re-prompt with another ready_to_confirm card.
+        fake_session._store[(FAKE_WA_ID, FAKE_BUSINESS_ID)] = {
+            "active_agents": [],
+            "order_context": {
+                "items": [{"product_id": "p1", "name": "X", "price": 1, "quantity": 1}],
+                "awaiting_confirmation": True,
+            },
+            "booking_context": {},
+            "agent_contexts": {},
+            "last_order_id": None,
+            "last_booking_id": None,
+        }
+
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _make_ctx(),
+                "address": "calle 18",
+                "name": "Vanessa",
+                "phone": "3177000722",
+                "payment_method": "Efectivo",
+            })
+
+        assert "place_order AHORA" in result
+        assert "NO emitas otra tarjeta" in result
+
+    def test_routes_to_ready_to_confirm_when_not_yet_awaiting(
+        self, fake_session, business_context
+    ):
+        # Baseline: when awaiting_confirmation is false, the legacy
+        # two-step flow still applies — agent should call
+        # respond(kind='ready_to_confirm') first.
+        fake_session._store[(FAKE_WA_ID, FAKE_BUSINESS_ID)] = {
+            "active_agents": [],
+            "order_context": {
+                "items": [{"product_id": "p1", "name": "X", "price": 1, "quantity": 1}],
+            },
+            "booking_context": {},
+            "agent_contexts": {},
+            "last_order_id": None,
+            "last_booking_id": None,
+        }
+
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _make_ctx(),
+                "address": "calle 18",
+                "name": "Vanessa",
+                "phone": "3177000722",
+                "payment_method": "Efectivo",
+            })
+
+        assert "respond(kind='ready_to_confirm')" in result
+        assert "place_order AHORA" not in result
+
 
 # ---------------------------------------------------------------------------
 # place_order

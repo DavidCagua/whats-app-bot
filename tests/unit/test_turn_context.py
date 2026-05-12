@@ -282,3 +282,174 @@ class TestBuildTurnContextPopulatesLatestOrder:
             ctx = tc.build_turn_context(wa_id="+1", business_id="biz")
         assert ctx.latest_order_status is None
         assert ctx.latest_order_id is None
+
+
+class TestDeliveryInfoHydration:
+    """build_turn_context should fill missing delivery fields from the customer DB when an order is in progress, and write them back to session."""
+
+    def _patch_no_orders(self):
+        return patch(
+            "app.orchestration.turn_context.order_lookup_service.get_latest_order",
+            return_value=None,
+        )
+
+    def _patch_history(self):
+        return patch(
+            "app.orchestration.turn_context.conversation_service.get_conversation_history",
+            return_value=[],
+        )
+
+    def test_hydrates_from_customer_db_when_cart_active(self):
+        session = {
+            "session": {
+                "order_context": {
+                    "items": [{"name": "Pizza", "quantity": 1, "price": 25000}],
+                    "delivery_info": {},
+                }
+            }
+        }
+        save_mock = patch(
+            "app.orchestration.turn_context.session_state_service.save"
+        )
+        with patch(
+            "app.orchestration.turn_context.session_state_service.load",
+            return_value=session,
+        ), patch(
+            "app.orchestration.turn_context.customer_service.get_customer",
+            return_value={
+                "name": "Vanessa Ortega",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Efectivo",
+            },
+        ), self._patch_history(), self._patch_no_orders(), save_mock as save:
+            ctx = tc.build_turn_context(wa_id="+57317", business_id="biz-1")
+
+        assert ctx.delivery_info == {
+            "name": "Vanessa Ortega",
+            "address": "calle 18",
+            "phone": "3177000722",
+            "payment_method": "Efectivo",
+        }
+        save.assert_called_once()
+        args, _ = save.call_args
+        assert args[0] == "+57317"
+        assert args[1] == "biz-1"
+        assert args[2]["order_context"]["delivery_info"] == {
+            "name": "Vanessa Ortega",
+            "address": "calle 18",
+            "phone": "3177000722",
+            "payment_method": "Efectivo",
+        }
+
+    def test_session_fields_win_over_db(self):
+        session = {
+            "session": {
+                "order_context": {
+                    "items": [{"name": "Pizza", "quantity": 1, "price": 25000}],
+                    "delivery_info": {"address": "calle 99 (override)"},
+                }
+            }
+        }
+        with patch(
+            "app.orchestration.turn_context.session_state_service.load",
+            return_value=session,
+        ), patch(
+            "app.orchestration.turn_context.customer_service.get_customer",
+            return_value={
+                "name": "Vanessa Ortega",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Efectivo",
+            },
+        ), self._patch_history(), self._patch_no_orders(), patch(
+            "app.orchestration.turn_context.session_state_service.save"
+        ):
+            ctx = tc.build_turn_context(wa_id="+57317", business_id="biz-1")
+
+        assert ctx.delivery_info["address"] == "calle 99 (override)"
+        assert ctx.delivery_info["name"] == "Vanessa Ortega"
+
+    def test_no_hydration_without_active_cart(self):
+        session = {
+            "session": {
+                "order_context": {
+                    "items": [],
+                    "delivery_info": {},
+                }
+            }
+        }
+        cust_mock = patch(
+            "app.orchestration.turn_context.customer_service.get_customer",
+            return_value={"name": "Vanessa", "address": "calle 18"},
+        )
+        save_mock = patch(
+            "app.orchestration.turn_context.session_state_service.save"
+        )
+        with patch(
+            "app.orchestration.turn_context.session_state_service.load",
+            return_value=session,
+        ), cust_mock as cust, self._patch_history(), self._patch_no_orders(), save_mock as save:
+            ctx = tc.build_turn_context(wa_id="+57317", business_id="biz-1")
+
+        assert ctx.delivery_info == {}
+        cust.assert_not_called()
+        save.assert_not_called()
+
+    def test_pickup_mode_only_hydrates_name(self):
+        session = {
+            "session": {
+                "order_context": {
+                    "items": [{"name": "Pizza", "quantity": 1, "price": 25000}],
+                    "delivery_info": {},
+                    "fulfillment_type": "pickup",
+                }
+            }
+        }
+        with patch(
+            "app.orchestration.turn_context.session_state_service.load",
+            return_value=session,
+        ), patch(
+            "app.orchestration.turn_context.customer_service.get_customer",
+            return_value={
+                "name": "Vanessa Ortega",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Efectivo",
+            },
+        ), self._patch_history(), self._patch_no_orders(), patch(
+            "app.orchestration.turn_context.session_state_service.save"
+        ):
+            ctx = tc.build_turn_context(wa_id="+57317", business_id="biz-1")
+
+        assert ctx.delivery_info == {"name": "Vanessa Ortega"}
+
+    def test_no_writeback_when_nothing_to_fill(self):
+        session = {
+            "session": {
+                "order_context": {
+                    "items": [{"name": "Pizza", "quantity": 1, "price": 25000}],
+                    "delivery_info": {
+                        "name": "Vanessa Ortega",
+                        "address": "calle 18",
+                        "phone": "3177000722",
+                        "payment_method": "Efectivo",
+                    },
+                }
+            }
+        }
+        save_mock = patch(
+            "app.orchestration.turn_context.session_state_service.save"
+        )
+        with patch(
+            "app.orchestration.turn_context.session_state_service.load",
+            return_value=session,
+        ), patch(
+            "app.orchestration.turn_context.customer_service.get_customer",
+            return_value={"name": "Stale", "address": "Stale"},
+        ), self._patch_history(), self._patch_no_orders(), save_mock as save:
+            ctx = tc.build_turn_context(wa_id="+57317", business_id="biz-1")
+
+        assert ctx.delivery_info["name"] == "Vanessa Ortega"
+        assert ctx.delivery_info["address"] == "calle 18"
+        save.assert_not_called()

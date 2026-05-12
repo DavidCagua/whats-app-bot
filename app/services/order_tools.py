@@ -1466,17 +1466,34 @@ def submit_delivery_info(
                 notes_note = f" notas guardadas: \"{new_notes[:100]}\""
             else:
                 notes_note = " notas borradas"
-        return (
-            f"✅ Datos guardados ({mode_note}).{notes_note} "
-            f"all_present={'true' if all_present else 'false'}|missing={missing_str}. "
-            + (
+        # If the customer is already in the confirmation state
+        # (awaiting_confirmation=true was set in a prior turn after a
+        # ready_to_confirm dispatch), don't re-prompt — the user has
+        # already seen the card and is responding to it. Tell the agent
+        # to place the order directly. Otherwise keep the legacy two-
+        # step "show card → wait → place" instruction.
+        already_awaiting = _read_awaiting_confirmation(wa_id, business_id)
+        if all_present and already_awaiting:
+            tail = (
+                "El cliente ya está en fase de confirmación "
+                "(awaiting_confirmation=true). Llama place_order AHORA — "
+                "NO emitas otra tarjeta de confirmación."
+            )
+        elif all_present:
+            tail = (
                 "Si el cliente ya indicó que terminó de pedir, llama "
                 "respond(kind='ready_to_confirm') AHORA — NO llames place_order, "
                 "el sistema enviará la tarjeta de confirmación."
-                if all_present else
+            )
+        else:
+            tail = (
                 "Pide al cliente los campos faltantes y llama "
                 "respond(kind='delivery_info_collected', facts=[...campos faltantes...])."
             )
+        return (
+            f"✅ Datos guardados ({mode_note}).{notes_note} "
+            f"all_present={'true' if all_present else 'false'}|missing={missing_str}. "
+            + tail
         )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] submit_delivery_info error: {e}")
