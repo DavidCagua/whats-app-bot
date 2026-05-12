@@ -99,7 +99,7 @@ export default async function BusinessOverviewPage({
     {
       title: "Chats → pedidos",
       value: formatPct(summary.conversionPct),
-      description: `${summary.orders} pedidos / ${summary.uniqueChats} chats`,
+      description: `${summary.chatsWithOrders} de ${summary.uniqueChats} chats hicieron pedido · ${summary.orders} pedidos en total`,
       icon: MessageSquare,
     },
     {

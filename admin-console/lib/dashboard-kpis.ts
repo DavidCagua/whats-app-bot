@@ -24,6 +24,7 @@ const CASH_PAYMENT_REGEX = "^(efectivo|cash|contado|plata)"
 export type DashboardKpis = {
   summary: {
     uniqueChats: number
+    chatsWithOrders: number
     orders: number
     conversionPct: number | null
     ordersBot: number
@@ -57,6 +58,7 @@ export type DashboardKpis = {
 
 type SummaryRow = {
   unique_chats: bigint
+  chats_with_orders: bigint
   orders: bigint
   orders_bot: bigint
   orders_admin: bigint
@@ -137,11 +139,19 @@ export async function getDashboardKpis(
           WHERE business_id = ${businessId}::uuid
             AND display_date BETWEEN ${fromDate}::date AND ${toDate}::date
         ),
-        range_chats AS (
-          SELECT COUNT(DISTINCT whatsapp_id)::bigint AS unique_chats
+        range_chat_ids AS (
+          -- Distinct chats in the range. conversations.timestamp is
+          -- timestamp WITHOUT time zone in production despite the
+          -- Prisma schema declaring tstz — SQLAlchemy persists
+          -- datetime.now(timezone.utc) but the column drops the offset.
+          -- Tag the value as UTC first, then convert to Bogotá. A plain
+          -- AT TIME ZONE America/Bogota on a naive column would do the
+          -- inverse (treat as Bogotá local), shifting the result by 5h
+          -- in the wrong direction.
+          SELECT DISTINCT whatsapp_id
           FROM conversations
           WHERE business_id = ${businessId}::uuid
-            AND (timestamp AT TIME ZONE 'America/Bogota')::date
+            AND ((timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'America/Bogota')::date
                 BETWEEN ${fromDate}::date AND ${toDate}::date
         ),
         range_promos AS (
@@ -150,7 +160,17 @@ export async function getDashboardKpis(
           JOIN range_orders o ON o.id = op.order_id
         )
         SELECT
-          (SELECT unique_chats FROM range_chats) AS unique_chats,
+          (SELECT COUNT(*)::bigint FROM range_chat_ids) AS unique_chats,
+          -- Standard conversion: chats that placed at least one order
+          -- in the same range. Caps at 100% no matter how many orders
+          -- a single chat produced. Admin-created orders (no matching
+          -- whatsapp_id in conversations) are correctly excluded from
+          -- the numerator.
+          (SELECT COUNT(*)::bigint FROM range_chat_ids c
+             WHERE EXISTS (
+               SELECT 1 FROM range_orders o
+               WHERE o.whatsapp_id = c.whatsapp_id
+             )) AS chats_with_orders,
           (SELECT COUNT(*)::bigint FROM range_orders) AS orders,
           (SELECT COUNT(*)::bigint FROM range_orders WHERE created_via = 'bot') AS orders_bot,
           (SELECT COUNT(*)::bigint FROM range_orders WHERE created_via <> 'bot') AS orders_admin,
@@ -219,22 +239,25 @@ export async function getDashboardKpis(
         bot_pairs AS (
           -- Adjacent user → assistant message pairs in the range.
           -- LEAD() walks the conversation forward so we don't need a
-          -- correlated subquery per message row.
+          -- correlated subquery per message row. conversations.timestamp
+          -- is naive UTC in production (see range_chats note), so we
+          -- tag it as UTC before comparing against the tz-aware range
+          -- bounds — and use the tz-aware values for the LEAD math too.
           SELECT EXTRACT(EPOCH FROM (next_ts - ts)) AS response_sec
           FROM (
             SELECT
               role,
-              timestamp AS ts,
+              (timestamp AT TIME ZONE 'UTC') AS ts,
               LEAD(role) OVER (
                 PARTITION BY business_id, whatsapp_id ORDER BY timestamp
               ) AS next_role,
-              LEAD(timestamp) OVER (
+              LEAD(timestamp AT TIME ZONE 'UTC') OVER (
                 PARTITION BY business_id, whatsapp_id ORDER BY timestamp
               ) AS next_ts
             FROM conversations
             WHERE business_id = ${businessId}::uuid
-              AND timestamp >= ${fromUtc}
-              AND timestamp <  ${toUtc}
+              AND (timestamp AT TIME ZONE 'UTC') >= ${fromUtc}
+              AND (timestamp AT TIME ZONE 'UTC') <  ${toUtc}
           ) c
           WHERE role = 'user'
             AND next_role = 'assistant'
@@ -291,6 +314,7 @@ export async function getDashboardKpis(
   const p = performanceRows[0] ?? ({} as PerformanceRow)
 
   const uniqueChats = toNumber(s.unique_chats)
+  const chatsWithOrders = toNumber(s.chats_with_orders)
   const ordersInRange = toNumber(s.orders)
   const revenueTotal = toNumber(s.revenue_total ?? 0)
   const discountTotal = toNumber(s.discount_total ?? 0)
@@ -298,8 +322,9 @@ export async function getDashboardKpis(
   return {
     summary: {
       uniqueChats,
+      chatsWithOrders,
       orders: ordersInRange,
-      conversionPct: pct(ordersInRange, uniqueChats),
+      conversionPct: pct(chatsWithOrders, uniqueChats),
       ordersBot: toNumber(s.orders_bot),
       ordersAdmin: toNumber(s.orders_admin),
       incompletePct: pct(toNumber(s.incomplete), ordersInRange),
