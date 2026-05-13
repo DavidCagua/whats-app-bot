@@ -188,39 +188,42 @@ def build_turn_context(
             fulfillment_type = raw_ftype
         order_notes = (order_context.get("notes") or "").strip()
 
-        # Hydrate session.delivery_info from the customer DB when an
-        # order is in progress. Returning customers have name / address /
-        # phone / payment on file but those never land in the session
-        # cart until submit_delivery_info is called explicitly — which
-        # leaves place_order, the renderer, and the agent prompt
-        # disagreeing about what's "on file". By merging at the boundary
-        # and writing through, every downstream consumer reads a single
-        # complete source. Session fields always win over DB fields, so
-        # an explicit submit_delivery_info edit is never clobbered.
+        # Hydrate the in-memory delivery_info from the customer DB on
+        # every turn — including before a cart exists — so the planner
+        # never re-prompts a returning customer for data we already
+        # have on file ("Hola para un domicilio"). Writeback to the
+        # session, however, is gated on an active cart: writing
+        # delivery_info into session_state before any item is added
+        # would let derive_order_state jump GREETING → READY_TO_PLACE
+        # on the first add_item, skipping ORDERING. As soon as a cart
+        # is open, the next turn's hydration writes through so
+        # place_order / the renderer / the agent prompt all see the
+        # same view. Session fields always win over DB fields, so an
+        # explicit submit_delivery_info edit is never clobbered.
         # Pickup mode only needs name; address / phone / payment_method
         # don't apply.
-        if has_active_cart:
-            try:
-                cust = customer_service.get_customer(wa_id) or {}
-            except Exception as exc:
-                logger.warning("[TURN_CONTEXT] customer load failed: %s", exc)
-                cust = {}
-            candidate_fields = (
-                ("name",)
-                if fulfillment_type == "pickup"
-                else ("name", "address", "phone", "payment_method")
-            )
-            hydrated: Dict[str, str] = {}
-            for fld in candidate_fields:
-                if delivery_info.get(fld):
-                    continue
-                raw = cust.get(fld)
-                if isinstance(raw, (str, int)):
-                    val = str(raw).strip()
-                    if val:
-                        hydrated[fld] = val
-            if hydrated:
-                delivery_info = {**delivery_info, **hydrated}
+        try:
+            cust = customer_service.get_customer(wa_id) or {}
+        except Exception as exc:
+            logger.warning("[TURN_CONTEXT] customer load failed: %s", exc)
+            cust = {}
+        candidate_fields = (
+            ("name",)
+            if fulfillment_type == "pickup"
+            else ("name", "address", "phone", "payment_method")
+        )
+        hydrated: Dict[str, str] = {}
+        for fld in candidate_fields:
+            if delivery_info.get(fld):
+                continue
+            raw = cust.get(fld)
+            if isinstance(raw, (str, int)):
+                val = str(raw).strip()
+                if val:
+                    hydrated[fld] = val
+        if hydrated:
+            delivery_info = {**delivery_info, **hydrated}
+            if has_active_cart:
                 try:
                     merged_di = dict(raw_di) if isinstance(raw_di, dict) else {}
                     for fld, val in hydrated.items():
