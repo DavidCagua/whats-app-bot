@@ -112,8 +112,23 @@ Kinds válidos para respond:
 - chat: saludo / charla / nada que mutar
 
 Reglas duras de flujo:
-1. UN cambio a la vez. Después de add_to_cart / update_cart_item / remove_from_cart / add_promo_to_cart, tu PRÓXIMA acción es respond(...) — NUNCA llames otra herramienta de carrito, ni get_customer_info, ni place_order en el mismo turno. El cliente debe responder primero.
-   EXCEPCIÓN: cuando el MISMO mensaje del cliente combina un cambio de carrito con una señal de entrega (cambio de modo pickup/domicilio, nombre, dirección, teléfono, medio de pago — el cliente comunicó AMBAS intenciones simultáneamente, p.ej. "una hamburguesa para recoger", "tráeme X y soy David", "Y para domicilio en Calle 18"), llama PRIMERO la herramienta de carrito (p.ej. add_to_cart) y DESPUÉS submit_delivery_info en el mismo turno. Es válido y necesario — si separas las dos intenciones a turnos distintos, el cliente debe repetir información que ya dio.
+1. CARRITO POR PRODUCTOS QUE EL CLIENTE ELIGIÓ. En un mismo turno puedes llamar add_to_cart / add_promo_to_cart UNA vez por CADA producto que el cliente eligió — sea porque lo nombró en el mensaje actual ("dame una BARRACUDA y una Coca-Cola" → 2 add_to_cart), sea porque escogió de una lista que el bot le mostró previamente y ahora confirma. Cierra siempre con respond(...).
+
+   PROVENANCE — REGLA CRÍTICA: cada llamada de carrito debe trazarse a una ELECCIÓN DEL CLIENTE. Una elección es:
+     (a) un nombre o frase que el cliente escribió en el mensaje actual ("una BARRACUDA", "la Honey", "dos Coca-Cola");
+     (b) una referencia anafórica en el mensaje actual ("dame una de esas", "la segunda", "esa que dijiste") cuyo antecedente sea CLARO en el historial — un producto que el cliente ya nombró antes, o un item de una lista que el bot ya le mostró y al que el cliente está respondiendo;
+     (c) un PEDIDO explícito anterior del cliente que aún no se ha procesado.
+   Si no puedes señalar una de esas tres cosas para un producto, NO lo agregues — esa intención NO vino del cliente.
+
+   EL ANTIPATRÓN A EVITAR: los productos que aparecen en el RESULTADO de search_products / list_category_products / list_promos / get_menu_categories / get_product_details DENTRO DE ESTE MISMO TURNO son OPCIONES PARA MOSTRAR, no instrucciones para agregar. Si llamaste una herramienta de descubrimiento y el cliente aún no ha elegido entre los resultados, tu siguiente acción es respond(kind='menu_info' o 'disambiguation', facts=[...]) — NUNCA conviertas esos resultados en argumentos de add_to_cart / add_promo_to_cart en el mismo turno.
+
+   Ejemplo del antipatrón (NO hagas esto): cliente pregunta "¿tienen alguna hamburguesa básica para ponerle tocineta?" → llamas list_category_products('HAMBURGUESAS') → agregas las 12 hamburguesas con notes='con tocineta'. El cliente NO eligió ninguna; solo preguntó. Acción correcta: respond(kind='menu_info', facts=[...nombres de hamburguesas...]) y esperar la elección.
+
+   Ejemplo de anáfora válida: turno previo el bot dijo "Sí, tenemos Mexican Burger - $27.000"; este turno el cliente dice "dame una de esas" → add_to_cart(product_name='mexican burger') es correcto, la referencia es inequívoca.
+
+   Después de la(s) llamada(s) de carrito, tu PRÓXIMA acción es respond(...). NUNCA llames get_customer_info ni place_order en el mismo turno. El cliente debe responder primero.
+
+   EXCEPCIÓN — DELIVERY INFO COMBO: cuando el MISMO mensaje combina carrito + señal de entrega (cambio de modo pickup/domicilio, nombre, dirección, teléfono, medio de pago — p.ej. "una hamburguesa para recoger", "tráeme X y soy David", "Y para domicilio en Calle 18"), llama PRIMERO add_to_cart (una vez por producto elegido) y DESPUÉS submit_delivery_info en el mismo turno. Es válido y necesario — separar estas intenciones a turnos distintos obliga al cliente a repetir información que ya dio.
 2. NO recolectes datos de entrega hasta que el cliente diga explícitamente que terminó de pedir ("eso es todo", "ya", "listo", "nada más", "cierra el pedido"). Solo entonces llama get_customer_info.
 3. Si get_customer_info devuelve all_present=true → llama respond(kind='ready_to_confirm') y NADA MÁS. El sistema mostrará la tarjeta de confirmación. NO llames place_order en este turno.
 3a. Después de submit_delivery_info, lee el resultado: contiene `all_present=true|false|missing=...`. Si all_present=true Y el cliente ya indicó que terminó de pedir ("eso es todo", "listo", etc.), llama respond(kind='ready_to_confirm') — NO emitas delivery_info_collected. Si all_present=false, emite delivery_info_collected con los campos faltantes en `facts` (ej. facts=["faltan: nombre, teléfono"]).
@@ -135,6 +150,7 @@ Reglas duras de flujo:
     El renderer le mostrará las opciones al cliente y le preguntará cuál prefiere.
     Ejemplo: cliente dice "Con bebida" y el carrito tiene 1x BARRACUDA → llama list_category_products('BEBIDAS') → respond(kind='menu_info', facts=['Coca-Cola - $5.500', 'Sprite - $5.500', ...]). NO llames add_to_cart con un producto que el cliente no nombró.
     Solo procede a add_to_cart cuando el cliente nombre el producto específico ("Con una Coca-Cola", "Una Sprite", "Las papas francesas").
+    Esta regla aplica simétricamente a promociones (ver regla 12c) y a cualquier categoría implícita en una PREGUNTA ("¿tienen hamburguesas básicas?", "¿qué bebidas tienen?") — listar las opciones, NUNCA agregar. Ver regla 1 (provenance).
 12. add_to_cart con resultado NOT_FOUND: si el resultado de add_to_cart empieza con `NOT_FOUND|`, el item NO se agregó al carrito (la búsqueda completa ya corrió y el producto no existe). NUNCA emitas kind='items_added' en ese caso. Sigue las instrucciones del propio resultado: infiere la categoría más probable del producto pedido (mirando el mensaje del cliente y el carrito), llama list_category_products de esa categoría, y luego respond(kind='disambiguation', facts=[...opciones reales...]). Si en el mismo turno se agregaron OTROS items con éxito, menciona ambos en el summary: lo que sí se agregó y la pregunta sobre el item no encontrado.
 
 12c. PROMO SIN NOMBRE ESPECÍFICO (descubrimiento):
@@ -270,7 +286,7 @@ class OrderAgent(BaseAgent):
         """Lazy-init: defer OpenAI client + tool binding until first use."""
         if self._llm is None:
             self._llm = ChatOpenAI(
-                model="gpt-4o-mini",
+                model="gpt-5.4-mini-2026-03-17",
                 temperature=0.3,
                 api_key=os.getenv("OPENAI_API_KEY"),
             ).bind_tools(list(order_tools) + [respond_tool])
