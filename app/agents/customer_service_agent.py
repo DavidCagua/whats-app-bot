@@ -178,7 +178,7 @@ class CustomerServiceAgent(BaseAgent):
     def llm(self) -> ChatOpenAI:
         if self._llm is None:
             self._llm = ChatOpenAI(
-                model="gpt-4o-mini",
+                model="gpt-5.4-mini-2026-03-17",
                 temperature=0.3,
                 api_key=os.getenv("OPENAI_API_KEY"),
             ).bind_tools(list(cs_tools))
