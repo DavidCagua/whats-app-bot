@@ -162,6 +162,7 @@ Reglas:
 3. NUNCA inventes URLs, links, números de Nequi, teléfonos, precios ni datos. Si no aparece en la herramienta o en las reglas del negocio (abajo), no lo digas.
 4. Cuando NINGUNA herramienta aplique (chat general, preguntas sobre combos/acompañamientos/políticas del negocio, charla), responde directamente — breve (1-3 oraciones), tono cordial. Apóyate en las "Reglas y contexto del negocio" cuando existan.
 5. Para preguntas sobre un producto específico del menú, precio de un producto, o intención de pedir algo: NO llames ninguna herramienta de CS — eso lo maneja el agente de pedido y será ruteado automáticamente.
+6. IMÁGENES — la imagen es CONTEXTO, no fuente de verdad. NUNCA respondas afirmando que una promo existe o un producto está disponible solo porque la imagen lo muestra. Si la imagen parece una promoción (un flyer, un combo, una oferta), llama `get_promos` para verificar contra el catálogo activo HOY antes de responder. Si parece un producto del menú, la regla 5 aplica (lo maneja el agente de pedido). Solo después de tener data oficial de la herramienta, redacta la respuesta.
 
 {ai_prompt_rules}
 """
@@ -235,6 +236,7 @@ class CustomerServiceAgent(BaseAgent):
         session: Optional[Dict] = None,
         stale_turn: bool = False,
         turn_ctx: Optional[object] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> AgentOutput:
         run_id = str(uuid.uuid4())
@@ -297,6 +299,7 @@ class CustomerServiceAgent(BaseAgent):
                 conversation_history=conversation_history,
                 message_body=message_body,
                 turn_ctx=turn_ctx,
+                attachments=attachments,
             )
             tool_map = {t.name: t for t in cs_tools}
             executed_tools: List[str] = []
@@ -447,6 +450,7 @@ class CustomerServiceAgent(BaseAgent):
         conversation_history: List[Dict],
         message_body: str,
         turn_ctx: Optional[object],
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> List:
         ctx_block = ""
         if turn_ctx is not None:
@@ -460,15 +464,18 @@ class CustomerServiceAgent(BaseAgent):
             except Exception:
                 ctx_block = ""
 
+        user_text = (
+            f"{ctx_block}"
+            "[MENSAJE ACTUAL DEL CLIENTE — procesa SOLO este "
+            "mensaje en este turno; los anteriores en CONTEXTO "
+            "son historial]\n"
+            f"Cliente: {message_body}"
+        )
+
+        from ..orchestration.multimodal import build_user_content
         return [
             SystemMessage(content=self._build_system_prompt(business_context)),
-            HumanMessage(content=(
-                f"{ctx_block}"
-                "[MENSAJE ACTUAL DEL CLIENTE — procesa SOLO este "
-                "mensaje en este turno; los anteriores en CONTEXTO "
-                "son historial]\n"
-                f"Cliente: {message_body}"
-            )),
+            HumanMessage(content=build_user_content(user_text, attachments)),
         ]
 
     def _pre_loop_safety_nets(

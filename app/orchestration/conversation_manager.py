@@ -164,6 +164,7 @@ class ConversationManager:
         message_id: Optional[str] = None,
         stale_turn: bool = False,
         abort_key: Optional[str] = None,
+        attachments: Optional[list] = None,
     ) -> str:
         """
         Process incoming message, return the final user-facing reply.
@@ -237,6 +238,7 @@ class ConversationManager:
             wa_id=wa_id,
             turn_id=message_id,
             gate=order_gate,
+            attachments=attachments,
         )
         if router_result.direct_reply is not None:
             logging.warning("[CONVERSATION_MANAGER] Router fast-path: direct reply, no agent dispatch")
@@ -349,6 +351,7 @@ class ConversationManager:
             stale_turn=stale_turn,
             abort_key=abort_key,
             turn_ctx=turn_ctx,
+            attachments=attachments,
         )
 
         if dispatch_result.handoff_chain and len(dispatch_result.handoff_chain) > 1:

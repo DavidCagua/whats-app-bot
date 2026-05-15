@@ -295,6 +295,7 @@ def _run_agent_and_send(
     message_id: Optional[str] = None,
     abort_key: Optional[str] = None,
     stale_turn: bool = False,
+    attachments: Optional[list] = None,
 ) -> tuple:
     """Run conversation manager and send reply via utils.
 
@@ -321,6 +322,7 @@ def _run_agent_and_send(
             message_id=message_id,
             stale_turn=stale_turn,
             abort_key=abort_key,
+            attachments=attachments,
         )
         if not response or not response.strip():
             logging.error("❌ ConversationManager returned None or empty response")
@@ -378,36 +380,51 @@ def _run_agent_and_send(
     return (True, False)
 
 
-def run_agent_and_send_reply(wa_id: str, message_text: str, business_id: str) -> bool:
+def run_agent_and_send_reply(
+    wa_id: str,
+    message_text: str,
+    business_id: str,
+    attachments: Optional[list] = None,
+) -> bool:
     """
     Run the conversation agent on message_text and send the reply to wa_id.
-    Used when transcript is ready (e.g. after voice message transcription).
+    Used when transcript is ready (e.g. after voice message transcription)
+    or when the media job hands an image-bearing turn back to the agent.
+
+    ``attachments`` is the list of media items associated with the inbound
+    turn (post-upload Supabase URLs). Threaded through to the router and
+    agents so vision-capable models can reason on the image directly
+    instead of relying on a separate vision-classifier node. Shape:
+    [{"type": "image"|"audio", "url": str, "caption": Optional[str]}].
+
     Call from a thread that has Flask app context.
     """
-    if not message_text or not message_text.strip():
+    if not (message_text and message_text.strip()) and not attachments:
         return False
     # Voice-reply path enters from a background worker thread — give it
     # its own fresh turn cache so it doesn't share state with whichever
     # request was served last on this thread.
+    log_tag = "[MEDIA_REPLY]" if attachments else "[VOICE_REPLY]"
     turn_cache.begin_turn()
     try:
         business_context = business_service.get_business_context_by_business_id(business_id)
         if not business_context:
-            logging.warning("[VOICE_REPLY] No business context for business_id=%s", business_id)
+            logging.warning("%s No business context for business_id=%s", log_tag, business_id)
             return False
         name, agent_allowed = _agent_gate_and_name(wa_id, business_context)
         if not agent_allowed:
             return False
         ok = _run_agent_and_send(
             wa_id=wa_id,
-            message_body=message_text.strip(),
+            message_body=(message_text or "").strip(),
             name=name,
             business_context=business_context,
             message_id=None,
+            attachments=attachments,
         )
         if ok:
-            logging.warning("[VOICE_REPLY] Reply sent successfully for transcript")
+            logging.warning("%s Reply sent successfully", log_tag)
         return ok
     except Exception as e:
-        logging.error(f"[VOICE_REPLY] Error: {e}", exc_info=True)
+        logging.error("%s Error: %s", log_tag, e, exc_info=True)
         return False

@@ -70,6 +70,7 @@ def dispatch(
     stale_turn: bool = False,
     abort_key: Optional[str] = None,
     turn_ctx: Optional[TurnContext] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> DispatchResult:
     """
     Run the ordered list of (agent_type, segment) pairs. Handle handoffs
@@ -115,6 +116,7 @@ def dispatch(
             stale_turn=stale_turn,
             abort_key=abort_key,
             turn_ctx=turn_ctx,
+            attachments=attachments,
         )
         result.agent_outputs.append(output)
         result.handoff_chain.append(agent_type)
@@ -166,6 +168,7 @@ def dispatch(
                 abort_key=abort_key,
                 handoff_context=handoff_context,
                 turn_ctx=turn_ctx,
+                attachments=attachments,
             )
             result.agent_outputs.append(output)
             result.handoff_chain.append(target)
@@ -195,6 +198,7 @@ def _run_agent(
     abort_key: Optional[str],
     handoff_context: Optional[Dict[str, Any]] = None,
     turn_ctx: Optional[TurnContext] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Invoke a single agent with consistent error handling."""
     try:
@@ -209,6 +213,7 @@ def _run_agent(
             abort_key=abort_key,
             handoff_context=handoff_context,
             turn_ctx=turn_ctx,
+            attachments=attachments,
         )
         if not isinstance(output, dict):
             logger.error("[DISPATCHER] agent=%s returned non-dict: %r", agent_type, type(output))

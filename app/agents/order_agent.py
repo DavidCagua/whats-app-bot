@@ -202,7 +202,10 @@ Reglas duras de flujo:
 
     En TODOS los casos de no-disponibilidad:
     - NUNCA emitas kind='items_added' por un producto marcado no disponible.
-    - Si el cliente PREGUNTÓ (¿tienes...?, ¿qué trae...?, ¿cuánto vale...?), usa kind='product_info'. El summary debe MENCIONAR la promo como información (no como acción): "Sí tenemos X, pero solo se vende como parte de la promo Y ($precio).". Cierra con una pregunta abierta como "¿Quieres pedirla?" — el cliente decide en su próximo mensaje si la quiere.
+    - Si el cliente PREGUNTÓ (¿tienes...?, ¿qué trae...?, ¿cuánto vale...?), usa kind='product_info'. El summary debe MENCIONAR la promo como información (no como acción): "Sí tenemos X, pero solo se vende como parte de la promo Y ($precio).".
+      El cierre depende del marker de la herramienta:
+        • Marker dice "Solo se vende como parte de la promo *Y* ($precio)." (sin mención de día) → promo ACTIVA hoy. Cierra con una pregunta abierta como "¿Quieres pedirla?" — el cliente decide si la quiere ahora.
+        • Marker dice "…que aplica el <día>" (con un día específico) → promo en OTRO DÍA. NO ofrezcas agregarla hoy. Cierra informando el día: "Puedes pedirla el <día>." o "Aplica el <día>, ese día te la podemos preparar." — preguntar "¿Quieres pedirla?" cuando no la podemos preparar hoy confunde al cliente.
     - Si el cliente PIDIÓ agregar el producto y add_to_cart lo rechazó por disponibilidad, también usa kind='product_info' con el summary que explica el motivo y nombra la alternativa.
     - El summary DEBE incluir el motivo concreto del marker. NO inventes un motivo distinto.
     - Pasa como facts los datos literales: nombre del producto, nombre de la promo, precio, día si aplica. Así el renderer los puede citar exactos.
@@ -332,6 +335,7 @@ class OrderAgent(BaseAgent):
         session: Optional[Dict] = None,
         stale_turn: bool = False,
         abort_key: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> AgentOutput:
         run_id = str(uuid.uuid4())
@@ -466,6 +470,7 @@ class OrderAgent(BaseAgent):
                 conversation_history=conversation_history,
                 message_body=message_body,
                 turn_ctx=turn_ctx,
+                attachments=attachments,
             )
             tool_map = {t.name: t for t in order_tools}
             executed_tools: List[str] = []
@@ -908,6 +913,7 @@ class OrderAgent(BaseAgent):
         conversation_history: List[Dict],
         message_body: str,
         turn_ctx: Optional["TurnContext"] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Any]:
         if turn_ctx is None:
             turn_ctx = TurnContext()
@@ -970,13 +976,15 @@ class OrderAgent(BaseAgent):
         # confuse it with history. Even though it's the only
         # HumanMessage, the explicit marker makes the boundary
         # unmistakable when the model parses the prompt.
+        user_text = (
+            "[MENSAJE ACTUAL DEL CLIENTE — procesa SOLO este "
+            "mensaje en este turno; los mensajes anteriores en "
+            "CONTEXTO DEL TURNO son historial]\n\n"
+            + message_body
+        )
+        from ..orchestration.multimodal import build_user_content
         messages.append(
-            HumanMessage(content=(
-                "[MENSAJE ACTUAL DEL CLIENTE — procesa SOLO este "
-                "mensaje en este turno; los mensajes anteriores en "
-                "CONTEXTO DEL TURNO son historial]\n\n"
-                + message_body
-            ))
+            HumanMessage(content=build_user_content(user_text, attachments))
         )
         return messages
 

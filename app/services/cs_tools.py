@@ -780,6 +780,7 @@ def cancel_order(
 
 @tool
 def get_promos(
+    include_upcoming_other_days: bool = False,
     *,
     injected_business_context: Annotated[dict, InjectedToolArg],
 ) -> str:
@@ -794,6 +795,14 @@ def get_promos(
 
     NO la llames si el cliente nombra una promo específica que quiere —
     en ese caso usa `select_listed_promo`.
+
+    `include_upcoming_other_days`: pásalo en True SOLO cuando el cliente
+    pregunta explícitamente por otros días o el resto de la semana
+    ("¿hay otras esta semana?", "¿y los otros días?", "¿qué promos hay
+    los lunes?"). Por defecto False: si hoy hay promos activas, NO
+    listes las de otros días — el cliente solo necesita saber lo de
+    hoy. (Cuando no hay promos hoy pero sí próximas, el listado de
+    próximas se muestra siempre — es la única opción procesable.)
 
     Efecto secundario: guarda la lista de promos activas en la sesión
     para que un próximo turno pueda resolver referencias como
@@ -842,7 +851,10 @@ def get_promos(
     if promos:
         active_lines = "\n".join(_render(p, i) for i, p in enumerate(promos, start=1))
         message = f"Estas son nuestras promos activas hoy:\n{active_lines}"
-        if upcoming:
+        # Only mention other-day upcoming promos when the agent explicitly
+        # opted in (i.e. the customer asked about "the rest of the week").
+        # Default behavior: keep the answer focused on today.
+        if include_upcoming_other_days and upcoming:
             # Include the day each upcoming promo applies so the customer
             # knows when to come back. Bare "También hay Dos Misuri con
             # papas" is misleading — it reads like the promo is available
@@ -856,7 +868,12 @@ def get_promos(
                 up_bits.append(f"{name} ({label})" if label else name)
             if up_bits:
                 message += f"\n\nTambién hay otras esta semana: {', '.join(up_bits)}."
-        message += "\n\nSi quieres alguna, dime cuál."
+        # Closer: with a single active promo, "dime cuál" is nonsensical —
+        # there's only one. Switch to a direct offer.
+        if len(promos) == 1:
+            message += "\n\n¿Quieres pedirla?"
+        else:
+            message += "\n\nSi quieres alguna, dime cuál."
         return _final(message)
 
     # No active promos but upcoming exist.

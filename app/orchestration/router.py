@@ -254,6 +254,7 @@ def _classify_with_llm(
     ctx: Optional[TurnContext] = None,
     wa_id: Optional[str] = None,
     turn_id: Optional[str] = None,
+    attachments: Optional[list] = None,
 ) -> Optional[List[Tuple[str, str]]]:
     """
     Call the classifier and return a list of (domain, text) segments,
@@ -285,10 +286,11 @@ def _classify_with_llm(
 
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
+        from .multimodal import build_user_content
         response = llm.invoke(
             [
                 SystemMessage(content=_ROUTER_SYSTEM_PROMPT),
-                HumanMessage(content=user_payload),
+                HumanMessage(content=build_user_content(user_payload, attachments)),
             ],
             config={
                 "run_name": "router_classifier",
@@ -640,6 +642,7 @@ def route(
     wa_id: Optional[str] = None,
     turn_id: Optional[str] = None,
     gate: Optional[dict] = None,
+    attachments: Optional[list] = None,
 ) -> RouterResult:
     """
     Classify the message and decide how to respond.
@@ -744,6 +747,7 @@ def route(
     segments = _classify_with_llm(
         message_body, business_context, ctx=ctx,
         wa_id=wa_id, turn_id=turn_id,
+        attachments=attachments,
     )
     if not segments:
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")

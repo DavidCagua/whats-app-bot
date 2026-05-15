@@ -297,19 +297,19 @@ def process_media_job(conversation_id: int, abort_key: Optional[str] = None) -> 
 
 def _handle_image_message(conv, image_url: str, caption: str, abort_key: Optional[str]) -> None:
     """
-    Image-bearing turn dispatcher (replaces the older image-only handler).
+    Image-bearing turn dispatcher.
 
-    Flow:
-      1. Set processing flag so concurrent text messages abort+requeue
-         (cross-modal coordination via the existing debounce machinery).
-      2. Run vision extraction.
-      3. If is_promo_screenshot → templated promo reply (no agent).
-      4. Else if caption present → run the agent on the caption.
-      5. Else → friendly receipt.
-      6. Always clear the processing flag.
+    Hands the Supabase-public image URL plus the caption (if any) to the
+    agent pipeline. Router and vision-capable agents reason on the image
+    directly — no separate vision classifier. Closed-shop / delivery-
+    paused / agent-off gates apply via the router and order agent the
+    same way they do for any text turn.
+
+    The Redis processing flag is set for the duration of the agent run
+    so a concurrent text webhook from the same customer aborts and
+    requeues with this turn (cross-modal coordination — same primitive
+    used for text↔text races).
     """
-    from app.services.image_promo_extractor import extract_promo_from_image
-
     business_id = str(conv.business_id) if conv.business_id else ""
     wa_id = conv.whatsapp_id
     logging.warning(
@@ -320,56 +320,27 @@ def _handle_image_message(conv, image_url: str, caption: str, abort_key: Optiona
         logging.warning("[MEDIA_JOB] image: missing wa_id or business_id, bailing")
         return
 
-    # Mark this turn as in-flight so a concurrent text webhook from the
-    # same customer triggers ABORT + requeue (same primitive used for
-    # text↔text races). Without this, "image" then "la tiene?" would
-    # produce two disconnected replies.
     proc_set = _mark_processing_for_abort_key(abort_key)
 
     try:
-        extracted = extract_promo_from_image(image_url)
-        if not extracted:
-            logging.warning(
-                "[MEDIA_JOB] image: extractor returned None — falling back"
+        from app import create_app
+        from app.handlers.whatsapp_handler import run_agent_and_send_reply
+        attachments = [
+            {"type": "image", "url": image_url, "caption": caption or ""}
+        ]
+        app = create_app()
+        with app.app_context():
+            run_agent_and_send_reply(
+                wa_id=wa_id,
+                message_text=caption,
+                business_id=business_id,
+                attachments=attachments,
             )
-            _dispatch_non_promo_path(wa_id, business_id, caption)
-            return
-
-        is_promo = bool(extracted.get("is_promo_screenshot"))
-        logging.warning(
-            "[MEDIA_JOB] image: extractor result is_promo=%s candidate=%r mentioned=%s",
-            is_promo, extracted.get("candidate_name"), extracted.get("mentioned_products"),
-        )
-        if is_promo:
-            _handle_promo_screenshot(wa_id, business_id, extracted)
-        else:
-            _dispatch_non_promo_path(wa_id, business_id, caption)
+    except Exception as exc:
+        logging.error("[MEDIA_JOB] image agent run failed: %s", exc, exc_info=True)
     finally:
         if proc_set:
             _clear_processing_for_abort_key(abort_key)
-
-
-def _dispatch_non_promo_path(wa_id: str, business_id: str, caption: str) -> None:
-    """When vision says it's not a promo screenshot:
-      - With caption: run the agent on the caption (regular text-only flow).
-      - Without caption: friendly receipt so the customer knows we got it."""
-    if caption:
-        logging.warning("[MEDIA_JOB] image: not a promo, running agent on caption=%r", caption)
-        try:
-            from app import create_app
-            from app.handlers.whatsapp_handler import run_agent_and_send_reply
-            app = create_app()
-            with app.app_context():
-                run_agent_and_send_reply(
-                    wa_id=wa_id,
-                    message_text=caption,
-                    business_id=business_id,
-                )
-        except Exception as exc:
-            logging.error("[MEDIA_JOB] caption agent run failed: %s", exc, exc_info=True)
-    else:
-        logging.warning("[MEDIA_JOB] image: not a promo and no caption — generic receipt")
-        _send_image_receipt(wa_id, business_id)
 
 
 def _mark_processing_for_abort_key(abort_key: Optional[str]) -> bool:
@@ -420,145 +391,6 @@ def _parse_abort_key(abort_key: Optional[str]):
     if not (to_number and phone):
         return None
     return (to_number, phone)
-
-
-def _handle_promo_screenshot(wa_id: str, business_id: str, extracted: dict) -> None:
-    """Match the extracted promo against active promotions, persist the
-    listed set into customer_service_context (so a follow-up "sí" routes
-    via SELECT_LISTED_PROMO → handoff to order), and send a confirmation."""
-    from app.services import promotion_service
-    from app.database.session_state_service import session_state_service
-
-    candidate_name = extracted.get("candidate_name") or ""
-    mentioned = extracted.get("mentioned_products") or []
-
-    # Two-pass match: candidate name first, then a join of mentioned
-    # products as a fallback. The shared matcher tolerates noise.
-    matches = []
-    if candidate_name:
-        matches = promotion_service.find_promo_by_query(business_id, candidate_name)
-    if not matches and mentioned:
-        matches = promotion_service.find_promo_by_query(
-            business_id, " ".join(mentioned[:3]),
-        )
-
-    if len(matches) == 1:
-        promo = matches[0]
-        # Persist into the same slot the CS PROMOS_LIST flow uses, so a
-        # follow-up "sí" / "dame esa" naturally resolves via
-        # SELECT_LISTED_PROMO → handoff to order/ADD_PROMO_TO_CART.
-        try:
-            session_state_service.save(wa_id, business_id, {
-                "agent_contexts": {
-                    "customer_service": {
-                        "last_listed_promos": [
-                            {"id": promo["id"], "name": promo["name"]},
-                        ],
-                    },
-                },
-            })
-        except Exception as exc:
-            logging.error("[MEDIA_JOB] failed to persist last_listed_promos: %s", exc)
-
-        price_clause = ""
-        if promo.get("fixed_price") is not None:
-            price = int(float(promo["fixed_price"]))
-            price_clause = f" — precio promo ${price:,}".replace(",", ".")
-        elif promo.get("discount_amount") is not None:
-            amt = int(float(promo["discount_amount"]))
-            price_clause = f" — descuento ${amt:,}".replace(",", ".")
-        elif promo.get("discount_pct") is not None:
-            price_clause = f" — {int(promo['discount_pct'])}% off"
-
-        reply = (
-            f"¡Sí! Esa promo la tenemos: *{promo['name']}*{price_clause}.\n\n"
-            f"¿Quieres que te la agregue al pedido?"
-        )
-        _send_text_reply(wa_id, reply, business_id)
-        return
-
-    if len(matches) >= 2:
-        names = "\n".join(f"• {p['name']}" for p in matches[:5])
-        reply = (
-            "Vi tu imagen — varias promos coinciden:\n"
-            f"{names}\n\n"
-            "¿Cuál de esas quieres?"
-        )
-        _send_text_reply(wa_id, reply, business_id)
-        return
-
-    # No match — list what IS active so the customer has options.
-    active = promotion_service.list_active_promos(business_id)
-    if active:
-        names = "\n".join(f"• {p['name']}" for p in active[:5])
-        reply = (
-            "Vi tu imagen pero esa promo no la tenemos activa hoy. "
-            f"Las que sí tenemos son:\n{names}"
-        )
-    else:
-        reply = (
-            "Vi tu imagen pero por hoy no tenemos promos activas. "
-            "¿En qué más te puedo ayudar?"
-        )
-    _send_text_reply(wa_id, reply, business_id)
-
-
-def _send_image_receipt(wa_id: str, business_id: str) -> None:
-    """Generic friendly receipt for non-promo images."""
-    _send_text_reply(
-        wa_id,
-        "Recibí tu imagen 👀 ¿En qué te puedo ayudar? "
-        "Si quieres ordenar o ver el menú, cuéntame.",
-        business_id,
-    )
-
-
-def _send_text_reply(wa_id: str, text: str, business_id: str) -> bool:
-    """Deterministic send (no agent run): resolves business_context,
-    sends via the WhatsApp send infra, persists the assistant turn into
-    conversation history. Used by the image-only branch where we want
-    a templated reply, not an LLM round-trip."""
-    logging.warning(
-        "[MEDIA_JOB] _send_text_reply: wa_id=%s business_id=%s len=%d",
-        wa_id, business_id, len(text or ""),
-    )
-    try:
-        from app import create_app
-        from app.database.business_service import business_service
-        from app.database.conversation_service import conversation_service
-        from app.utils.whatsapp_utils import (
-            get_text_message_input,
-            process_text_for_whatsapp,
-            send_message,
-        )
-
-        app = create_app()
-        with app.app_context():
-            business_context = business_service.get_business_context_by_business_id(
-                business_id,
-            )
-            if not business_context:
-                logging.warning(
-                    "[MEDIA_JOB] _send_text_reply: no business_context for %s", business_id,
-                )
-                return False
-            processed = process_text_for_whatsapp(text)
-            data = get_text_message_input(wa_id, processed)
-            result = send_message(data, business_context=business_context)
-            if result is None:
-                logging.error("[MEDIA_JOB] _send_text_reply: send_message returned None")
-                return False
-            logging.warning("[MEDIA_JOB] _send_text_reply: send OK")
-            try:
-                conversation_service.store_conversation_message(
-                    wa_id, text, "assistant", business_id=business_id,
-                )
-            except Exception as exc:
-                logging.warning("[MEDIA_JOB] failed to store assistant reply: %s", exc)
-            return True
-    except Exception as exc:
-        logging.error("[MEDIA_JOB] _send_text_reply failed: %s", exc, exc_info=True)
-        return False
 
 
 def enqueue_media_job(conversation_id: int, abort_key: Optional[str] = None) -> None:

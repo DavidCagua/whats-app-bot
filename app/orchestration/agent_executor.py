@@ -28,6 +28,7 @@ def execute_agent(
     abort_key: Optional[str] = None,
     handoff_context: Optional[Dict] = None,
     turn_ctx: Optional[object] = None,
+    attachments: Optional[List[Dict]] = None,
 ) -> Dict:
     """
     Execute the specified agent and return AgentOutput.
@@ -88,6 +89,13 @@ def execute_agent(
     # **kwargs; others ignore it.
     if turn_ctx is not None:
         kwargs["turn_ctx"] = turn_ctx
+
+    # Inbound media (post-Supabase URLs) for the current turn. Vision-
+    # capable agents pick this up via **kwargs and build multimodal
+    # content arrays for the LLM. Forwarded only when non-empty so
+    # text-only turns are unaffected.
+    if attachments:
+        kwargs["attachments"] = attachments
 
     # customer_service reads session (read-only — order_context.items for the
     # "mi pedido" ambiguity guard) but only writes its own slot.

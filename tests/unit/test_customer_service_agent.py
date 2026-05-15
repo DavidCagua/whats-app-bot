@@ -363,7 +363,9 @@ class TestGetPromosTool:
             return_value={"active_now": active, "upcoming": upcoming},
         )
 
-    def test_active_plus_upcoming_includes_day_for_upcoming(self):
+    def test_active_plus_upcoming_includes_day_when_flag_set(self):
+        """When the agent explicitly opts into upcoming (customer asked
+        about the rest of the week), the upcoming line names the day."""
         active = [
             {
                 "id": "p1", "name": "Dos Oregon con papas",
@@ -383,6 +385,7 @@ class TestGetPromosTool:
         try:
             with self._patch_buckets(active, upcoming):
                 result = cs_tools.get_promos.invoke({
+                    "include_upcoming_other_days": True,
                     "injected_business_context": ictx,
                 })
         finally:
@@ -395,6 +398,39 @@ class TestGetPromosTool:
         assert "Dos Misuri con papas (miércoles)" in text or (
             "Dos Misuri con papas" in text and "miércoles" in text
         )
+
+    def test_active_plus_upcoming_hides_upcoming_by_default(self):
+        """Default behavior: when today has promos, do NOT proactively
+        list other-day promos. The customer asked about promos, not
+        about the rest of the week — keep the answer focused."""
+        active = [
+            {
+                "id": "p1", "name": "Dos Oregon con papas",
+                "fixed_price": 39900, "days_of_week": [1, 7],
+            },
+        ]
+        upcoming = [
+            {
+                "id": "p2", "name": "Dos Misuri con papas",
+                "fixed_price": 39900,
+                "days_of_week": [3],
+                "next_active_day": 3,
+            },
+        ]
+        ictx = _tool_ctx()
+        token = cs_tools.set_tool_context(ictx)
+        try:
+            with self._patch_buckets(active, upcoming):
+                result = cs_tools.get_promos.invoke({
+                    "injected_business_context": ictx,
+                })
+        finally:
+            cs_tools.reset_tool_context(token)
+        text = cs_tools.parse_final(result)
+        assert text is not None
+        assert "Dos Oregon con papas" in text
+        assert "Dos Misuri" not in text
+        assert "También hay otras" not in text
 
 
 # ── Agent fast-paths ───────────────────────────────────────────────────
