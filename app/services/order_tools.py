@@ -29,7 +29,7 @@ from ..database.product_order_service import (
 )
 from ..database.session_state_service import session_state_service
 from ..database.customer_service import customer_service
-from .order_eta import NOMINAL_RANGE_TEXT, PICKUP_RANGE_TEXT
+from .order_eta import NOMINAL_RANGE_TEXT, PICKUP_RANGE_TEXT, resolve_delivery_eta
 from . import catalog_cache
 from . import promotion_service
 
@@ -1315,12 +1315,19 @@ def submit_delivery_info(
     as `name`. The system normalizes payment values against the business's allowed list, so
     pass the user's literal payment text and let the tool canonicalize.
 
-    PICKUP MODE: when the customer says they want to pick up the order at the store
-    ("lo recojo", "paso a recoger", "para recoger", "en sitio", "en el local", "para llevar"),
-    pass `fulfillment_type='pickup'`. In pickup mode only `name` is required for the order
-    to be ready to place — address / phone / payment_method are NOT collected (the WhatsApp
-    number covers phone and payment is at the register). To switch back to delivery on an
-    explicit signal ("no, mejor domicilio", "envíenmelo"), pass `fulfillment_type='delivery'`.
+    PICKUP MODE: pass `fulfillment_type='pickup'` when the message signals the *customer*
+    moves toward the store (customer-to-store direction) — "lo recojo", "paso a recoger",
+    "para recoger", "voy por él", "yo la recojo", "la voy a traer", "lo voy a traer",
+    "yo paso y la traigo", "para llevar", "en sitio", "en el local". Do NOT confuse with
+    delivery phrases where the *store* moves toward the customer ("tráeme", "envíame",
+    "mándame", "a domicilio") — those stay delivery. Distinguish by direction of motion,
+    not by the verb alone: "traer" is pickup when the subject is the customer
+    ("yo la voy a traer" → the customer brings it from the store) and delivery when the
+    subject is the store ("tráemela" → the store brings it to the customer).
+    In pickup mode only `name` is required for the order to be ready to place — address /
+    phone / payment_method are NOT collected (the WhatsApp number covers phone and payment
+    is at the register). To switch back to delivery on an explicit signal ("no, mejor
+    domicilio", "envíenmelo"), pass `fulfillment_type='delivery'`.
 
     ORDER-LEVEL NOTES: instructions about the WHOLE ORDER or the delivery/pickup experience —
     pickup time ("a las 8 pm"), payment requests ("traigan cambio de un billete de 100",
@@ -1686,6 +1693,12 @@ def place_order(injected_business_context: Annotated[dict, InjectedToolArg]) -> 
                 f"🏃 Recoge en el local.\n"
                 f"⏱ Tiempo estimado: {PICKUP_RANGE_TEXT}."
             )
+        # Delivery confirmation honors the operator's ETA override
+        # (businesses.settings.delivery_eta_minutes). Pickup branch
+        # above intentionally stays on PICKUP_RANGE_TEXT — pickup
+        # wait depends on the kitchen, not delivery load.
+        _delivery_settings = ((injected_business_context or {}).get("business") or {}).get("settings") or {}
+        _, _, delivery_eta_text, _ = resolve_delivery_eta(_delivery_settings)
         return (
             f"✅ ¡Pedido confirmado! #{order_id[:8].upper()}\n\n"
             f"{items_block}"
@@ -1695,7 +1708,7 @@ def place_order(injected_business_context: Annotated[dict, InjectedToolArg]) -> 
             f"Total: {_format_price(total)}\n"
             f"{notes_line}"
             f"Nos ponemos en contacto pronto para coordinar la entrega.\n"
-            f"⏱ Tiempo estimado de entrega: {NOMINAL_RANGE_TEXT}."
+            f"⏱ Tiempo estimado de entrega: {delivery_eta_text}."
         )
     except Exception as e:
         logger.error(f"[ORDER_TOOL] place_order error: {e}")

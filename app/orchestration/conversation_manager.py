@@ -170,6 +170,30 @@ class ConversationManager:
         """
         business_id = business_context.get("business_id") if business_context else None
 
+        # Refresh business.settings from the DB on every turn. The
+        # business_context arrives from a 5-min TTL cache (see
+        # business_service._phone_ctx_cache), which is fine for static
+        # fields (name, whatsapp_number_id) but unacceptable for
+        # operator-controlled toggles on the orders page — pausing
+        # deliveries or changing the ETA override has to take effect
+        # on the next message, not after 5 min or a runtime restart.
+        # Single indexed PK lookup; cost is negligible. The rest of
+        # business_context stays cached.
+        if business_id and business_context is not None:
+            try:
+                from ..database.business_service import business_service
+                fresh_settings = business_service.get_business_settings_fresh(
+                    str(business_id),
+                )
+                biz = business_context.get("business")
+                if isinstance(biz, dict):
+                    biz["settings"] = fresh_settings
+            except Exception as exc:
+                logging.warning(
+                    "[CONVERSATION_MANAGER] fresh-settings overlay failed "
+                    "business=%s: %s", business_id, exc,
+                )
+
         # Build the per-turn snapshot ONCE — shared by router and (via
         # dispatcher) downstream planners. Avoids each layer re-reading
         # session / history / latest order on its own.
@@ -189,7 +213,10 @@ class ConversationManager:
             _bg_settings = ((business_context or {}).get("business") or {}).get("settings") or {}
             if _bg_settings.get("order_gate_enabled", True) is not False:
                 from ..services import business_info_service as _bi_svc
-                order_gate = _bi_svc.is_taking_orders_now(str(business_id))
+                order_gate = _bi_svc.is_taking_orders_now(
+                    str(business_id),
+                    business_settings=_bg_settings,
+                )
         except Exception as exc:
             logging.warning(
                 "[ORDER_GATE] greeting compute failed (defaulting to open): %s", exc,

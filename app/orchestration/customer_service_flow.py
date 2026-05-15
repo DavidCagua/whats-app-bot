@@ -143,13 +143,29 @@ def _should_trigger_delivery_handoff(order: Dict[str, Any]) -> bool:
     return elapsed_min >= _delivery_handoff_threshold_min()
 
 
-def _clean_order_for_response(order: Dict[str, Any]) -> Dict[str, Any]:
+def _settings_from_context(
+    business_context: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return ``business.settings`` dict from a turn business_context, or None."""
+    if not business_context:
+        return None
+    biz = business_context.get("business") or {}
+    settings = biz.get("settings")
+    return settings if isinstance(settings, dict) else None
+
+
+def _clean_order_for_response(
+    order: Dict[str, Any],
+    business_settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Strip internal-only fields before passing to the response generator.
 
     Adds `eta_minutes`: an approximate remaining wait time in minutes,
-    derived from the current state and (for `confirmed`) the elapsed
-    time since `confirmed_at`. None for terminal states. The agent
-    surfaces this only when the customer asks about timing.
+    derived from the current state, (for `confirmed`) the elapsed time
+    since `confirmed_at`, and the active delivery-ETA override on the
+    business settings (delivery orders only — pickup is unaffected).
+    None for terminal states. The agent surfaces this only when the
+    customer asks about timing.
     """
     return {
         "id": order.get("id"),
@@ -160,10 +176,14 @@ def _clean_order_for_response(order: Dict[str, Any]) -> Dict[str, Any]:
         "notes": order.get("notes"),
         "cancellation_reason": order.get("cancellation_reason"),
         "created_at": order.get("created_at"),
-        "eta_minutes": estimate_remaining_minutes({
-            "status": order.get("status"),
-            "confirmed_at": order.get("confirmed_at"),
-        }),
+        "eta_minutes": estimate_remaining_minutes(
+            {
+                "status": order.get("status"),
+                "confirmed_at": order.get("confirmed_at"),
+                "fulfillment_type": order.get("fulfillment_type"),
+            },
+            business_settings=business_settings,
+        ),
         "items": order.get("items") or [],
     }
 
@@ -195,14 +215,19 @@ def _handle_business_info(
         latest = order_lookup_service.get_latest_order(wa_id, business_id)
         if latest:
             from ..services.order_eta import estimate_remaining_minutes
-            if estimate_remaining_minutes({
-                "status": latest.get("status"),
-                "confirmed_at": latest.get("confirmed_at"),
-            }) is not None:
+            settings = _settings_from_context(business_context)
+            if estimate_remaining_minutes(
+                {
+                    "status": latest.get("status"),
+                    "confirmed_at": latest.get("confirmed_at"),
+                    "fulfillment_type": latest.get("fulfillment_type"),
+                },
+                business_settings=settings,
+            ) is not None:
                 return _base_result(
                     wa_id, business_id,
                     RESULT_KIND_ORDER_STATUS,
-                    order=_clean_order_for_response(latest),
+                    order=_clean_order_for_response(latest, business_settings=settings),
                 )
 
     value = business_info_service.get_business_info(business_context, field)
@@ -240,6 +265,7 @@ def _handle_order_status(
     wa_id: str,
     business_id: str,
     session: Optional[Dict[str, Any]],
+    business_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     # Ambiguity guard: "qué tengo en mi pedido?" / "dónde está mi pedido?"
     # might have been routed here by the language-only classifier, but if
@@ -321,14 +347,14 @@ def _handle_order_status(
         return _base_result(
             wa_id, business_id,
             RESULT_KIND_DELIVERY_HANDOFF,
-            order=_clean_order_for_response(order),
+            order=_clean_order_for_response(order, business_settings=_settings_from_context(business_context)),
             state_patch=new_state,
         )
 
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_ORDER_STATUS,
-        order=_clean_order_for_response(order),
+        order=_clean_order_for_response(order, business_settings=_settings_from_context(business_context)),
         state_patch=new_state,
     )
 
@@ -337,6 +363,7 @@ def _handle_order_history(
     wa_id: str,
     business_id: str,
     params: Dict[str, Any],
+    business_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     limit_raw = params.get("limit") or 5
     try:
@@ -351,16 +378,18 @@ def _handle_order_history(
             RESULT_KIND_NO_ORDER,
         )
 
+    settings = _settings_from_context(business_context)
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_ORDER_HISTORY,
-        orders=[_clean_order_for_response(o) for o in orders],
+        orders=[_clean_order_for_response(o, business_settings=settings) for o in orders],
     )
 
 
 def _handle_cancel_order(
     wa_id: str,
     business_id: str,
+    business_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Cancel the customer's most recent order, gated by the customer
@@ -372,12 +401,13 @@ def _handle_cancel_order(
     if not order:
         return _base_result(wa_id, business_id, RESULT_KIND_NO_ORDER)
 
+    settings = _settings_from_context(business_context)
     current_status = order.get("status")
     if not can_customer_cancel(current_status):
         return _base_result(
             wa_id, business_id,
             RESULT_KIND_CANCEL_NOT_ALLOWED,
-            order=_clean_order_for_response(order),
+            order=_clean_order_for_response(order, business_settings=settings),
         )
 
     try:
@@ -392,13 +422,13 @@ def _handle_cancel_order(
         return _base_result(
             wa_id, business_id,
             RESULT_KIND_CANCEL_NOT_ALLOWED,
-            order=_clean_order_for_response(latest),
+            order=_clean_order_for_response(latest, business_settings=settings),
         )
 
     return _base_result(
         wa_id, business_id,
         RESULT_KIND_ORDER_CANCELLED,
-        order=_clean_order_for_response(updated),
+        order=_clean_order_for_response(updated, business_settings=settings),
     )
 
 

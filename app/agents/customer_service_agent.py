@@ -14,6 +14,7 @@ only for open-chat / no-tool turns.
 
 Deterministic fast-paths run before the tool loop:
   - Order-closed handoff (handoff_context.reason="order_closed")
+  - Delivery-paused handoff (handoff_context.reason="delivery_paused")
   - Out-of-zone redirect (handoff_context.reason="out_of_zone")
   - Pre-loop safety nets: price-of-product, post-order despedida,
     stuck-article typos → hand off to order agent.
@@ -251,6 +252,12 @@ class CustomerServiceAgent(BaseAgent):
 
         if reason == "order_closed":
             return self._handle_order_closed(
+                wa_id, business_id, business_context, handoff_context,
+                run_id, start_time,
+            )
+
+        if reason == "delivery_paused":
+            return self._handle_delivery_paused(
                 wa_id, business_id, business_context, handoff_context,
                 run_id, start_time,
             )
@@ -580,7 +587,7 @@ class CustomerServiceAgent(BaseAgent):
             sentence = business_info_service.format_open_status_sentence(status) or sentence
             if business_info_service.is_fully_closed_today(status):
                 biz = (business_context or {}).get("business")
-                alt_contact_suffix = business_info_service.format_closed_alt_contact_suffix(biz)
+                alt_contact_suffix = business_info_service.format_alt_branch_suffix(biz, "closed")
         except Exception as exc:
             logging.warning(
                 "[ORDER_GATE] business=%s wa_id=%s open-status compute failed: %s",
@@ -597,6 +604,64 @@ class CustomerServiceAgent(BaseAgent):
                 "cualquier duda."
             )
         message = sentence + alt_contact_suffix + tail
+        try:
+            conversation_service.store_conversation_message(
+                wa_id, message, "assistant", business_id=business_id,
+            )
+        except Exception as exc:
+            logging.error(
+                "[ORDER_GATE] business=%s wa_id=%s persist failed: %s",
+                business_id, wa_id, exc,
+            )
+        tracer.end_run(
+            run_id, success=True,
+            latency_ms=(time.time() - start_time) * 1000,
+        )
+        return {
+            "agent_type": self.agent_type,
+            "message": message,
+            "state_update": {},
+        }
+
+    def _handle_delivery_paused(
+        self,
+        wa_id: str,
+        business_id: str,
+        business_context: Optional[Dict],
+        handoff_context: Dict,
+        run_id: str,
+        start_time: float,
+    ) -> AgentOutput:
+        """
+        Render the deterministic reply when the operator paused new
+        orders from the orders page. Mirrors ``_handle_order_closed``
+        but with different copy — "we're slammed right now" instead of
+        "we're closed". Per the design review, pause blocks BOTH
+        delivery and pickup (operator chose block-all-new-orders).
+        """
+        blocked_intents = handoff_context.get("blocked_intents") or []
+        has_active_cart = bool(handoff_context.get("has_active_cart"))
+        logging.warning(
+            "[ORDER_GATE] business=%s wa_id=%s CS handling delivery_paused "
+            "blocked_intents=%s has_active_cart=%s",
+            business_id, wa_id, blocked_intents, has_active_cart,
+        )
+        sentence = (
+            "Por ahora estamos al tope de pedidos y no estamos tomando "
+            "más por el momento."
+        )
+        if has_active_cart:
+            tail = (
+                " Tu pedido se queda guardado, lo retomamos cuando "
+                "reabramos los pedidos. Mientras tanto puedo resolverte "
+                "cualquier duda."
+            )
+        else:
+            tail = (
+                " Mientras tanto puedo contarte del menú o resolverte "
+                "cualquier duda."
+            )
+        message = sentence + tail
         try:
             conversation_service.store_conversation_message(
                 wa_id, message, "assistant", business_id=business_id,

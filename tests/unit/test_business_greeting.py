@@ -362,7 +362,7 @@ class TestClosedGreeting:
             "settings": {
                 "welcome_content_sid": "HXopen123",
                 "menu_url": "https://example.com/menu",
-                "closed_day_alt_contact": {
+                "alt_branch_contact": {
                     "name": "Sede Las Cuadras",
                     "phone": "+573026722877",
                 },

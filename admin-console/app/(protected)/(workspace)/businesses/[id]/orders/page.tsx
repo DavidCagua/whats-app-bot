@@ -1,13 +1,15 @@
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/lib/auth"
-import { canAccessBusiness } from "@/lib/permissions"
+import { canAccessBusiness, canEditBusiness } from "@/lib/permissions"
 import { redirectIfModuleDisabled } from "@/lib/modules"
 import { notFound, redirect } from "next/navigation"
 import { OrdersTable } from "./components/orders-table"
 import { CreateOrderDialog } from "./components/create-order-dialog"
+import { OperationsControls } from "./components/operations-controls"
 import { getOrdersForBusiness } from "@/lib/orders-queries"
 import { getCreateOrderData } from "@/lib/orders-create-data"
 import { parseRange, rangeToUtc } from "@/lib/orders-date-range"
+import { getOperationsSettings } from "@/lib/actions/operations-settings"
 
 interface OrdersPageProps {
   params: Promise<{ id: string }>
@@ -28,10 +30,13 @@ export default async function OrdersPage({ params, searchParams }: OrdersPagePro
   if (!business) notFound()
 
   const range = parseRange({ from: sp.from, to: sp.to })
-  const [initialOrders, createData] = await Promise.all([
+  const [initialOrders, createData, opsSettings] = await Promise.all([
     getOrdersForBusiness(id, rangeToUtc(range)),
     getCreateOrderData(id),
+    getOperationsSettings(id),
   ])
+
+  const canEdit = canEditBusiness(session, id)
 
   return (
     <div className="space-y-6">
@@ -46,6 +51,13 @@ export default async function OrdersPage({ params, searchParams }: OrdersPagePro
           customers={createData.customers}
         />
       </div>
+
+      <OperationsControls
+        businessId={id}
+        initialDeliveryPaused={opsSettings?.delivery_paused ?? false}
+        initialEtaMinutes={opsSettings?.delivery_eta_minutes ?? null}
+        canEdit={canEdit}
+      />
 
       <OrdersTable
         businessId={id}

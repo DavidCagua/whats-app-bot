@@ -18,7 +18,7 @@ businesses that haven't migrated yet.
 import logging
 import threading
 import time
-from datetime import date as _date, datetime as _datetime, time as _time, timedelta as _timedelta
+from datetime import date as _date, datetime as _datetime, time as _time, timedelta as _timedelta, timezone as _timezone
 from typing import Optional, Callable, Any, Dict, List, Tuple
 
 try:
@@ -351,6 +351,7 @@ def _format_time_lower(t: _time) -> str:
 def is_taking_orders_now(
     business_id: str,
     now: Optional[_datetime] = None,
+    business_settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Decide whether the order agent should be accepting cart-mutating
@@ -365,11 +366,16 @@ def is_taking_orders_now(
 
         {
           "can_take_orders": bool,
-          "reason": "open" | "closed" | "no_data",
+          "reason": "open" | "closed" | "no_data" | "delivery_paused",
           "opens_at": time | None,            # today's open, when closed-but-opens-today
           "next_open_dow": int | None,        # 0=Sun..6=Sat
           "next_open_time": time | None,
           "now_local": datetime | None,       # Bogotá tz
+          "delivery_eta_override": {
+              "lower_minutes": int,
+              "upper_minutes": int,
+              "range_text": str,
+          } | None,
         }
 
     Browse intents (menu / product details / search) should be
@@ -377,8 +383,24 @@ def is_taking_orders_now(
     can still read the menu while the shop is closed. The gate is
     applied per-intent inside the order agent's dispatch loop; this
     helper just answers the yes/no question.
+
+    When ``business_settings`` is passed in (the order agent has it
+    on every turn) two operator switches are honored:
+
+    - ``delivery_paused`` / ``delivery_paused_until``: full order
+      kill-switch with a different ``reason`` so the CS agent can
+      render a "estamos llenos por ahora" message instead of
+      "estamos cerrados". Pickup is blocked too (operator chose
+      block-all in plan review).
+    - ``delivery_eta_minutes`` / ``delivery_eta_until``: customer-facing
+      delivery ETA override. Doesn't affect can_take_orders; surfaces
+      under ``delivery_eta_override`` so the greeting can prepend a
+      "high demand" notice and the order confirmation can quote the
+      new range.
     """
     status = compute_open_status(business_id, now=now)
+    eta_override = _resolve_eta_override(business_settings)
+    paused = _resolve_delivery_paused(business_settings)
     base: Dict[str, Any] = {
         "can_take_orders": True,
         "reason": "no_data",
@@ -386,7 +408,15 @@ def is_taking_orders_now(
         "next_open_dow": None,
         "next_open_time": None,
         "now_local": status.get("now_local"),
+        "delivery_eta_override": eta_override,
     }
+    if paused:
+        return {
+            **base,
+            "can_take_orders": False,
+            "reason": "delivery_paused",
+            "today_had_window": status.get("today_had_window", False),
+        }
     if not status.get("has_data"):
         return base
     if status.get("is_open"):
@@ -402,7 +432,46 @@ def is_taking_orders_now(
         # distinguish past-close-but-had-slot from fully-closed-today.
         "today_had_window": status.get("today_had_window", False),
         "now_local": status.get("now_local"),
+        "delivery_eta_override": eta_override,
     }
+
+
+def _resolve_eta_override(
+    business_settings: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return the active delivery-ETA override block, or None."""
+    from .order_eta import resolve_delivery_eta
+    lower, upper, range_text, is_override = resolve_delivery_eta(business_settings)
+    if not is_override:
+        return None
+    return {
+        "lower_minutes": lower,
+        "upper_minutes": upper,
+        "range_text": range_text,
+    }
+
+
+def _resolve_delivery_paused(
+    business_settings: Optional[Dict[str, Any]],
+) -> bool:
+    """
+    True iff ``businesses.settings.delivery_paused`` is on and the
+    optional ``delivery_paused_until`` hasn't already passed.
+    """
+    if not business_settings or not isinstance(business_settings, dict):
+        return False
+    if not business_settings.get("delivery_paused"):
+        return False
+    raw_until = business_settings.get("delivery_paused_until")
+    if not raw_until:
+        return True
+    try:
+        until = _datetime.fromisoformat(str(raw_until).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return True
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=_timezone.utc)
+    return _datetime.now(_timezone.utc) < until
 
 
 def is_fully_closed_today(status: Dict[str, Any]) -> bool:
@@ -439,25 +508,45 @@ def is_fully_closed_today(status: Dict[str, Any]) -> bool:
     return True
 
 
-def format_closed_alt_contact_suffix(business: Optional[Dict[str, Any]]) -> str:
+def format_alt_branch_suffix(
+    business: Optional[Dict[str, Any]],
+    situation: str = "closed",
+) -> str:
     """
-    Render the "if you need to order today, contact <sibling branch>"
-    suffix used on fully-closed-today greetings and order_closed handoffs.
+    Render the "contact our sibling branch" suffix used on greetings
+    when this branch can't fulfill the order right now. Two situations
+    share the same data (``business.settings.alt_branch_contact``) but
+    differ in copy:
 
-    Reads ``business.settings.closed_day_alt_contact = {name, phone}``.
-    Returns an empty string when the contact isn't configured.
+      - ``situation='closed'`` → "Si necesitas pedir hoy, escríbele a
+        <name> al <phone>." Used on fully-closed-today greetings and
+        the CS ``order_closed`` handoff.
+      - ``situation='high_demand'`` → "Si necesitas que sea más rápido,
+        nuestra sede <name> está más descargada — escribe al <phone>."
+        Used on greetings when the operator set a delivery-ETA override
+        on the orders page.
+
+    Returns an empty string when the contact isn't configured or the
+    situation is unknown.
     """
     if not business:
         return ""
     settings = (business.get("settings") or {}) if isinstance(business, dict) else {}
-    alt = settings.get("closed_day_alt_contact") or {}
+    alt = settings.get("alt_branch_contact") or {}
     if not isinstance(alt, dict):
         return ""
     name = (alt.get("name") or "").strip()
     phone = (alt.get("phone") or "").strip()
     if not name or not phone:
         return ""
-    return f" Si necesitas pedir hoy, escríbele a {name} al {phone}."
+    if situation == "closed":
+        return f" Si necesitas pedir hoy, escríbele a {name} al {phone}."
+    if situation == "high_demand":
+        return (
+            f" Si necesitas que sea más rápido, nuestra sede {name} "
+            f"está más descargada — escribe al {phone}."
+        )
+    return ""
 
 
 def format_open_status_sentence(status: Dict[str, Any]) -> str:
@@ -791,12 +880,15 @@ def format_business_info_for_prompt(business_context: Optional[Dict]) -> str:
         "- 🏃 Recoger en local (pickup): se requiere SOLO el nombre. El número de WhatsApp "
         "cubre el teléfono y el pago se hace en el local.\n"
         "El modo activo está visible en \"Modo:\" del bloque ESTADO Y HISTORIAL DEL TURNO. "
-        "El cliente comienza en domicilio por default. Cambia a pickup ÚNICAMENTE cuando el "
-        "cliente lo indique explícitamente con frases como: \"lo recojo\", \"paso a recoger\", "
-        "\"para recoger\", \"en sitio\", \"en el local\", \"para llevar\", \"recogida\". "
-        "En ese caso llama submit_delivery_info(fulfillment_type='pickup', name=<si lo dijo>) "
-        "— NO pidas dirección ni medio de pago. Cambia de vuelta a domicilio si el cliente "
-        "dice \"no, mejor domicilio\", \"envíenmelo\", \"para domicilio\" pasando "
+        "El cliente comienza en domicilio por default. Cambia a pickup cuando el mensaje "
+        "indique que el CLIENTE se mueve hacia el local — \"lo recojo\", \"paso a recoger\", "
+        "\"para recoger\", \"voy por él\", \"yo la recojo\", \"la voy a traer\", \"lo voy a "
+        "traer\", \"yo paso y la traigo\", \"para llevar\", \"en el local\", \"pickup\", "
+        "\"recogida\" — llamando submit_delivery_info(fulfillment_type='pickup', "
+        "name=<si lo dijo>). NO pidas dirección ni medio de pago. NO es pickup cuando el "
+        "LOCAL se mueve hacia el cliente (\"tráeme\", \"envíame\", \"mándame\", \"a "
+        "domicilio\") — eso es delivery. Cambia de vuelta a domicilio si el cliente dice "
+        "\"no, mejor domicilio\", \"envíenmelo\", \"para domicilio\" pasando "
         "submit_delivery_info(fulfillment_type='delivery')."
     )
     out_of_zone = settings.get("out_of_zone_delivery_contacts") or []

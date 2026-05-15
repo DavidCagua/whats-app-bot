@@ -351,7 +351,10 @@ def get_order_status(
     business_id = ctx.get("business_id") or ""
     session = ctx.get("session")
 
-    result = _handle_order_status(wa_id, business_id, session)
+    business_context = ctx.get("business_context")
+    result = _handle_order_status(
+        wa_id, business_id, session, business_context=business_context,
+    )
     kind = result.get("result_kind")
 
     # Persist any state patch the handler emitted (per-order ask counter).
@@ -464,7 +467,10 @@ def get_order_history(
     wa_id = ctx.get("wa_id") or ""
     business_id = ctx.get("business_id") or ""
 
-    result = _handle_order_history(wa_id, business_id, {})
+    business_context = ctx.get("business_context")
+    result = _handle_order_history(
+        wa_id, business_id, {}, business_context=business_context,
+    )
     kind = result.get("result_kind")
 
     if kind == RESULT_KIND_NO_ORDER:
@@ -551,7 +557,10 @@ def cancel_order(
             "pedido cancelable y ofrece ayudarle."
         )
 
-    result = _handle_cancel_order(wa_id, business_id)
+    business_context = ctx.get("business_context")
+    result = _handle_cancel_order(
+        wa_id, business_id, business_context=business_context,
+    )
     kind = result.get("result_kind")
 
     if kind == RESULT_KIND_NO_ORDER:

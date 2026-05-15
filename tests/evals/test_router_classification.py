@@ -42,21 +42,6 @@ BIELA_CONTEXT = {
     },
 }
 
-# Variant for the v2 (context-first) prompt — same business config,
-# adds the per-business flag the router reads. Each eval test that
-# wants to measure the v2 prompt uses this variant.
-BIELA_CONTEXT_V2 = {
-    **BIELA_CONTEXT,
-    "business": {
-        **BIELA_CONTEXT["business"],
-        "settings": {
-            **BIELA_CONTEXT["business"]["settings"],
-            "router_prompt_mode": "context_first",
-        },
-    },
-}
-
-
 # Production has a populated catalog cache for every business — the
 # router's deterministic price-of-product short-circuit reads it via
 # catalog_cache.get_router_lookup_set. The eval uses the fake business_id
@@ -210,14 +195,10 @@ def test_router_compound_greeting_returns_direct_reply(phrase, why):
 #
 # Same surface message routes to different domains depending on the
 # turn context (last_assistant_message, order_state, has_active_cart,
-# latest_order_status). These are the cases the current keyword-driven
-# rules try to capture with explicit pattern lists like "DESPEDIDA
-# POST-PEDIDO" / "CONTINUACIÓN DEL FLUJO DE PEDIDO" — but those lists
-# are necessarily incomplete and miss novel phrasings.
-#
-# This eval is the regression gate for a "context-first" router
-# redesign: the prompt should reason about the conversation flow
-# (last bot reply + current message) rather than match keywords.
+# latest_order_status). The router prompt is context-first: it reasons
+# about the conversation flow (last bot reply + current message)
+# rather than matching keyword lists, and this eval is the regression
+# gate that proves that reasoning holds across diverse phrasings.
 # ───────────────────────────────────────────────────────────────────────
 
 
@@ -840,40 +821,3 @@ def test_router_uses_context_to_route_correctly(case):
     )
 
 
-@pytest.mark.parametrize(
-    "case",
-    [pytest.param(c, id=c["id"]) for c in CONTEXTUAL_ROUTING_CASES],
-)
-def test_router_v2_context_first_prompt(case):
-    """Same eval cases run against the v2 (context-first) prompt.
-    Used during the redesign to measure delta vs. the v1 baseline.
-
-    Run with ``pytest -m eval -k context_first`` to focus on the v2
-    prompt's behavior in isolation.
-    """
-    ctx = _build_ctx_for_case(case)
-    result = router.route(
-        message_body=case["message"],
-        business_context=BIELA_CONTEXT_V2,
-        customer_name="David",
-        ctx=ctx,
-    )
-    assert result.direct_reply is None, (
-        f"{case['id']} [v2]: unexpected greeting fast-path"
-    )
-    assert result.segments, (
-        f"{case['id']} [v2]: classifier returned no segments. "
-        f"reason={case['why']}"
-    )
-    actual = result.segments[0][0]
-    expected = case["expected_domain"]
-    assert actual == expected, (
-        f"\n[V2] CASE: {case['id']}\n"
-        f"MESSAGE: {case['message']!r}\n"
-        f"LAST BOT: {case['last_bot']!r}\n"
-        f"STATE: {case['order_state']} cart={case['has_active_cart']} "
-        f"last_order={case['latest_order_status']}\n"
-        f"EXPECTED: {expected!r}  GOT: {actual!r}\n"
-        f"WHY: {case['why']}\n"
-        f"ALL SEGMENTS: {result.segments}"
-    )

@@ -208,7 +208,9 @@ Reglas duras de flujo:
 
 15. MODO DOMICILIO vs PICKUP (REGLA UNIVERSAL):
     El bloque "ESTADO Y HISTORIAL DEL TURNO" muestra siempre "Modo: 🛵 Domicilio" (default) o "Modo: 🏃 Recoger en local (pickup)". El default es domicilio.
-    - Cambia a PICKUP solo cuando el mensaje del cliente contenga un signal EXPLÍCITO: "lo recojo", "paso a recoger", "para recoger", "voy por él", "en sitio", "en el local", "para llevar", "recogida", "pickup". Llama submit_delivery_info(fulfillment_type='pickup', name=<si el cliente lo dijo>). NO pidas dirección, teléfono ni medio de pago — en pickup solo se necesita el nombre.
+    - Cambia a PICKUP cuando el mensaje indique que **el cliente** se mueve hacia el local — el cliente va, pasa, recoge o trae la comida DESDE el local (verbo en 1ª persona apuntando al local). Ejemplos: "lo recojo", "paso a recoger", "para recoger", "voy por él", "yo la recojo", "la voy a traer", "lo voy a traer", "yo paso y la traigo", "para llevar", "en sitio", "en el local", "pickup", "recogida". Llama submit_delivery_info(fulfillment_type='pickup', name=<si el cliente lo dijo>). NO pidas dirección, teléfono ni medio de pago — en pickup solo se necesita el nombre.
+    - NO es pickup cuando es **el local** quien se mueve hacia el cliente: "tráeme", "tráiganmela", "envíame", "mándame", "que llegue a casa", "pa la casa", "a domicilio". Eso es DELIVERY (el default). Distingue por DIRECCIÓN de movimiento, no por el verbo aislado — "traer" puede ser pickup ("yo la voy a traer" = el cliente la trae desde el local) o delivery ("tráemela" = el local me la trae).
+    - Si el mensaje no tiene señal direccional clara (sujeto/verbo ambiguo), asume DOMICILIO (default). NO inventes pickup.
     - PICKUP + PRODUCTO EN EL MISMO MENSAJE: si el mismo mensaje del cliente combina la señal de pickup con un nombre de producto ("para pedir un perro denver para recoger", "una BARRACUDA para llevar", "denme dos jugos y voy por ellos"), DEBES procesar AMBAS intenciones en este turno (regla 1 lo permite explícitamente):
        1) Primero llama add_to_cart(product_name=...) para cada producto mencionado.
        2) Luego llama submit_delivery_info(fulfillment_type='pickup', name=<si el cliente lo dijo>).
@@ -380,7 +382,10 @@ class OrderAgent(BaseAgent):
             _settings = ((business_context or {}).get("business") or {}).get("settings") or {}
             if _settings.get("order_gate_enabled", True) is not False:
                 from ..services import business_info_service as _bi_svc
-                order_gate = _bi_svc.is_taking_orders_now(str(business_id))
+                order_gate = _bi_svc.is_taking_orders_now(
+                    str(business_id),
+                    business_settings=_settings,
+                )
                 logging.warning(
                     "[ORDER_GATE] business=%s wa_id=%s can_take_orders=%s "
                     "reason=%s (v2)",
@@ -412,10 +417,15 @@ class OrderAgent(BaseAgent):
             and not order_gate.get("can_take_orders")
             and not cart_has_items
         ):
+            handoff_reason = (
+                "delivery_paused"
+                if order_gate.get("reason") == "delivery_paused"
+                else "order_closed"
+            )
             logging.warning(
-                "[ORDER_GATE] business=%s wa_id=%s closed-shop short-circuit "
-                "(no active cart) → handoff customer_service reason=order_closed (v2)",
-                business_id, wa_id,
+                "[ORDER_GATE] business=%s wa_id=%s gated short-circuit "
+                "(no active cart) → handoff customer_service reason=%s (v2)",
+                business_id, wa_id, handoff_reason,
             )
             tracer.end_run(
                 run_id, success=True,
@@ -429,7 +439,7 @@ class OrderAgent(BaseAgent):
                     "to": "customer_service",
                     "segment": message_body,
                     "context": {
-                        "reason": "order_closed",
+                        "reason": handoff_reason,
                         "has_active_cart": False,
                         "blocked_intents": [],
                     },
@@ -562,11 +572,17 @@ class OrderAgent(BaseAgent):
                             for c in tool_calls
                             if _unpack_tool_call(c)[0] in MUTATING_TOOL_NAMES
                         ]
+                        handoff_reason = (
+                            "delivery_paused"
+                            if order_gate.get("reason") == "delivery_paused"
+                            else "order_closed"
+                        )
                         logging.warning(
                             "[ORDER_GATE] business=%s wa_id=%s BLOCKED "
                             "tool=%s blocked_tools=%s has_active_cart=%s "
-                            "→ handoff customer_service reason=order_closed (v2)",
-                            business_id, wa_id, tool_name, blocked, cart_has_items,
+                            "→ handoff customer_service reason=%s (v2)",
+                            business_id, wa_id, tool_name, blocked,
+                            cart_has_items, handoff_reason,
                         )
                         # Disarm any stale confirm-flag so a follow-up
                         # in CS doesn't accidentally trip place_order.
@@ -586,7 +602,7 @@ class OrderAgent(BaseAgent):
                                 "to": "customer_service",
                                 "segment": message_body,
                                 "context": {
-                                    "reason": "order_closed",
+                                    "reason": handoff_reason,
                                     "has_active_cart": cart_has_items,
                                     "blocked_intents": blocked,
                                 },

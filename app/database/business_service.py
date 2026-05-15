@@ -91,6 +91,41 @@ class BusinessService:
             logging.error(f"Error getting business {business_id}: {e}")
             return None
 
+    def get_business_settings_fresh(self, business_id: str) -> Dict:
+        """
+        Fetch ``businesses.settings`` directly from the DB, bypassing the
+        ``_phone_ctx_cache`` / ``_business_id_ctx_cache`` snapshot.
+
+        Used at the top of every WhatsApp turn for operator-controlled
+        toggles that need to take effect immediately — e.g. the
+        delivery-paused switch and ETA override on the orders page.
+        Caching the full business_context for 5 min is fine for static
+        fields (name, whatsapp_number_id) but unacceptable for
+        operational kill-switches: the operator would have to wait up
+        to 5 min or restart the runtime for a toggle to land.
+
+        Single indexed PK lookup, negligible cost. Returns ``{}`` on
+        miss / error so callers can merge without None-checks.
+        """
+        try:
+            session: Session = get_db_session()
+            try:
+                business = (
+                    session.query(Business)
+                    .filter(Business.id == uuid.UUID(business_id))
+                    .first()
+                )
+                if business and business.settings:
+                    return dict(business.settings)
+                return {}
+            finally:
+                session.close()
+        except Exception as exc:
+            logging.warning(
+                f"[BUSINESS_SETTINGS_FRESH] business={business_id} fetch failed: {exc}"
+            )
+            return {}
+
     def get_business_by_name(self, name: str) -> Optional[Dict]:
         """Get business by name."""
         try:

@@ -96,26 +96,81 @@ def _closed_sentence_from_gate(
     Returns "" when the gate is None / open / no_data — caller should
     treat empty as "no override".
 
-    Mirrors ``business_info_service.format_open_status_sentence`` so
-    the closed prose is identical across the welcome greeting and the
-    CS ``order_closed`` handoff branch.
+    Covers two not-taking-orders shapes:
+      - ``reason == 'closed'``: outside business hours, render the
+        same prose used by the CS ``order_closed`` handoff branch.
+      - ``reason == 'delivery_paused'``: operator flipped the
+        delivery-paused switch on the orders page. Render a
+        deterministic "estamos llenos por ahora" sentence — no
+        scheduled reopen time, the operator decides when.
 
     When ``business`` is provided AND today is fully closed (no opening
-    window at all) AND ``business.settings.closed_day_alt_contact`` is
+    window at all) AND ``business.settings.alt_branch_contact`` is
     configured, appends "Si necesitas pedir hoy, escríbele a <name> al
     <phone>." — same suffix used by the CS order_closed handoff.
     """
-    if not gate or gate.get("can_take_orders") or gate.get("reason") != "closed":
+    if not gate or gate.get("can_take_orders"):
+        return ""
+    reason = gate.get("reason")
+    if reason == "delivery_paused":
+        return (
+            "Por ahora estamos al tope de pedidos y no estamos tomando "
+            "más por el momento."
+        )
+    if reason != "closed":
         return ""
     try:
         from . import business_info_service as _bi_svc
         synthesized = _status_from_gate(gate)
         sentence = _bi_svc.format_open_status_sentence(synthesized)
         if business is not None and _bi_svc.is_fully_closed_today(synthesized):
-            sentence = sentence + _bi_svc.format_closed_alt_contact_suffix(business)
+            sentence = sentence + _bi_svc.format_alt_branch_suffix(business, "closed")
         return sentence
     except Exception:
         return "Por ahora estamos cerrados."
+
+
+def _high_demand_notice_from_gate(
+    gate: Optional[dict],
+    business: Optional[dict] = None,
+) -> str:
+    """
+    Build the "alta demanda" warning when the operator set a delivery-ETA
+    override. Returns "" when no override is active or the shop is
+    closed / paused (other gate messages already convey the situation).
+
+    Format: "⚠️ Hoy tenemos alta demanda — el tiempo de entrega está
+    en <range_text>." The range_text matches the dashboard dropdown
+    label phrasing (e.g. "1 hora 10 minutos a 1 hora 20 minutos") so
+    the operator and the customer see the same numbers.
+
+    When ``business`` is provided AND
+    ``business.settings.alt_branch_contact`` is configured, appends
+    "Si necesitas que sea más rápido, nuestra sede <name> está más
+    descargada — escribe al <phone>." so customers in a hurry have
+    an out — same data field that powers the closed-day suffix.
+    """
+    if not gate:
+        return ""
+    if not gate.get("can_take_orders"):
+        return ""
+    override = gate.get("delivery_eta_override")
+    if not override or not isinstance(override, dict):
+        return ""
+    range_text = (override.get("range_text") or "").strip()
+    if not range_text:
+        return ""
+    notice = (
+        f"⚠️ Hoy tenemos alta demanda — el tiempo de entrega está "
+        f"en {range_text}."
+    )
+    if business is not None:
+        try:
+            from . import business_info_service as _bi_svc
+            notice = notice + _bi_svc.format_alt_branch_suffix(business, "high_demand")
+        except Exception:
+            pass
+    return notice
 
 
 def _status_from_gate(gate: dict) -> dict:
@@ -197,6 +252,7 @@ def get_greeting(
         (business_context or {}).get("business") if business_context else None
     )
     closed_sentence = _closed_sentence_from_gate(gate, business=business_for_suffix)
+    high_demand_notice = _high_demand_notice_from_gate(gate, business=business_for_suffix)
     if closed_sentence:
         body = (
             f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
@@ -204,6 +260,17 @@ def get_greeting(
             f"{closed_sentence}\n"
             f"\n"
             "Mientras tanto puedo contarte del menú o resolverte cualquier duda."
+        )
+    elif high_demand_notice:
+        # Operator-flagged high demand: warn up front so the customer
+        # decides before committing. Notice goes BEFORE the "¿qué se
+        # te antoja?" prompt so it's the first thing they read.
+        body = (
+            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+            f"\n"
+            f"{high_demand_notice}\n"
+            f"\n"
+            "¿Qué se te antoja hoy? Estamos listos para ayudarte"
         )
     else:
         body = (
@@ -232,18 +299,30 @@ def cta_welcome_payload(
     welcome via a button-styled card; None otherwise (caller falls back to
     the plain-text greeting).
 
-    Two templates are supported per business:
+    Three templates are supported per business:
 
-    - ``welcome_content_sid`` — open-state greeting (existing). Body uses
+    - ``welcome_content_sid`` — open-state greeting. Body uses
       ``{{1}}`` (business name) and ``{{2}}`` (opener fragment).
-    - ``welcome_closed_content_sid`` — closed-state greeting (new).
-      Same {{1}}/{{2}} plus ``{{3}}`` carrying the live closed
-      sentence. Selected when ``gate`` says ``can_take_orders=False``.
+    - ``welcome_closed_content_sid`` — closed-state greeting. Same
+      ``{{1}}/{{2}}`` plus ``{{3}}`` carrying the live closed
+      sentence. Selected when ``gate`` says ``can_take_orders=False``
+      and ``reason == 'closed'``. Currently we prefer the plain-text
+      fallback so this branch returns None.
+    - ``welcome_high_demand_content_sid`` — open-shop-with-ETA-override
+      greeting. Same ``{{1}}/{{2}}`` plus ``{{3}}`` carrying the
+      "alta demanda" warning sentence. Selected when the operator
+      set ``businesses.settings.delivery_eta_minutes`` from the
+      orders page AND this SID is configured. When the SID is NOT
+      configured, returns None so plain-text greeting (which also
+      surfaces the warning) takes over.
 
     Selection rules:
-      - Open shop → render open CTA via ``welcome_content_sid``.
-      - Any closed state (fully closed OR closed-for-a-period) →
-        return None so the caller falls back to the plain-text greeting.
+      - Open shop, no override → ``welcome_content_sid`` CTA.
+      - Open shop, ETA override active, high-demand SID configured →
+        ``welcome_high_demand_content_sid`` CTA with warning baked in.
+      - Open shop, ETA override active, SID missing → None.
+      - Any closed state (fully closed OR closed-for-a-period) → None.
+      - delivery_paused (operator switch on orders page) → None.
 
     The "Ver carta" button on either card encourages a browse-and-build
     loop that ends in disappointment when submit-time hits the closed
@@ -272,6 +351,49 @@ def cta_welcome_payload(
     is_closed = bool(gate and not gate.get("can_take_orders") and gate.get("reason") == "closed")
     if is_closed:
         return None
+    # Same rationale for delivery-paused: the CS pause copy is plain-text
+    # only, so fall through.
+    is_paused = bool(gate and gate.get("reason") == "delivery_paused")
+    if is_paused:
+        return None
+    # High-demand override active: prefer the dedicated CTA template
+    # (operator pre-provisioned it in Twilio + saved the SID). The
+    # warning sentence lands in {{3}}, customer still gets the
+    # "Ver carta" button so they can place a delayed order. If the
+    # SID is missing, fall back to plain-text greeting so the
+    # warning still reaches the customer. When alt_branch_contact is
+    # configured the suffix is appended into {{3}} so the same Twilio
+    # template renders the demand sentence + sibling-branch fallback
+    # without needing a fourth variable.
+    high_demand_notice = _high_demand_notice_from_gate(gate, business=biz)
+    if high_demand_notice:
+        high_demand_sid = (
+            settings.get("welcome_high_demand_content_sid") or ""
+        ).strip()
+        if not high_demand_sid:
+            return None
+        # Body template carries the "⚠️" prefix in literal text, so the
+        # {{3}} variable should be just the demand sentence (and the
+        # optional alt-branch suffix) without the warning emoji to
+        # avoid double-rendering. The plain-text notice from
+        # _high_demand_notice_from_gate prepends "⚠️ "; strip it.
+        notice_for_cta = high_demand_notice
+        if notice_for_cta.startswith("⚠️ "):
+            notice_for_cta = notice_for_cta[len("⚠️ "):]
+        variables = {"1": business_name, "2": opener, "3": notice_for_cta}
+        rendered_body = (
+            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+            f"\n"
+            f"{high_demand_notice}\n"
+            f"\n"
+            "¿Qué se te antoja hoy? Estamos listos para ayudarte"
+        )
+        return {
+            "content_sid": high_demand_sid,
+            "variables": variables,
+            "rendered_body": rendered_body,
+            "kind": "high_demand_cta",
+        }
 
     # Open-state path: requires the open-template SID.
     content_sid = (settings.get("welcome_content_sid") or "").strip()
