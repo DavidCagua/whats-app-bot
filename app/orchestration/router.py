@@ -53,13 +53,33 @@ DOMAIN_ORDER = "order"
 DOMAIN_CUSTOMER_SERVICE = "customer_service"
 DOMAIN_CHAT = "chat"
 DOMAIN_GREETING = "greeting"
+DOMAIN_BOOKING = "booking"
 
 _VALID_DOMAINS = {
     DOMAIN_ORDER,
     DOMAIN_CUSTOMER_SERVICE,
     DOMAIN_CHAT,
     DOMAIN_GREETING,
+    DOMAIN_BOOKING,
 }
+
+
+# Biela restaurant tenants keep the legacy restaurant-only router prompt;
+# everyone else gets the booking-domain addendum appended.
+_BIELA_BUSINESS_IDS = frozenset({
+    "4144785f-154d-4b4d-8ff5-a10dac356862",
+    "44488756-473b-46d2-a907-9f579e98ecfd",
+})
+
+
+_BOOKING_DOMAIN_ADDENDUM = """
+
+DOMINIO ADICIONAL DISPONIBLE PARA ESTE NEGOCIO:
+- "booking": el cliente quiere agendar, reservar, consultar, reprogramar o cancelar una cita / turno / consulta. Verbos típicos: "agendar", "reservar", "cita", "turno", "consulta", "reagendar", "cancelar mi cita", "horario disponible". Cuando aplique, usa "booking" en vez de "order" o "customer_service".
+
+La salida JSON puede incluir "booking" como valor de `domain`:
+{"segments": [{"domain": "order" | "customer_service" | "chat" | "greeting" | "booking", "text": "..."}]}
+"""
 
 
 # Cap segments per turn. Matches dispatcher MAX_HOPS so a router that
@@ -284,12 +304,16 @@ def _classify_with_llm(
         f"Mensaje: {message_body}"
     )
 
+    system_prompt = _ROUTER_SYSTEM_PROMPT
+    if business_id and business_id not in _BIELA_BUSINESS_IDS:
+        system_prompt = system_prompt + _BOOKING_DOMAIN_ADDENDUM
+
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
         from .multimodal import build_user_content
         response = llm.invoke(
             [
-                SystemMessage(content=_ROUTER_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=build_user_content(user_payload, attachments)),
             ],
             config={

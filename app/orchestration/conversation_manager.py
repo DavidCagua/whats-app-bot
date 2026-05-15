@@ -24,6 +24,7 @@ from .router import (
     DOMAIN_ORDER,
     DOMAIN_CUSTOMER_SERVICE,
     DOMAIN_CHAT,
+    DOMAIN_BOOKING,
 )
 from .turn_context import build_turn_context
 
@@ -38,6 +39,7 @@ _DOMAIN_TO_AGENT_TYPE = {
     DOMAIN_ORDER: "order",
     DOMAIN_CUSTOMER_SERVICE: "customer_service",
     DOMAIN_CHAT: None,
+    DOMAIN_BOOKING: "booking",
 }
 
 

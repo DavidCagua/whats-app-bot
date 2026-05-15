@@ -86,6 +86,21 @@ _LEGACY_DEFAULT_BUSINESS_NAME = "BIELA FAST FOOD"
 _LEGACY_DEFAULT_MENU_URL = "https://gixlink.com/Biela"
 
 
+# Biela restaurant tenants keep the legacy restaurant greeting (🍔🔥 +
+# "¿Qué se te antoja hoy?" + Biela menu URL fallback). Everyone else
+# gets a neutral booking-friendly opener and skips the legacy defaults.
+_BIELA_BUSINESS_IDS = frozenset({
+    "4144785f-154d-4b4d-8ff5-a10dac356862",
+    "44488756-473b-46d2-a907-9f579e98ecfd",
+})
+
+
+def _is_biela_business(business_context: Optional[dict]) -> bool:
+    if not business_context:
+        return False
+    return str(business_context.get("business_id") or "") in _BIELA_BUSINESS_IDS
+
+
 def _closed_sentence_from_gate(
     gate: Optional[dict],
     business: Optional[dict] = None,
@@ -235,8 +250,9 @@ def get_greeting(
     announces it inline ("Por ahora estamos cerrados…") so customers
     don't have to send a product to discover the shop is closed.
     """
-    business_name = _LEGACY_DEFAULT_BUSINESS_NAME
-    menu_url = _LEGACY_DEFAULT_MENU_URL
+    is_biela = _is_biela_business(business_context)
+    business_name = _LEGACY_DEFAULT_BUSINESS_NAME if is_biela else ""
+    menu_url = _LEGACY_DEFAULT_MENU_URL if is_biela else ""
 
     if business_context and business_context.get("business"):
         biz = business_context["business"]
@@ -248,6 +264,19 @@ def get_greeting(
     has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
     opener = f"Hola {first} " if has_real_name else "Hola "
 
+    # Brand-flavored copy only for Biela; everyone else gets a neutral
+    # booking-friendly opener that works for clinics, salons, etc.
+    welcome_line = (
+        f"{opener}👋 Bienvenido a {business_name} 🍔🔥"
+        if is_biela
+        else f"{opener}👋 Bienvenido a {business_name}".rstrip()
+    )
+    cta_line = (
+        "¿Qué se te antoja hoy? Estamos listos para ayudarte"
+        if is_biela
+        else "¿En qué te puedo ayudar hoy?"
+    )
+
     business_for_suffix = (
         (business_context or {}).get("business") if business_context else None
     )
@@ -255,7 +284,7 @@ def get_greeting(
     high_demand_notice = _high_demand_notice_from_gate(gate, business=business_for_suffix)
     if closed_sentence:
         body = (
-            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+            f"{welcome_line}\n"
             f"\n"
             f"{closed_sentence}\n"
             f"\n"
@@ -263,19 +292,19 @@ def get_greeting(
         )
     elif high_demand_notice:
         # Operator-flagged high demand: warn up front so the customer
-        # decides before committing. Notice goes BEFORE the "¿qué se
-        # te antoja?" prompt so it's the first thing they read.
+        # decides before committing. Notice goes BEFORE the CTA prompt
+        # so it's the first thing they read.
         body = (
-            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
+            f"{welcome_line}\n"
             f"\n"
             f"{high_demand_notice}\n"
             f"\n"
-            "¿Qué se te antoja hoy? Estamos listos para ayudarte"
+            f"{cta_line}"
         )
     else:
         body = (
-            f"{opener}👋 Bienvenido a {business_name} 🍔🔥\n"
-            "¿Qué se te antoja hoy? Estamos listos para ayudarte"
+            f"{welcome_line}\n"
+            f"{cta_line}"
         )
     # Suppress the menu URL on ANY closed-state greeting (fully closed,
     # mid-day break, past today's close). Surfacing it encourages a
