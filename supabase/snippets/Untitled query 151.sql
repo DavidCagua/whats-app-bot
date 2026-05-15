@@ -29,6 +29,21 @@ WHERE whatsapp_id IN ('+573177000722', '573177000722');
 SELECT 'conversation_sessions_after' AS label, COUNT(*) AS total
 FROM conversation_sessions
 WHERE wa_id IN ('+573177000722', '573177000722');
-DELETE FROM customers
-WHERE whatsapp_id IN ('+573177000722', '573177000722');
+-- DELETE FROM customers
+-- WHERE whatsapp_id IN ('+573177000722', '573177000722');
 COMMIT;
+
+
+-- UPDATE businesses
+--    SET settings = settings || jsonb_build_object('daily_analysis_enabled', true)
+--  WHERE name ILIKE '%biela%';
+
+
+--  UPDATE businesses
+-- SET settings = jsonb_set(
+--   coalesce(settings, '{}'::jsonb),
+--   '{closed_day_alt_contact}',
+--   '{"name":"Sede Las Cuadras","phone":"+573026722877"}'::jsonb
+-- )
+-- WHERE name = 'Biela';
+

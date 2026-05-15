@@ -164,12 +164,6 @@ class TestAddToCart:
         assert len(items) == 2
         assert {it["notes"] for it in items} == {"sin bbq", "sin cebolla"}
 
-    # Case: Add product with quantity > 1
-    # Case: Product not found by name → returns ❌ error
-    # Case: Quantity < 1 → returns ❌ error
-    # Case: Missing wa_id or business_id → returns ❌ error
-    # Case: Products not enabled (settings.products_enabled=false) → returns ❌
-
 
 # ---------------------------------------------------------------------------
 # remove_from_cart
@@ -443,43 +437,11 @@ class TestUpdateCartItem:
 
 
 # ---------------------------------------------------------------------------
-# view_cart
-# ---------------------------------------------------------------------------
-
-class TestViewCart:
-    """Test the view_cart tool."""
-
-    # Case: Empty cart → "Tu pedido está vacío"
-    # Case: Cart with items → shows list with quantities, prices, subtotal, delivery fee, total
-    # Case: Items with notes → notes shown in parentheses
-
-
-# ---------------------------------------------------------------------------
-# search_products
-# ---------------------------------------------------------------------------
-
-class TestSearchProducts:
-    """Test the search_products tool."""
-
-    # Case: Search by exact product name → returns matching product(s)
-    # Case: Search by ingredient ("queso azul") → returns products with ingredient in description
-    # Case: No results → returns ❌ "no hay productos que coincidan"
-    # Case: Empty query → returns ❌ "indica el término"
-    # Case: Ingredient-like query includes description snippet in results
-
-
-# ---------------------------------------------------------------------------
 # submit_delivery_info
 # ---------------------------------------------------------------------------
 
 class TestSubmitDeliveryInfo:
     """Test the submit_delivery_info tool."""
-
-    # Case: Submit address only → merges with existing delivery_info, other fields unchanged
-    # Case: Submit all fields at once → all saved
-    # Case: Submit with no fields → returns "sin cambios"
-    # Case: Submit overwrites previous value (e.g. update address)
-    # Case: Partial update preserves previously submitted fields
 
     def test_routes_to_place_order_when_already_awaiting_confirmation(
         self, fake_session, business_context
@@ -553,47 +515,6 @@ class TestSubmitDeliveryInfo:
 
         assert "respond(kind='ready_to_confirm')" in result
         assert "place_order AHORA" not in result
-
-
-# ---------------------------------------------------------------------------
-# place_order
-# ---------------------------------------------------------------------------
-
-class TestPlaceOrder:
-    """Test the place_order tool."""
-
-    # Case: Valid cart + complete delivery info → order created, cart cleared, returns ✅
-    # Case: Empty cart → returns ❌ "pedido está vacío"
-    # Case: Missing address → returns MISSING_DELIVERY_INFO
-    # Case: Missing payment_method → returns MISSING_DELIVERY_INFO
-    # Case: After success, session order_context is cleared (set to None)
-    # Case: Item with invalid quantity or price → returns ❌
-
-
-# ---------------------------------------------------------------------------
-# get_customer_info
-# ---------------------------------------------------------------------------
-
-class TestGetCustomerInfo:
-    """Test the get_customer_info tool."""
-
-    # Case: No session delivery info, no DB customer → all fields missing
-    # Case: Partial session delivery info → merges with DB, shows what's missing
-    # Case: All info present (session + DB) → all_present=true
-    # Case: Session overrides DB values (session takes priority)
-
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
-class TestHelpers:
-    """Test internal helpers."""
-
-    # Case: _format_price — formats COP prices with dots as thousands separator
-    # Case: _is_ingredient_like_query — "queso azul" → True, "barracuda" → False
-    # Case: _cart_from_session — returns correct structure when session is empty
-    # Case: _cart_from_session — returns items, total, delivery_info from session
 
 
 # ---------------------------------------------------------------------------

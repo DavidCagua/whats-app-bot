@@ -448,3 +448,61 @@ class TestClosedGreeting:
         )
         assert "Sede Las Cuadras" in sentence
         assert "Si necesitas pedir hoy" in sentence
+
+
+class TestStatusFromGate:
+    """
+    DRY helper that synthesizes the compute_open_status shape from a
+    gate dict. Production 2026-05-11 (Biela): the two callers
+    (_closed_sentence_from_gate, _is_fully_closed_today_from_gate)
+    used to inline-build their own dicts and one was updated for
+    today_had_window while the other wasn't — the closed CTA's {{3}}
+    variable then carried the alt-branch contact line for past-close-
+    with-window cases. These tests pin the dict shape so the two
+    callers can't drift again.
+    """
+
+    def test_threads_all_gate_fields(self):
+        gate = {
+            "can_take_orders": False,
+            "reason": "closed",
+            "opens_at": "10:00",
+            "next_open_dow": 2,
+            "next_open_time": "10:00",
+            "today_had_window": True,
+            "now_local": "2026-05-12T22:38:00-05:00",
+        }
+        assert business_greeting._status_from_gate(gate) == {
+            "is_open": False,
+            "has_data": True,
+            "opens_at": "10:00",
+            "closes_at": None,
+            "next_open_dow": 2,
+            "next_open_time": "10:00",
+            "today_had_window": True,
+            "now_local": "2026-05-12T22:38:00-05:00",
+        }
+
+    def test_today_had_window_defaults_to_false_when_missing(self):
+        # Gates from older code paths may not populate the field —
+        # default to the fully-closed posture (False) so alt-branch
+        # contact applies for backward compatibility.
+        gate = {"can_take_orders": False, "reason": "closed", "opens_at": "10:00"}
+        assert business_greeting._status_from_gate(gate)["today_had_window"] is False
+
+    def test_closes_at_is_always_none(self):
+        # Not meaningful in a closed-state synthesis. Pinning to None
+        # prevents accidental leakage if a future gate carries closes_at.
+        gate = {
+            "can_take_orders": False, "reason": "closed",
+            "closes_at": "22:00", "today_had_window": True,
+        }
+        assert business_greeting._status_from_gate(gate)["closes_at"] is None
+
+    def test_has_data_and_is_open_are_constants(self):
+        # Caller MUST have already verified gate is the closed payload,
+        # so has_data=True / is_open=False are invariant for this helper.
+        gate = {"can_take_orders": False, "reason": "closed"}
+        status = business_greeting._status_from_gate(gate)
+        assert status["has_data"] is True
+        assert status["is_open"] is False

@@ -5,11 +5,11 @@ Run with: pytest -m integration tests/integration/test_router.py
 Uses VCR cassettes (pytest-recording) to record/replay HTTP calls.
 Delete cassettes/ and rerun when the router prompt changes.
 
-These tests guard the router LAYER, separate from the planner-layer tests
-in test_planner.py. The bug they exist for: the multi-agent merge added a
-stateless router that classified ambiguous negatives ("no más") as
-customer_service, which then emitted CANCEL_ORDER and silently cancelled
-in-progress carts. Fix was to make the router state-aware via TurnContext.
+These tests guard the router LAYER. The bug they exist for: the
+multi-agent merge added a stateless router that classified ambiguous
+negatives ("no más") as customer_service, which then emitted
+CANCEL_ORDER and silently cancelled in-progress carts. Fix was to make
+the router state-aware via TurnContext.
 """
 
 import pytest
@@ -57,9 +57,9 @@ def _classify(
 class TestNegativeConfirmStaysInOrder:
     """
     With an active cart + the bot just having asked "¿algo más o procedemos?",
-    short negatives must route to `order`. The order agent's planner already
-    classifies these as CONFIRM (covered by tests/integration/test_planner.py
-    TestNegativeConfirmRouting). We just need the router to deliver them.
+    short negatives must route to `order`. The order agent's tool-calling
+    loop then resolves these to `place_order` / `respond`. We just need the
+    router to deliver them.
     """
 
     LAST_BOT = "Tu pedido actual: 1x DENVER. Subtotal: $24.500. ¿Quieres agregar algo más o procedemos con el pedido?"

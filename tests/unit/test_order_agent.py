@@ -237,19 +237,18 @@ class TestPromoOnlyQuestionDoesNotAutoAdd:
 
         # Envelope: product_info, NOT items_added.
         assert output["agent_type"] == "order"
-        # The names of every tool the model attempted to call this turn,
-        # collected from the AIMessage chain. add_promo_to_cart must
-        # never appear.
-        invoked_names = []
-        for call in llm.invoke.call_args_list:
-            # Each call's messages list is the cumulative history; we
-            # only care that the model never produced an add_promo_to_cart
-            # tool_call across the run.
-            pass
-        # Simpler: inspect the mocked AIMessage objects directly.
-        for ai in (search_call, final_respond):
-            for tc in (ai.tool_calls or []):
-                invoked_names.append(tc.get("name"))
+        # The agent dispatches whatever the LLM emits; the scripted
+        # sequence above models the "follow the prompt" path. Sanity-
+        # check that the scripted tools are the inform-only ones —
+        # this is documentation of the expected LLM path, paired with
+        # the prompt-rule tests above that pin the rules forcing it.
+        invoked_names = [
+            tc.get("name")
+            for ai in (search_call, final_respond)
+            for tc in (ai.tool_calls or [])
+        ]
+        assert "search_products" in invoked_names
+        assert "respond" in invoked_names
         assert "add_promo_to_cart" not in invoked_names
         assert "add_to_cart" not in invoked_names
         # The final text is what the renderer produced from product_info.
@@ -974,10 +973,10 @@ class TestReadyToConfirmCTA:
 # ---------------------------------------------------------------------------
 
 class TestRegistryResolvesOrderAgent:
-    """After v1 deletion, the legacy ``OrderAgent`` module is gone. The
-    agent registry aliases ``OrderAgent`` as ``OrderAgent``
-    so any caller (router, dispatcher, handoff) doing
-    ``get_agent('order')`` receives the tool-calling agent."""
+    """``get_agent('order')`` must resolve to the canonical OrderAgent
+    class, and the symbol re-exported from ``app.agents.registry`` must
+    be the same class as the one defined in ``app.agents.order_agent``
+    — a refactor that wraps it would silently break callers."""
 
     def test_registry_order_type_is_tool_calling_agent(self):
         from app.agents.registry import get_agent
@@ -985,13 +984,10 @@ class TestRegistryResolvesOrderAgent:
         agent = get_agent("order")
         assert isinstance(agent, OrderAgent)
 
-    def test_legacy_orderagent_name_is_the_tool_calling_class(self):
-        """The ``OrderAgent`` name (still imported by some callers and
-        tests) is now an alias for ``OrderAgent`` — there is
-        no separate planner-based class anymore."""
-        from app.agents.registry import OrderAgent
-        from app.agents.order_agent import OrderAgent
-        assert OrderAgent is OrderAgent
+    def test_registry_reexport_is_the_canonical_class(self):
+        from app.agents.registry import OrderAgent as RegistryOrderAgent
+        from app.agents.order_agent import OrderAgent as ModuleOrderAgent
+        assert RegistryOrderAgent is ModuleOrderAgent
 
 
 # ---------------------------------------------------------------------------
@@ -1660,7 +1656,7 @@ class TestAwaitingConfirmationHint:
         sent_messages = llm.invoke.call_args.args[0]
         hints = [
             m for m in sent_messages
-            if isinstance(m, SystemMessage) and "ESTADO ACTUAL" in m.content
+            if isinstance(m, SystemMessage) and "ACCIÓN ESPERADA" in m.content
         ]
         assert not hints, "should not inject hint when flag is off"
 

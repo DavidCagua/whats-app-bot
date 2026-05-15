@@ -1,11 +1,14 @@
 """
 Unit tests for app/services/promotion_service.py.
 
-Focused on the matching logic (find_promo_by_query); the rest of the
-module is exercised end-to-end via the order-tool tests.
+Covers find_promo_by_query (matching logic) and list_promos_for_listing
+(active-now vs upcoming bucketing). The rest of the module is exercised
+end-to-end via the order-tool tests.
 """
 
-from unittest.mock import patch
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,6 +16,7 @@ from app.services import promotion_service
 
 
 BIZ = "biz-1"
+BIZ_UUID = "00000000-0000-0000-0000-000000000001"
 
 
 def _patch_active(promos):
@@ -89,3 +93,106 @@ class TestFindPromoByQuery:
     def test_no_active_promos_returns_empty(self):
         with _patch_active([]):
             assert promotion_service.find_promo_by_query(BIZ, "honey") == []
+
+
+def _fake_promo(name, *, promo_id="p1", days_of_week=None,
+                start_time=None, end_time=None,
+                starts_on=None, ends_on=None):
+    """Promotion row stand-in carrying just the surface that
+    list_promos_for_listing reads (attrs + to_dict)."""
+    promo = SimpleNamespace(
+        id=promo_id, name=name, days_of_week=days_of_week,
+        start_time=start_time, end_time=end_time,
+        starts_on=starts_on, ends_on=ends_on,
+    )
+    promo.to_dict = lambda: {"id": promo_id, "name": name, "days_of_week": days_of_week}
+    return promo
+
+
+def _patch_query(rows):
+    session = MagicMock()
+    session.query.return_value.options.return_value.filter.return_value.all.return_value = list(rows)
+    return patch("app.services.promotion_service.get_db_session", return_value=session)
+
+
+# Monday 2026-05-11 at 12:00 UTC = Monday 07:00 in Bogota (UTC-5).
+# Anchors every "today" calculation in TestListPromosForListing —
+# matches the production trace where the Misuri/Oregon substitution
+# bug surfaced (Monday, Wednesday-only Misuri filtered out, Oregon
+# active).
+_MONDAY_UTC = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+
+
+class TestListPromosForListing:
+    """
+    Two-bucket view consumed by the CS get_promos tool. The bucketing is
+    schedule math + DB plumbing, not LLM behavior — exercise it
+    deterministically so misclassification (active vs upcoming) is caught
+    at unit level, not in prod.
+    """
+
+    def test_no_business_id_returns_empty_buckets(self):
+        assert promotion_service.list_promos_for_listing("") == {
+            "active_now": [], "upcoming": [],
+        }
+
+    def test_always_on_promo_is_active(self):
+        # No day_of_week / time constraints → schedule matches at any
+        # `when`, lands in active_now. The `_next_active_iso_weekday`
+        # helper short-circuits to None for always-on promos so they
+        # never leak into upcoming.
+        promo = _fake_promo("Always On", days_of_week=None)
+        with _patch_query([promo]):
+            result = promotion_service.list_promos_for_listing(
+                BIZ_UUID, when=_MONDAY_UTC, timezone_name="America/Bogota",
+            )
+        assert [p["name"] for p in result["active_now"]] == ["Always On"]
+        assert result["upcoming"] == []
+
+    def test_monday_only_promo_on_monday_is_active(self):
+        promo = _fake_promo("Oregon", days_of_week=[1])
+        with _patch_query([promo]):
+            result = promotion_service.list_promos_for_listing(
+                BIZ_UUID, when=_MONDAY_UTC, timezone_name="America/Bogota",
+            )
+        assert [p["name"] for p in result["active_now"]] == ["Oregon"]
+        assert result["upcoming"] == []
+
+    def test_wednesday_only_promo_on_monday_is_upcoming_with_day(self):
+        # The production scenario behind get_promos surfacing
+        # "Disponible el miércoles": Wednesday-only Misuri promo,
+        # message arrives Monday. Must show in upcoming with
+        # next_active_day=3 so the CS prose can render the day name.
+        promo = _fake_promo("Misuri", days_of_week=[3])
+        with _patch_query([promo]):
+            result = promotion_service.list_promos_for_listing(
+                BIZ_UUID, when=_MONDAY_UTC, timezone_name="America/Bogota",
+            )
+        assert result["active_now"] == []
+        assert [p["name"] for p in result["upcoming"]] == ["Misuri"]
+        assert result["upcoming"][0]["next_active_day"] == 3
+
+    def test_mixed_active_and_upcoming(self):
+        # Mixed bag — Monday-active Oregon stays in active_now,
+        # Wednesday-only Misuri goes to upcoming.
+        monday = _fake_promo("Oregon", promo_id="p-or", days_of_week=[1])
+        wednesday = _fake_promo("Misuri", promo_id="p-mi", days_of_week=[3])
+        with _patch_query([monday, wednesday]):
+            result = promotion_service.list_promos_for_listing(
+                BIZ_UUID, when=_MONDAY_UTC, timezone_name="America/Bogota",
+            )
+        assert [p["name"] for p in result["active_now"]] == ["Oregon"]
+        assert [p["name"] for p in result["upcoming"]] == ["Misuri"]
+        assert result["upcoming"][0]["next_active_day"] == 3
+
+    def test_db_exception_returns_empty_buckets(self):
+        # If the query layer blows up we must not propagate — the CS
+        # path falls back to "no hay promos" rather than 500-ing the
+        # turn.
+        session = MagicMock()
+        session.query.side_effect = RuntimeError("DB exploded")
+        with patch("app.services.promotion_service.get_db_session", return_value=session):
+            result = promotion_service.list_promos_for_listing(
+                BIZ_UUID, when=_MONDAY_UTC, timezone_name="America/Bogota",
+            )
+        assert result == {"active_now": [], "upcoming": []}

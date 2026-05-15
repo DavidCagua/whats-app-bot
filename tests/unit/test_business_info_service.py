@@ -590,3 +590,52 @@ class TestFormatOpenStatusSentence:
         s = self._status(has_data=False)
         out = bis.format_open_status_sentence(s)
         assert out == ""
+
+
+class TestFormatClosedAltContactSuffix:
+    """
+    Render the "if you need to order today, contact <sibling branch>"
+    suffix used by the welcome greeting on fully-closed days and the CS
+    order_closed handoff. A misconfigured business must NOT leak
+    " Si necesitas pedir hoy, escríbele a  al ." — every missing /
+    partial / wrong-type field must short-circuit to "".
+    """
+
+    HAPPY_CONTACT = {"name": "Sede Las Cuadras", "phone": "+573001234567"}
+
+    def test_happy_path(self):
+        biz = {"settings": {"closed_day_alt_contact": self.HAPPY_CONTACT}}
+        assert bis.format_closed_alt_contact_suffix(biz) == (
+            " Si necesitas pedir hoy, escríbele a Sede Las Cuadras al +573001234567."
+        )
+
+    @pytest.mark.parametrize("biz", [
+        None,
+        {},
+        {"settings": None},
+        {"settings": {}},
+        {"settings": {"closed_day_alt_contact": None}},
+        {"settings": {"closed_day_alt_contact": {}}},
+        # Non-dict alt — the production schema is always a dict, but a
+        # mis-typed value (string, list) must not blow up the greeting.
+        {"settings": {"closed_day_alt_contact": "not a dict"}},
+        {"settings": {"closed_day_alt_contact": ["a", "b"]}},
+        # Partial — name OR phone present but the other missing /
+        # whitespace must short-circuit so we never render half a contact.
+        {"settings": {"closed_day_alt_contact": {"name": "X"}}},
+        {"settings": {"closed_day_alt_contact": {"phone": "+57"}}},
+        {"settings": {"closed_day_alt_contact": {"name": "", "phone": "+57"}}},
+        {"settings": {"closed_day_alt_contact": {"name": "X", "phone": ""}}},
+        {"settings": {"closed_day_alt_contact": {"name": "   ", "phone": "+57"}}},
+        {"settings": {"closed_day_alt_contact": {"name": "X", "phone": "   "}}},
+    ])
+    def test_missing_or_partial_returns_empty(self, biz):
+        assert bis.format_closed_alt_contact_suffix(biz) == ""
+
+    def test_whitespace_trimmed_around_values(self):
+        biz = {"settings": {"closed_day_alt_contact": {
+            "name": "  Sede Norte  ", "phone": "  +5730  ",
+        }}}
+        assert bis.format_closed_alt_contact_suffix(biz) == (
+            " Si necesitas pedir hoy, escríbele a Sede Norte al +5730."
+        )
