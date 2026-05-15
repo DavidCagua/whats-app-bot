@@ -1,15 +1,17 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useSearchParams } from "next/navigation"
 import { ConversationGroup, ConversationThread } from "@/lib/conversations-queries"
+import { useEventSource } from "@/lib/use-event-source"
 import { ConversationsSidebar } from "./conversations-sidebar"
 import { ConversationMessagesPanel } from "./conversation-messages-panel"
+import { ConversationMessagesSkeleton } from "./conversation-messages-skeleton"
 import { Card } from "@/components/ui/card"
 import { MessageSquare } from "lucide-react"
+import { cn } from "@/lib/utils"
 
-const THREAD_POLL_MS = 2500
-const LIST_POLL_MS = 7000
+const RELATIVE_TIME_TICK_MS = 60_000
 
 type ConversationsLayoutProps = {
   conversations: ConversationGroup[]
@@ -19,7 +21,7 @@ type ConversationsLayoutProps = {
   whatsappNumbers: Array<{ id: string; phone_number: string; business_id: string }>
   canFilterByBusiness: boolean
   showBusinessColumn: boolean
-  /** When set, list polling always scopes API calls to this business. */
+  /** When set, the SSE list stream is always scoped to this business. */
   scopedBusinessId?: string
   inboxBasePath: string
   initialFilters: {
@@ -43,93 +45,95 @@ export function ConversationsLayout({
   initialFilters,
 }: ConversationsLayoutProps) {
   const searchParams = useSearchParams()
-  const conversationParam = searchParams.get("conversation")
 
   const [conversations, setConversations] = useState<ConversationGroup[]>(initialConversations)
   const [thread, setThread] = useState<ConversationThread | null>(initialThread)
-  // On mobile: "list" | "chat"
-  const [mobileView, setMobileView] = useState<"list" | "chat">("list")
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(() => {
+    if (initialThread) return `${initialThread.whatsapp_id}:${initialThread.business_id}`
+    return searchParams.get("conversation")
+  })
+  const [threadLoading, setThreadLoading] = useState(false)
+  const [mobileView, setMobileView] = useState<"list" | "chat">(
+    initialThread ? "chat" : "list"
+  )
+  const [now, setNow] = useState(() => Date.now())
+  const messagesPanelRef = useRef<HTMLDivElement>(null)
 
-  // Sync list from server when initial data changes (e.g. filter applied)
+  const selectedIdRef = useRef(selectedConversationId)
+  useEffect(() => {
+    selectedIdRef.current = selectedConversationId
+  }, [selectedConversationId])
+
+  // One ticker for every list item's relative timestamp; saves N renders/min.
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), RELATIVE_TIME_TICK_MS)
+    return () => clearInterval(interval)
+  }, [])
+
+  // Move focus to the messages panel when switching into chat view on mobile.
+  useEffect(() => {
+    if (mobileView !== "chat") return
+    if (typeof window === "undefined") return
+    if (window.matchMedia("(min-width: 768px)").matches) return
+    requestAnimationFrame(() => {
+      messagesPanelRef.current?.focus()
+    })
+  }, [mobileView, selectedConversationId])
+
+  // Sync list when filter changes cause an RSC re-run.
   useEffect(() => {
     setConversations(initialConversations)
   }, [initialConversations])
 
-  // Sync thread + switch to chat view when a conversation is selected
-  useEffect(() => {
-    if (!conversationParam) {
-      setThread(null)
-      setMobileView("list")
-      return
-    }
-    if (initialThread && `${initialThread.whatsapp_id}:${initialThread.business_id}` === conversationParam) {
-      setThread(initialThread)
+  const listBusinessId = scopedBusinessId ?? searchParams.get("business") ?? null
+  const search = searchParams.get("search")
+  const dateFrom = searchParams.get("dateFrom")
+  const dateTo = searchParams.get("dateTo")
+
+  const listStreamUrl = useMemo(() => {
+    if (!listBusinessId) return null
+    const qs = new URLSearchParams({ businessId: listBusinessId })
+    if (search) qs.set("search", search)
+    if (dateFrom) qs.set("dateFrom", dateFrom)
+    if (dateTo) qs.set("dateTo", dateTo)
+    return `/api/conversations/stream?${qs.toString()}`
+  }, [listBusinessId, search, dateFrom, dateTo])
+
+  const threadStreamUrl = useMemo(() => {
+    if (!selectedConversationId) return null
+    const [whatsappId, businessId] = selectedConversationId.split(":")
+    if (!whatsappId || !businessId) return null
+    return `/api/conversations/stream?businessId=${encodeURIComponent(businessId)}&whatsappId=${encodeURIComponent(whatsappId)}`
+  }, [selectedConversationId])
+
+  const onListSnapshot = useCallback((data: ConversationGroup[]) => {
+    setConversations(data)
+  }, [])
+
+  const onThreadSnapshot = useCallback((data: ConversationThread | null) => {
+    if (!data) return
+    const id = `${data.whatsapp_id}:${data.business_id}`
+    if (selectedIdRef.current !== id) return
+    setThread(data)
+    setThreadLoading(false)
+  }, [])
+
+  useEventSource<ConversationGroup[]>(listStreamUrl, "snapshot", onListSnapshot)
+  useEventSource<ConversationThread | null>(threadStreamUrl, "snapshot", onThreadSnapshot)
+
+  const handleSelectConversation = useCallback(
+    (conversationId: string) => {
+      if (conversationId === selectedConversationId) {
+        setMobileView("chat")
+        return
+      }
+      setSelectedConversationId(conversationId)
       setMobileView("chat")
-    } else {
       setThread(null)
-    }
-  }, [conversationParam, initialThread])
-
-  const fetchThread = useCallback(async () => {
-    if (!conversationParam) return
-    const [whatsappId, businessId] = conversationParam.split(":")
-    if (!whatsappId || !businessId) return
-    try {
-      const res = await fetch(
-        `/api/conversations/thread?whatsappId=${encodeURIComponent(whatsappId)}&businessId=${encodeURIComponent(businessId)}`
-      )
-      if (res.ok) {
-        const data = await res.json()
-        setThread(data)
-      }
-    } catch {
-      // keep previous thread on error
-    }
-  }, [conversationParam])
-
-  const fetchList = useCallback(async () => {
-    const params = new URLSearchParams()
-    const business = scopedBusinessId ?? searchParams.get("business")
-    const search = searchParams.get("search")
-    const dateFrom = searchParams.get("dateFrom")
-    const dateTo = searchParams.get("dateTo")
-    if (business) params.set("business", business)
-    if (search) params.set("search", search)
-    if (dateFrom) params.set("dateFrom", dateFrom)
-    if (dateTo) params.set("dateTo", dateTo)
-    params.set("limit", "50")
-    params.set("offset", "0")
-    try {
-      const res = await fetch(`/api/conversations?${params.toString()}`)
-      if (res.ok) {
-        const data = await res.json()
-        setConversations(data)
-      }
-    } catch {
-      // keep previous list on error
-    }
-  }, [searchParams, scopedBusinessId])
-
-  // Thread polling: every 2–3s when a conversation is selected
-  useEffect(() => {
-    if (!conversationParam) return
-    const interval = setInterval(fetchThread, THREAD_POLL_MS)
-    return () => clearInterval(interval)
-  }, [conversationParam, fetchThread])
-
-  // List polling: every 5–10s
-  useEffect(() => {
-    const interval = setInterval(fetchList, LIST_POLL_MS)
-    return () => clearInterval(interval)
-  }, [fetchList])
-
-  const selectedConversationId = thread
-    ? `${thread.whatsapp_id}:${thread.business_id}`
-    : null
-
-  const handleConversationSelect = () => {
-    setMobileView("chat")
-  }
+      setThreadLoading(true)
+    },
+    [selectedConversationId]
+  )
 
   const handleBack = () => {
     setMobileView("list")
@@ -141,12 +145,11 @@ export function ConversationsLayout({
 
       {/* Sidebar — full width on mobile, fixed width on md+, hidden on mobile when in chat view */}
       <div
-        className={[
+        className={cn(
           "flex flex-col min-w-0",
-          // Mobile: full width, hidden when chatting
           "w-full md:w-[340px] lg:w-[380px] md:flex-shrink-0",
-          mobileView === "chat" ? "hidden md:flex" : "flex",
-        ].join(" ")}
+          mobileView === "chat" ? "hidden md:flex" : "flex"
+        )}
       >
         <ConversationsSidebar
           conversations={conversations}
@@ -158,18 +161,23 @@ export function ConversationsLayout({
           showBusinessColumn={showBusinessColumn}
           inboxBasePath={inboxBasePath}
           initialFilters={initialFilters}
-          onConversationSelect={handleConversationSelect}
+          now={now}
+          onSelectConversation={handleSelectConversation}
         />
       </div>
 
       {/* Messages panel — hidden on mobile when in list view */}
       <div
-        className={[
-          "flex-1 min-w-0",
-          mobileView === "list" ? "hidden md:flex md:flex-col" : "flex flex-col",
-        ].join(" ")}
+        ref={messagesPanelRef}
+        tabIndex={-1}
+        className={cn(
+          "flex-1 min-w-0 outline-none",
+          mobileView === "list" ? "hidden md:flex md:flex-col" : "flex flex-col"
+        )}
       >
-        {thread ? (
+        {threadLoading && !thread ? (
+          <ConversationMessagesSkeleton onBack={handleBack} />
+        ) : thread ? (
           <ConversationMessagesPanel thread={thread} onBack={handleBack} />
         ) : (
           <Card className="h-full flex items-center justify-center">

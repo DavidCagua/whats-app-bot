@@ -22,21 +22,19 @@ ORDER_STATE_READY_TO_PLACE = "READY_TO_PLACE"
 
 
 def derive_order_state(order_context: Optional[Dict]) -> str:
-    """
-    Derive order state from order_context when not explicitly set.
-    In-progress cart lives only in session (order_context); no separate DB cart.
+    """Derive order state from order_context contents.
+
+    Pure function of (items, delivery_info). The previous short-circuit
+    that returned the stored ``state`` if it was a valid value was a
+    legacy-executor compat hack: it let an explicit COLLECTING_DELIVERY
+    persist even when contents alone wouldn't justify it. With v1 gone,
+    nothing sets state explicitly anymore — state is always derived
+    from contents on save, and any stored state is informational only.
     """
     if not order_context:
         return ORDER_STATE_GREETING
     items = order_context.get("items") or []
     delivery_info = order_context.get("delivery_info") or {}
-    if order_context.get("state") in (
-        ORDER_STATE_GREETING,
-        ORDER_STATE_ORDERING,
-        ORDER_STATE_COLLECTING_DELIVERY,
-        ORDER_STATE_READY_TO_PLACE,
-    ):
-        return order_context["state"]
     if not items:
         return ORDER_STATE_GREETING
     name = (delivery_info.get("name") or "").strip()
@@ -174,7 +172,21 @@ class SessionStateService:
                     val = state_update["booking_context"]
                     row.booking_context = {} if val is None else ({**(row.booking_context or {}), **val} if isinstance(val, dict) else row.booking_context or {})
                 if "agent_contexts" in state_update:
-                    row.agent_contexts = {**(row.agent_contexts or {}), **state_update["agent_contexts"]}
+                    # Two-level merge: top-level keys are agent names; each
+                    # agent's payload is a partial dict that should be merged
+                    # into its existing slot rather than replacing it. Without
+                    # this, an agent writing `{customer_service: {x: 1}}`
+                    # would wipe out a prior `{customer_service: {y: 2}}`.
+                    merged_ac = dict(row.agent_contexts or {})
+                    for agent_name, agent_state in (state_update["agent_contexts"] or {}).items():
+                        if isinstance(agent_state, dict):
+                            merged_ac[agent_name] = {
+                                **(merged_ac.get(agent_name) or {}),
+                                **agent_state,
+                            }
+                        else:
+                            merged_ac[agent_name] = agent_state
+                    row.agent_contexts = merged_ac
                 if "last_order_id" in state_update:
                     row.last_order_id = state_update["last_order_id"]
                 if "last_booking_id" in state_update:

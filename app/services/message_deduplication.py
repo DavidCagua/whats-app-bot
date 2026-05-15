@@ -7,9 +7,50 @@ Uses database for persistent storage if available, falls back to in-memory LRU c
 
 import logging
 import os
+import threading
 from typing import Optional
 from datetime import datetime, timedelta
 from collections import OrderedDict
+
+
+# ── Redis dedupe backend ────────────────────────────────────────────────
+# The original DB-backed path did two sequential Supabase round trips per
+# webhook (SELECT then INSERT ON CONFLICT), adding ~1–2 s to every inbound
+# message — enough to push messages outside the 3 s debounce window.
+# Redis gives us atomic "claim" semantics in a single ~1 ms round trip:
+# SET NX EX 86400 returns true only for the first caller, so the claim
+# itself IS the dedupe check.
+_redis_dedupe_client = None
+_redis_dedupe_init_lock = threading.Lock()
+
+
+def _get_redis_dedupe():
+    """
+    Lazy-initialize a Redis client shared by the dedupe path.
+    Returns None if REDIS_URL is unset or the server is unreachable,
+    in which case the service falls back to the DB + memory cache.
+    """
+    global _redis_dedupe_client
+    if _redis_dedupe_client is not None:
+        return _redis_dedupe_client
+    with _redis_dedupe_init_lock:
+        if _redis_dedupe_client is not None:
+            return _redis_dedupe_client
+        url = os.getenv("REDIS_URL")
+        if not url:
+            return None
+        try:
+            import redis as redis_lib
+            client = redis_lib.from_url(url, decode_responses=True, socket_timeout=2)
+            client.ping()
+            _redis_dedupe_client = client
+            logging.info("[DEDUPE] Redis connected")
+        except Exception as exc:
+            logging.warning("[DEDUPE] Redis unavailable (%s); falling back to DB", exc)
+    return _redis_dedupe_client
+
+
+_REDIS_DEDUPE_TTL = 86400  # 24 h — matches the in-memory cache TTL
 
 try:
     from app.database.models import get_db_session, Base, engine
@@ -138,20 +179,98 @@ class MessageDeduplicationService:
             logging.warning(f"[DEDUPE] Could not ensure table exists: {e}")
             self.use_database = False
 
+    def claim(self, message_id: str) -> bool:
+        """
+        Atomically claim a message_id as "being processed" in a single
+        round trip. Returns True if this caller is the first to claim
+        (i.e. NOT a duplicate — proceed with processing), False if the
+        id was already claimed (duplicate, drop the webhook).
+
+        Preferred over is_duplicate() + mark_as_processed() because it
+        collapses the check-then-set into one atomic operation, avoiding
+        both the race and the second round trip. The hot path on the
+        inbound webhook should always use this.
+
+        Backends tried in order:
+          1. Redis SET NX EX — ~1 ms, atomic, authoritative.
+          2. Memory cache (LRU + TTL) — only if Redis is unavailable.
+          3. DB INSERT ... ON CONFLICT DO NOTHING RETURNING — last
+             resort when neither Redis nor the memory cache are usable.
+        """
+        if not message_id:
+            return True
+
+        r = _get_redis_dedupe()
+        if r is not None:
+            try:
+                key = f"dedupe:msg:{message_id}"
+                # SET NX returns True when the key did NOT previously exist.
+                won = r.set(key, "1", nx=True, ex=_REDIS_DEDUPE_TTL)
+                if won:
+                    # Also populate memory cache so the Redis TTL + any
+                    # restart still benefits from in-process hits.
+                    self.memory_cache.add(message_id)
+                    return True
+                logging.info(f"[DEDUPE] Duplicate message detected (redis): {message_id}")
+                return False
+            except Exception as exc:
+                logging.warning(f"[DEDUPE] Redis claim failed, falling back: {exc}")
+
+        # Memory cache fallback (local dev, Redis outage).
+        if self.memory_cache.has(message_id):
+            logging.info(f"[DEDUPE] Duplicate message detected (cache): {message_id}")
+            return False
+        self.memory_cache.add(message_id)
+
+        # DB as the final persistence layer when Redis is down — kept
+        # so cross-worker dedupe still works during an outage. One
+        # round trip via INSERT ON CONFLICT DO NOTHING RETURNING id:
+        # a row comes back only when the insert actually happened.
+        if self.use_database and ProcessedMessage is not None:
+            try:
+                from sqlalchemy.dialects.postgresql import insert
+                session = get_db_session()
+                try:
+                    stmt = (
+                        insert(ProcessedMessage)
+                        .values(message_id=message_id, processed_at=datetime.utcnow())
+                        .on_conflict_do_nothing(index_elements=["message_id"])
+                        .returning(ProcessedMessage.id)
+                    )
+                    result = session.execute(stmt).first()
+                    session.commit()
+                    if result is None:
+                        logging.info(f"[DEDUPE] Duplicate message detected (DB): {message_id}")
+                        return False
+                finally:
+                    session.close()
+            except Exception as exc:
+                logging.warning(f"[DEDUPE] DB claim failed: {exc}")
+
+        return True
+
     def is_duplicate(self, message_id: str) -> bool:
         """
-        Check if message ID has already been processed.
-
-        Args:
-            message_id: WhatsApp message ID from Meta payload
-
-        Returns:
-            True if message was already processed, False otherwise
+        Legacy check-only API. Prefer claim() on the hot path because it
+        eliminates the second round trip. Still used by a few callers
+        that want a non-mutating duplicate probe.
         """
         if not message_id:
             return False
 
-        # Check database first if available
+        r = _get_redis_dedupe()
+        if r is not None:
+            try:
+                if r.exists(f"dedupe:msg:{message_id}"):
+                    logging.info(f"[DEDUPE] Duplicate message detected (redis): {message_id}")
+                    return True
+            except Exception as exc:
+                logging.warning(f"[DEDUPE] Redis exists check failed: {exc}")
+
+        if self.memory_cache.has(message_id):
+            logging.info(f"[DEDUPE] Duplicate message detected (cache): {message_id}")
+            return True
+
         if self.use_database and ProcessedMessage is not None:
             try:
                 session = get_db_session()
@@ -165,13 +284,7 @@ class MessageDeduplicationService:
                 finally:
                     session.close()
             except Exception as e:
-                logging.warning(f"[DEDUPE] Database check failed, falling back to memory cache: {e}")
-                # Fall through to memory cache
-
-        # Check memory cache
-        if self.memory_cache.has(message_id):
-            logging.info(f"[DEDUPE] Duplicate message detected (cache): {message_id}")
-            return True
+                logging.warning(f"[DEDUPE] Database check failed: {e}")
 
         return False
 

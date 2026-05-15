@@ -3,6 +3,8 @@ import json
 import os
 import time
 
+import threading
+
 from flask import Blueprint, request, jsonify, current_app
 
 from .decorators.security import signature_required, twilio_signature_required, admin_api_key_required
@@ -18,8 +20,10 @@ from .utils.whatsapp_utils import (
 from .database.business_service import business_service
 from .database.conversation_service import conversation_service
 from .database.booking_service import booking_service
+from .services.debounce import debounce_message
 from .services.message_deduplication import message_deduplication_service
-from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message, send_typing_indicator
+from .services.turn_lock import wa_id_turn_lock
+from .utils.twilio_utils import normalize_twilio_to_meta, is_valid_twilio_message, send_typing_indicator, resolve_twilio_business_context
 
 webhook_blueprint = Blueprint("webhook", __name__)
 
@@ -162,50 +166,73 @@ def handle_twilio_message():
 
     message_sid = form_data.get("MessageSid")
     if message_sid:
-        if message_deduplication_service.is_duplicate(message_sid):
+        # Single-round-trip Redis claim: atomic check+set. The previous
+        # check-then-set path hit Supabase twice (~1–2 s total) before
+        # debounce_message ran, eating most of the 3 s quiet window.
+        if not message_deduplication_service.claim(message_sid):
             logging.info(f"[DEDUPE] Duplicate Twilio message, skipping: {message_sid}")
             return (
                 '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200,
                 {"Content-Type": "text/xml"},
             )
-        message_deduplication_service.mark_as_processed(message_sid)
-        
-        # [NEW] Send typing indicator immediately to show user agent is processing
-        send_typing_indicator(
-            message_sid=message_sid,
-            twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID"),
-            twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN")
-        )
 
-    # Look up business by receiving number (To)
+        # Fire typing indicator in background — don't block the webhook.
+        # The HTTP call to Twilio takes ~5s; blocking on it delays buffering
+        # and breaks the debounce coalescing window.
+        threading.Thread(
+            target=send_typing_indicator,
+            kwargs={
+                "message_sid": message_sid,
+                "twilio_account_sid": os.getenv("TWILIO_ACCOUNT_SID"),
+                "twilio_auth_token": os.getenv("TWILIO_AUTH_TOKEN"),
+            },
+            daemon=True,
+        ).start()
+
+    # ── Debounce BEFORE business lookup ──────────────────────────────
+    # The business lookup takes ~3–5 s (cold SQLAlchemy session + a
+    # full-table scan of whatsapp_numbers). Doing it here would eat the
+    # entire 3 s debounce window before the first message is even
+    # buffered in Redis. Instead we key the buffer by (To, phone) —
+    # each business owns a unique Twilio number, so this preserves
+    # tenant isolation — and resolve the business context inside the
+    # flusher after the quiet window expires.
     to_number = form_data.get("To", "")
-    business_context = business_service.get_business_context_by_phone_number(to_number)
-    if not business_context:
-        twilio_number = current_app.config.get("TWILIO_WHATSAPP_NUMBER") or os.getenv("TWILIO_WHATSAPP_NUMBER")
-        if twilio_number and not str(twilio_number).startswith("whatsapp:"):
-            twilio_number = f"whatsapp:{twilio_number}"
-        business_context = {
-            "provider": "twilio",
-            "twilio_phone_number": twilio_number or "",
-            "business": {"name": "Twilio"},
-            "business_id": "twilio",
-        }
-    else:
-        # Message came via Twilio webhook - always send reply via Twilio (not Meta)
-        twilio_from = to_number if str(to_number).startswith("whatsapp:") else f"whatsapp:{to_number}"
-        business_context["provider"] = "twilio"
-        business_context["twilio_phone_number"] = twilio_from
-        business_context.pop("phone_number_id", None)  # avoid Meta API
-
     normalized_body = normalize_twilio_to_meta(form_data)
+    sender_wa_id = (form_data.get("From") or "").replace("whatsapp:", "").strip()
     logging.warning("[DEBUG] Valid Twilio message, processing...")
 
     try:
+        flask_app = current_app._get_current_object()
+        buffered = debounce_message(sender_wa_id, to_number, normalized_body, flask_app)
+        if buffered:
+            # Return immediately — flusher handles the LLM call in background.
+            logging.warning(
+                f"[TIMING] handle_twilio_message (debounced) total took {time.time() - webhook_start:.3f}s"
+            )
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200,
+                {"Content-Type": "text/xml"},
+            )
+    except Exception as e:
+        logging.error(f"[DEBOUNCE] Unexpected error, falling back to sync: {e}")
+
+    # ── Sync fallback (Redis unavailable) ────────────────────────────
+    # Only now do we pay for the business lookup. Per-wa_id turn
+    # serialization — see app/services/turn_lock.py.
+    try:
+        business_context = resolve_twilio_business_context(to_number)
         processing_start = time.time()
-        process_whatsapp_message(normalized_body, business_context=business_context)
+        with wa_id_turn_lock(sender_wa_id) as lock_result:
+            process_whatsapp_message(
+                normalized_body,
+                business_context=business_context,
+                stale_turn=lock_result.waited,
+            )
         logging.warning(
-            f"[TIMING] process_whatsapp_message (Twilio) took {time.time() - processing_start:.3f}s"
+            f"[TIMING] process_whatsapp_message (Twilio sync) took {time.time() - processing_start:.3f}s"
         )
     except Exception as e:
         logging.error(f"[TWILIO] Error processing message: {e}")
@@ -321,6 +348,7 @@ def admin_send_message():
             attachments=[{"type": "audio", "url": media_url}],
             business_id=business_id,
             whatsapp_number_id=business_context.get("whatsapp_number_id"),
+            agent_type="operator",
         )
         return jsonify({"ok": True}), 200
 
@@ -335,9 +363,64 @@ def admin_send_message():
         role="assistant",
         business_id=business_id,
         whatsapp_number_id=business_context.get("whatsapp_number_id"),
+        agent_type="operator",
     )
 
     return jsonify({"ok": True}), 200
+
+
+@webhook_blueprint.route("/admin/products/<product_id>/regenerate-metadata", methods=["POST"])
+@admin_api_key_required
+def admin_regenerate_product_metadata(product_id):
+    """
+    Regenerate tags + embedding for a single product. Called by the admin
+    console after a create/update so search stays in sync with the catalog.
+
+    Request body (optional):
+        { "force": bool, "tags_only": bool, "embeddings_only": bool }
+    """
+    import uuid as _uuid
+
+    from .database.models import Product, get_db_session
+    from .services.product_metadata import regenerate_for_product
+
+    if not os.getenv("OPENAI_API_KEY"):
+        return jsonify({"status": "error", "message": "OPENAI_API_KEY not configured"}), 503
+
+    body = request.get_json(silent=True) or {}
+    force = bool(body.get("force", True))
+    tags_only = bool(body.get("tags_only", False))
+    embeddings_only = bool(body.get("embeddings_only", False))
+
+    try:
+        pid = _uuid.UUID(product_id)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid product_id"}), 400
+
+    db_session = get_db_session()
+    try:
+        product = db_session.query(Product).filter(Product.id == pid).first()
+        if not product:
+            return jsonify({"status": "error", "message": "Product not found"}), 404
+
+        result = regenerate_for_product(
+            db_session,
+            product,
+            force=force,
+            tags_only=tags_only,
+            embeddings_only=embeddings_only,
+        )
+        db_session.commit()
+        return jsonify({"ok": True, "result": result}), 200
+    except Exception as e:
+        logging.exception("[ADMIN REGEN] failed for product %s: %s", product_id, e)
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": "Regeneration failed"}), 500
+    finally:
+        db_session.close()
 
 
 @webhook_blueprint.route("/admin/upload-media", methods=["POST"])

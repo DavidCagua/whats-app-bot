@@ -6,6 +6,7 @@ import { BusinessSettingsForm } from "./components/business-settings-form"
 import { DeleteBusinessButton } from "./components/delete-business-button"
 import { WhatsAppSettings } from "./components/whatsapp-settings"
 import { AgentsSettingsForm } from "./components/agents-settings-form"
+import { ModulesSettingsForm } from "./components/modules-settings-form"
 import { SettingsTabs, type SettingsTab } from "./components/settings-tabs"
 import { getBusinessSettings } from "@/lib/actions/business-settings"
 import { getBusinessAgents } from "@/lib/actions/business-agents"
@@ -51,7 +52,10 @@ export default async function BusinessSettingsPage({
   const canEdit = canEditBusiness(session, id)
   const canDelete = isSuperAdmin(session)
 
-  const validTabs: SettingsTab[] = ["general", "integrations", "agents"]
+  const isAdmin = isSuperAdmin(session)
+  const validTabs: SettingsTab[] = isAdmin
+    ? ["general", "integrations", "agents", "modules"]
+    : ["general", "integrations", "agents"]
   const defaultTab: SettingsTab =
     (tab as SettingsTab) && validTabs.includes(tab as SettingsTab)
       ? (tab as SettingsTab)
@@ -93,6 +97,14 @@ export default async function BusinessSettingsPage({
             initialAgents={agents}
             readOnly={!canEdit}
           />
+        }
+        modulesContent={
+          isAdmin ? (
+            <ModulesSettingsForm
+              businessId={id}
+              initialEnabledModules={business.enabled_modules}
+            />
+          ) : undefined
         }
       />
     </div>

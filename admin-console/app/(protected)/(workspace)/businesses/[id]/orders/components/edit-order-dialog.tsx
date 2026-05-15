@@ -1,0 +1,517 @@
+"use client"
+
+import { useEffect, useMemo, useState, useTransition } from "react"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Plus, Trash2 } from "lucide-react"
+import { toast } from "sonner"
+import { useRouter } from "next/navigation"
+import { updateOrder } from "@/lib/actions/orders-update"
+import { getOrderForEdit } from "@/lib/orders-edit-data"
+import { formatDisplayNumber } from "@/lib/utils"
+import type {
+  CustomerOption,
+  ProductOption,
+} from "@/lib/orders-create-data"
+
+const NEW_CUSTOMER = "__new__"
+const NO_CUSTOMER = "__none__"
+
+type ItemDraft = {
+  productId: string
+  quantity: number
+  unitPrice: number
+  notes: string
+}
+
+const formatCOP = (n: number) =>
+  new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    minimumFractionDigits: 0,
+  }).format(n)
+
+const emptyItem = (): ItemDraft => ({
+  productId: "",
+  quantity: 1,
+  unitPrice: 0,
+  notes: "",
+})
+
+export function EditOrderDialog({
+  orderId,
+  open,
+  onOpenChange,
+  products,
+  customers,
+}: {
+  orderId: string | null
+  open: boolean
+  onOpenChange: (next: boolean) => void
+  products: ProductOption[]
+  customers: CustomerOption[]
+}) {
+  const router = useRouter()
+  const [isPending, startTransition] = useTransition()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [hasPromos, setHasPromos] = useState(false)
+
+  const [customerChoice, setCustomerChoice] = useState<string>(NO_CUSTOMER)
+  const [newWhatsappId, setNewWhatsappId] = useState("")
+  const [newCustomerName, setNewCustomerName] = useState("")
+  const [items, setItems] = useState<ItemDraft[]>([emptyItem()])
+  const [displayNumber, setDisplayNumber] = useState<number | null>(null)
+  const [fulfillmentType, setFulfillmentType] = useState<"delivery" | "pickup">(
+    "delivery"
+  )
+  const [deliveryAddress, setDeliveryAddress] = useState("")
+  const [contactPhone, setContactPhone] = useState("")
+  const [paymentMethod, setPaymentMethod] = useState("")
+  const [deliveryFee, setDeliveryFee] = useState(0)
+  const [notes, setNotes] = useState("")
+  const isPickup = fulfillmentType === "pickup"
+
+  // Fetch full order details when the dialog opens with a new orderId.
+  // We fetch on open (not at mount of the table) so the dialog stays
+  // closed-cheap and we always see fresh data after a status change.
+  useEffect(() => {
+    if (!open || !orderId) return
+    let cancelled = false
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional reset
+       on open before the async fetch resolves */
+    setLoading(true)
+    setError(null)
+    /* eslint-enable react-hooks/set-state-in-effect */
+    getOrderForEdit(orderId).then((result) => {
+      if (cancelled) return
+      setLoading(false)
+      if (!result.success) {
+        setError(result.error)
+        return
+      }
+      const d = result.data
+      setHasPromos(d.hasPromotions)
+      if (d.customer.customerId !== null) {
+        setCustomerChoice(String(d.customer.customerId))
+      } else {
+        setCustomerChoice(NO_CUSTOMER)
+      }
+      setNewWhatsappId("")
+      setNewCustomerName("")
+      setItems(
+        d.items.length
+          ? d.items.map((i) => ({
+              productId: i.productId,
+              quantity: i.quantity,
+              unitPrice: i.unitPrice,
+              notes: i.notes ?? "",
+            }))
+          : [emptyItem()]
+      )
+      setDisplayNumber(d.displayNumber)
+      setFulfillmentType(d.fulfillmentType)
+      setDeliveryAddress(d.deliveryAddress ?? "")
+      setContactPhone(d.contactPhone ?? "")
+      setPaymentMethod(d.paymentMethod ?? "")
+      setDeliveryFee(0)
+      setNotes(d.notes ?? "")
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [open, orderId])
+
+  const productById = useMemo(
+    () => new Map(products.map((p) => [p.id, p])),
+    [products]
+  )
+
+  const subtotal = useMemo(
+    () => items.reduce((acc, i) => acc + i.quantity * i.unitPrice, 0),
+    [items]
+  )
+  const effectiveFee = isPickup ? 0 : Number.isFinite(deliveryFee) ? deliveryFee : 0
+  const total = subtotal + effectiveFee
+
+  function updateItem(idx: number, patch: Partial<ItemDraft>) {
+    setItems((prev) =>
+      prev.map((it, i) => (i === idx ? { ...it, ...patch } : it))
+    )
+  }
+
+  function onSelectProduct(idx: number, productId: string) {
+    const p = productById.get(productId)
+    updateItem(idx, {
+      productId,
+      unitPrice: p ? p.price : items[idx]?.unitPrice ?? 0,
+    })
+  }
+
+  const canSubmit =
+    !loading &&
+    !error &&
+    items.length > 0 &&
+    items.every((i) => i.productId && i.quantity > 0 && i.unitPrice >= 0) &&
+    (customerChoice !== NEW_CUSTOMER ||
+      (newWhatsappId.trim() && newCustomerName.trim()))
+
+  function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (!canSubmit || !orderId) return
+
+    const customer =
+      customerChoice === NO_CUSTOMER
+        ? null
+        : customerChoice === NEW_CUSTOMER
+          ? { whatsappId: newWhatsappId.trim(), name: newCustomerName.trim() }
+          : { existingCustomerId: Number(customerChoice) }
+
+    startTransition(async () => {
+      const result = await updateOrder({
+        orderId,
+        customer,
+        items: items.map((i) => ({
+          productId: i.productId,
+          quantity: i.quantity,
+          unitPrice: i.unitPrice,
+          notes: i.notes,
+        })),
+        fulfillmentType,
+        deliveryAddress: isPickup ? null : deliveryAddress,
+        contactPhone,
+        paymentMethod: isPickup ? null : paymentMethod,
+        deliveryFee: isPickup ? 0 : deliveryFee,
+        notes,
+      })
+      if (!result.success) {
+        toast.error(result.error)
+        return
+      }
+      toast.success("Pedido actualizado")
+      onOpenChange(false)
+      router.refresh()
+    })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>
+            Editar pedido{" "}
+            {displayNumber !== null && (
+              <span className="font-mono text-muted-foreground">
+                {formatDisplayNumber(displayNumber)}
+              </span>
+            )}
+          </DialogTitle>
+          <DialogDescription>
+            Cambia ítems, cliente o datos de entrega. Los precios son los
+            que escribas — sin promociones automáticas.
+          </DialogDescription>
+        </DialogHeader>
+
+        {loading && (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            Cargando pedido…
+          </div>
+        )}
+
+        {error && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+
+        {!loading && !error && (
+          <form onSubmit={onSubmit} className="space-y-4">
+            {hasPromos && (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+                Este pedido tiene promociones del bot. Al guardar se quitarán
+                las promociones — los productos y precios se mantienen tal
+                como están. Ajústalos si es necesario.
+              </div>
+            )}
+
+            {/* Customer */}
+            <section className="space-y-2">
+              <Label htmlFor="customer">Cliente</Label>
+              <Select value={customerChoice} onValueChange={setCustomerChoice}>
+                <SelectTrigger id="customer">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_CUSTOMER}>Sin cliente</SelectItem>
+                  <SelectItem value={NEW_CUSTOMER}>Cliente nuevo…</SelectItem>
+                  {customers.map((c) => (
+                    <SelectItem key={c.id} value={String(c.id)}>
+                      {c.name} · {c.whatsapp_id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {customerChoice === NEW_CUSTOMER && (
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="newWa" className="text-xs">
+                      WhatsApp
+                    </Label>
+                    <Input
+                      id="newWa"
+                      inputMode="tel"
+                      placeholder="+573001234567"
+                      value={newWhatsappId}
+                      onChange={(e) => setNewWhatsappId(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="newName" className="text-xs">
+                      Nombre
+                    </Label>
+                    <Input
+                      id="newName"
+                      value={newCustomerName}
+                      onChange={(e) => setNewCustomerName(e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* Items */}
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label>Ítems</Label>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setItems((prev) => [...prev, emptyItem()])}
+                  className="gap-1"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Agregar ítem
+                </Button>
+              </div>
+
+              <div className="space-y-2">
+                {items.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="grid grid-cols-12 gap-2 rounded-md border p-2"
+                  >
+                    <div className="col-span-12 sm:col-span-5">
+                      <Select
+                        value={item.productId}
+                        onValueChange={(v) => onSelectProduct(idx, v)}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Producto…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {products.map((p) => (
+                            <SelectItem key={p.id} value={p.id}>
+                              {p.name}
+                              {p.category ? ` · ${p.category}` : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="col-span-3 sm:col-span-2">
+                      <Input
+                        type="number"
+                        min={1}
+                        inputMode="numeric"
+                        value={item.quantity}
+                        onChange={(e) =>
+                          updateItem(idx, {
+                            quantity: Math.max(1, Number(e.target.value) || 0),
+                          })
+                        }
+                        aria-label="Cantidad"
+                      />
+                    </div>
+                    <div className="col-span-6 sm:col-span-3">
+                      <Input
+                        type="number"
+                        min={0}
+                        inputMode="decimal"
+                        value={item.unitPrice}
+                        onChange={(e) =>
+                          updateItem(idx, {
+                            unitPrice: Math.max(0, Number(e.target.value) || 0),
+                          })
+                        }
+                        aria-label="Precio unitario"
+                      />
+                    </div>
+                    <div className="col-span-12 sm:col-span-2 flex items-center justify-between gap-2 sm:justify-end">
+                      <span className="text-sm tabular-nums sm:hidden">
+                        {formatCOP(item.quantity * item.unitPrice)}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() =>
+                          setItems((prev) =>
+                            prev.length === 1
+                              ? [emptyItem()]
+                              : prev.filter((_, i) => i !== idx)
+                          )
+                        }
+                        aria-label="Eliminar ítem"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <div className="col-span-12">
+                      <Input
+                        placeholder="Notas del ítem (opcional)"
+                        value={item.notes}
+                        onChange={(e) =>
+                          updateItem(idx, { notes: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="col-span-12 hidden sm:flex justify-end text-xs text-muted-foreground tabular-nums">
+                      {formatCOP(item.quantity * item.unitPrice)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Delivery + payment */}
+            <section className="grid grid-cols-2 gap-2">
+              <div className="space-y-1.5 col-span-2">
+                <Label htmlFor="fulfillment">Modo</Label>
+                <Select
+                  value={fulfillmentType}
+                  onValueChange={(v) =>
+                    setFulfillmentType(v as "delivery" | "pickup")
+                  }
+                >
+                  <SelectTrigger id="fulfillment">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="delivery">🛵 Domicilio</SelectItem>
+                    <SelectItem value="pickup">🏃 Recoger en local</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {!isPickup && (
+                <div className="space-y-1.5 col-span-2">
+                  <Label htmlFor="address">Dirección</Label>
+                  <Textarea
+                    id="address"
+                    rows={2}
+                    value={deliveryAddress}
+                    onChange={(e) => setDeliveryAddress(e.target.value)}
+                  />
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <Label htmlFor="phone">Teléfono</Label>
+                <Input
+                  id="phone"
+                  inputMode="tel"
+                  value={contactPhone}
+                  onChange={(e) => setContactPhone(e.target.value)}
+                />
+              </div>
+              {!isPickup && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="payment">Método de pago</Label>
+                  <Input
+                    id="payment"
+                    placeholder="Nequi, efectivo, …"
+                    value={paymentMethod}
+                    onChange={(e) => setPaymentMethod(e.target.value)}
+                  />
+                </div>
+              )}
+              {!isPickup && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="fee">Domicilio</Label>
+                  <Input
+                    id="fee"
+                    type="number"
+                    min={0}
+                    inputMode="decimal"
+                    value={deliveryFee}
+                    onChange={(e) =>
+                      setDeliveryFee(Math.max(0, Number(e.target.value) || 0))
+                    }
+                  />
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <Label htmlFor="orderNotes">Notas del pedido</Label>
+                <Input
+                  id="orderNotes"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                />
+              </div>
+            </section>
+
+            {/* Totals */}
+            <div className="rounded-md border bg-muted/40 p-3 text-sm space-y-1">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Subtotal</span>
+                <span className="tabular-nums">{formatCOP(subtotal)}</span>
+              </div>
+              {!isPickup && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Domicilio</span>
+                  <span className="tabular-nums">{formatCOP(deliveryFee)}</span>
+                </div>
+              )}
+              <div className="flex justify-between font-medium border-t pt-1">
+                <span>Total</span>
+                <span className="tabular-nums">{formatCOP(total)}</span>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                disabled={isPending}
+              >
+                Cancelar
+              </Button>
+              <Button type="submit" disabled={!canSubmit || isPending}>
+                {isPending ? "Guardando…" : "Guardar"}
+              </Button>
+            </DialogFooter>
+          </form>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma"
 import { auth } from "@/lib/auth"
 import { canAccessBusiness } from "@/lib/permissions"
+import { redirectIfModuleDisabled } from "@/lib/modules"
 import { notFound, redirect } from "next/navigation"
 import { ProductsManager } from "./components/products-manager"
 
@@ -15,6 +16,7 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
   if (!canAccessBusiness(session, id)) {
     redirect("/businesses")
   }
+  await redirectIfModuleDisabled(id, "products")
 
   const business = await prisma.businesses.findUnique({ where: { id } })
   if (!business) notFound()
@@ -33,6 +35,7 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
     category: p.category ?? null,
     price: Number(p.price.toString()),
     is_active: p.is_active ?? true,
+    promo_only: p.promo_only ?? false,
   }))
 
   return (

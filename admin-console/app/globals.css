@@ -123,6 +123,33 @@
   }
 }
 
+/* New-order arrival animation. Green flash that fades to transparent over
+   5 seconds, drawing the eye to the row that just arrived. */
+@keyframes order-row-pulse {
+  0% {
+    background-color: rgb(220 252 231); /* green-100 */
+  }
+  60% {
+    background-color: rgb(220 252 231 / 0.6);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.order-row-pulse {
+  animation: order-row-pulse 5s ease-out forwards;
+}
+
+/* Pending orders carry a subtle amber tint so they keep signalling
+   "needs attention" after the arrival pulse fades. The tint clears as
+   soon as the employee transitions the order out of pending. */
+.order-row-pending {
+  background-color: rgb(254 243 199 / 0.5); /* amber-100 @ 50% */
+}
+.order-row-pending:hover {
+  background-color: rgb(254 243 199 / 0.7);
+}
+
 /* ── React Big Calendar overrides ─────────────────────────────────────────── */
 .rbc-wrapper .rbc-calendar {
   font-family: inherit;

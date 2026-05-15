@@ -61,13 +61,38 @@ class SalesAgent(BaseAgent):
     agent_type = "sales"
 
     def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
+        self._llm = None
+        self._llm_with_tools = None
+        self._intent_classifier = None
+        logging.info("[SALES_AGENT] Initialized with sales tools (LLM lazy)")
+
+    @property
+    def llm(self) -> ChatOpenAI:
         # GPT-4o for vision support (ad images) and better sales reasoning
-        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.7, api_key=api_key)
-        self.llm_with_tools = self.llm.bind_tools(sales_tools)
+        if self._llm is None:
+            self._llm = ChatOpenAI(
+                model="gpt-4o",
+                temperature=0.7,
+                api_key=os.getenv("OPENAI_API_KEY"),
+            )
+        return self._llm
+
+    @property
+    def llm_with_tools(self):
+        if self._llm_with_tools is None:
+            self._llm_with_tools = self.llm.bind_tools(sales_tools)
+        return self._llm_with_tools
+
+    @property
+    def intent_classifier(self) -> ChatOpenAI:
         # Lightweight classifier: fast and cheap
-        self.intent_classifier = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
-        logging.info("[SALES_AGENT] Initialized with sales tools")
+        if self._intent_classifier is None:
+            self._intent_classifier = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0,
+                api_key=os.getenv("OPENAI_API_KEY"),
+            )
+        return self._intent_classifier
 
     def _classify_intent(self, message: str, business_name: str) -> str:
         """
@@ -218,6 +243,7 @@ class SalesAgent(BaseAgent):
         business_context: Optional[Dict],
         conversation_history: List[Dict],
         message_id: Optional[str] = None,
+        **kwargs,
     ) -> AgentOutput:
         """Run sales agent: intent filter → LLM + tool loop. Return AgentOutput."""
         run_id = str(uuid.uuid4())

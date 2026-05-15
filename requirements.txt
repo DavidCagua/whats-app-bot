@@ -1,4 +1,6 @@
 flask
+redis
+fakeredis[lua]>=2.20  # In-process Redis for integration tests; [lua] enables EVAL for our LPUSH/RPUSH+SET-NX scripts.
 gunicorn
 python-dotenv
 openai
@@ -6,6 +8,7 @@ aiohttp
 requests
 langchain
 langchain-openai
+langsmith
 pytz
 sqlalchemy
 psycopg2-binary
@@ -14,3 +17,9 @@ twilio
 cryptography
 supabase
 assemblyai
+snowballstemmer
+pgvector
+pytest
+# Agent trajectory evaluators for tests/evals/
+# https://docs.langchain.com/oss/python/langchain/test/evals
+agentevals

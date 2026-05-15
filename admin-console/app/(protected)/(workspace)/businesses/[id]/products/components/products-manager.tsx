@@ -1,12 +1,21 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { Plus, Pencil, ToggleLeft, ToggleRight } from "lucide-react"
+import { Plus, Pencil, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
+import { Switch } from "@/components/ui/switch"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Dialog,
   DialogContent,
@@ -46,15 +55,45 @@ export function ProductsManager({
   const [sku, setSku] = useState("")
   const [price, setPrice] = useState("")
   const [category, setCategory] = useState("")
+  const [promoOnly, setPromoOnly] = useState(false)
+  const [statusTab, setStatusTab] = useState<"active" | "inactive">("active")
+  const [searchQuery, setSearchQuery] = useState("")
+  const [categoryFilter, setCategoryFilter] = useState<string>("all")
 
-  const sorted = useMemo(
-    () =>
-      [...products].sort((a, b) => {
-        if (a.is_active !== b.is_active) return a.is_active ? -1 : 1
-        return a.name.localeCompare(b.name)
-      }),
+  const categories = useMemo(() => {
+    const set = new Set<string>()
+    products.forEach((p) => {
+      const c = p.category?.trim()
+      if (c) set.add(c)
+    })
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [products])
+
+  const counts = useMemo(
+    () => ({
+      active: products.filter((p) => p.is_active).length,
+      inactive: products.filter((p) => !p.is_active).length,
+    }),
     [products]
   )
+
+  const filtered = useMemo(() => {
+    const wantActive = statusTab === "active"
+    const q = searchQuery.trim().toLowerCase()
+    return products
+      .filter((p) => p.is_active === wantActive)
+      .filter((p) =>
+        categoryFilter === "all" ? true : (p.category ?? "") === categoryFilter
+      )
+      .filter((p) => {
+        if (!q) return true
+        return (
+          p.name.toLowerCase().includes(q) ||
+          (p.category ?? "").toLowerCase().includes(q)
+        )
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [products, statusTab, searchQuery, categoryFilter])
 
   function openCreate() {
     setEditor({ mode: "create" })
@@ -63,6 +102,7 @@ export function ProductsManager({
     setSku("")
     setPrice("")
     setCategory("")
+    setPromoOnly(false)
   }
 
   function openEdit(product: ProductRow) {
@@ -72,6 +112,7 @@ export function ProductsManager({
     setSku(product.sku ?? "")
     setPrice(String(product.price))
     setCategory(product.category ?? "")
+    setPromoOnly(product.promo_only)
   }
 
   async function handleSave() {
@@ -94,6 +135,7 @@ export function ProductsManager({
           sku: sku || null,
           price: parsedPrice,
           category: category || null,
+          promo_only: promoOnly,
         })
         if (!result.success) throw new Error(result.error)
         setProducts((prev) => [...prev, result.product])
@@ -105,6 +147,7 @@ export function ProductsManager({
           sku: sku || null,
           price: parsedPrice,
           category: category || null,
+          promo_only: promoOnly,
         })
         if (!result.success) throw new Error(result.error)
         const updated = result.product
@@ -137,11 +180,55 @@ export function ProductsManager({
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        <Button onClick={openCreate}>
-          <Plus className="h-4 w-4 mr-2" />
-          Nuevo producto
-        </Button>
+      <Tabs
+        value={statusTab}
+        onValueChange={(v) => setStatusTab(v as "active" | "inactive")}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <TabsList>
+            <TabsTrigger value="active">
+              Activos
+              <Badge variant="secondary" className="ml-2">
+                {counts.active}
+              </Badge>
+            </TabsTrigger>
+            <TabsTrigger value="inactive">
+              Inactivos
+              <Badge variant="secondary" className="ml-2">
+                {counts.inactive}
+              </Badge>
+            </TabsTrigger>
+          </TabsList>
+          <Button onClick={openCreate}>
+            <Plus className="h-4 w-4 mr-2" />
+            Nuevo producto
+          </Button>
+        </div>
+      </Tabs>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[220px]">
+          <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Buscar por nombre o categoría"
+            className="pl-8"
+          />
+        </div>
+        <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+          <SelectTrigger className="w-[200px]">
+            <SelectValue placeholder="Categoría" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Todas las categorías</SelectItem>
+            {categories.map((c) => (
+              <SelectItem key={c} value={c}>
+                {c}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="rounded-lg border overflow-hidden">
@@ -152,21 +239,32 @@ export function ProductsManager({
               <th className="px-4 py-3 text-left text-sm font-medium">Categoría</th>
               <th className="px-4 py-3 text-left text-sm font-medium">SKU</th>
               <th className="px-4 py-3 text-left text-sm font-medium">Precio</th>
-              <th className="px-4 py-3 text-left text-sm font-medium">Estado</th>
+              <th className="px-4 py-3 text-left text-sm font-medium">Activo</th>
               <th className="px-4 py-3 text-right text-sm font-medium">Acciones</th>
             </tr>
           </thead>
           <tbody className="divide-y">
-            {sorted.length === 0 ? (
+            {filtered.length === 0 ? (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
-                  Aún no hay productos. Crea el primero para tu catálogo.
+                  {products.length === 0
+                    ? "Aún no hay productos. Crea el primero para tu catálogo."
+                    : "No hay productos que coincidan con los filtros."}
                 </td>
               </tr>
             ) : (
-              sorted.map((product) => (
+              filtered.map((product) => (
                 <tr key={product.id} className="hover:bg-muted/30">
-                  <td className="px-4 py-3 font-medium">{product.name}</td>
+                  <td className="px-4 py-3 font-medium">
+                    <div className="flex items-center gap-2">
+                      <span>{product.name}</span>
+                      {product.promo_only ? (
+                        <Badge variant="outline" className="text-xs font-normal">
+                          Solo en promos
+                        </Badge>
+                      ) : null}
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-sm text-muted-foreground">
                     {product.category || "—"}
                   </td>
@@ -175,27 +273,20 @@ export function ProductsManager({
                   </td>
                   <td className="px-4 py-3 text-sm">{formatPrice(product.price)}</td>
                   <td className="px-4 py-3">
-                    {product.is_active ? (
-                      <Badge variant="default">Activo</Badge>
-                    ) : (
-                      <Badge variant="secondary">Inactivo</Badge>
-                    )}
+                    <Switch
+                      checked={product.is_active}
+                      onCheckedChange={() => void handleToggle(product)}
+                      aria-label={
+                        product.is_active
+                          ? "Desactivar producto"
+                          : "Activar producto"
+                      }
+                    />
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex justify-end gap-2">
                       <Button variant="ghost" size="sm" onClick={() => openEdit(product)}>
                         <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => void handleToggle(product)}
-                      >
-                        {product.is_active ? (
-                          <ToggleRight className="h-4 w-4" />
-                        ) : (
-                          <ToggleLeft className="h-4 w-4" />
-                        )}
                       </Button>
                     </div>
                   </td>
@@ -261,14 +352,37 @@ export function ProductsManager({
                 placeholder="0"
               />
             </div>
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="space-y-0.5 pr-3">
+                <Label htmlFor="promo-only-switch" className="text-sm">
+                  Solo en promociones
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  El bot no lo ofrecerá individualmente. Disponible solo cuando
+                  forme parte de una promo o combo.
+                </p>
+              </div>
+              <Switch
+                id="promo-only-switch"
+                checked={promoOnly}
+                onCheckedChange={setPromoOnly}
+                aria-label="Solo en promociones"
+              />
+            </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditor({ mode: "closed" })}>
-              Cancelar
-            </Button>
-            <Button onClick={() => void handleSave()} disabled={saving}>
-              {saving ? "Guardando..." : "Guardar"}
-            </Button>
+          <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-muted-foreground sm:mr-auto">
+              Al guardar regeneramos las etiquetas de búsqueda para que el bot
+              encuentre el producto. Puede tardar unos segundos.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setEditor({ mode: "closed" })}>
+                Cancelar
+              </Button>
+              <Button onClick={() => void handleSave()} disabled={saving}>
+                {saving ? "Guardando y regenerando búsqueda..." : "Guardar"}
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

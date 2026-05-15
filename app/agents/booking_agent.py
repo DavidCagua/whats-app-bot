@@ -38,14 +38,28 @@ class BookingAgent(BaseAgent):
     agent_type = "booking"
 
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0.7,
-            api_key=os.getenv("OPENAI_API_KEY"),
-        )
-        # Default binding; overridden per-call when require_confirmation is set
-        self.llm_with_tools = self.llm.bind_tools(calendar_tools)
-        logging.info("[BOOKING_AGENT] Initialized with booking tools")
+        # Lazy: constructed on first property access so importing this
+        # module doesn't require OPENAI_API_KEY. Alembic, tests and
+        # scripts can load app.* without tripping LLM init.
+        self._llm = None
+        self._llm_with_tools = None
+        logging.info("[BOOKING_AGENT] Initialized with booking tools (LLM lazy)")
+
+    @property
+    def llm(self) -> ChatOpenAI:
+        if self._llm is None:
+            self._llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0.7,
+                api_key=os.getenv("OPENAI_API_KEY"),
+            )
+        return self._llm
+
+    @property
+    def llm_with_tools(self):
+        if self._llm_with_tools is None:
+            self._llm_with_tools = self.llm.bind_tools(calendar_tools)
+        return self._llm_with_tools
 
     def get_system_prompt(
         self,
@@ -199,6 +213,7 @@ class BookingAgent(BaseAgent):
         conversation_history: List[Dict],
         message_id: Optional[str] = None,
         session: Optional[Dict] = None,
+        **kwargs,
     ) -> AgentOutput:
         """Run booking agent. Returns AgentOutput."""
         run_id = str(uuid.uuid4())

@@ -2,7 +2,7 @@
 
 import { useState, useRef } from "react"
 import dynamic from "next/dynamic"
-import { Booking, BookingsAccess, AvailabilityRule } from "@/lib/bookings-queries"
+import { Booking, BookingsAccess } from "@/lib/bookings-queries"
 import { rescheduleBooking } from "@/lib/actions/bookings"
 import type { StaffMember } from "./bookings-calendar"
 
@@ -11,17 +11,6 @@ const BookingsCalendar = dynamic(
   { ssr: false }
 )
 import { BookingModal } from "./booking-modal"
-import { AvailabilitySettings } from "./availability-settings"
-import { Button } from "@/components/ui/button"
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { Settings } from "lucide-react"
 
 interface InitialFilters {
   business?: string
@@ -32,7 +21,6 @@ interface InitialFilters {
 interface BookingsViewProps {
   bookings: Booking[]
   access: BookingsAccess
-  availabilityRules: AvailabilityRule[]
   initialFilters: InitialFilters
   initialWeekStart: string
   initialStaff: StaffMember[]
@@ -49,7 +37,6 @@ export type ModalState =
 export function BookingsView({
   bookings: initialBookings,
   access,
-  availabilityRules: initialRules,
   initialFilters,
   initialWeekStart,
   initialStaff,
@@ -57,11 +44,8 @@ export function BookingsView({
   fixedBusinessId,
 }: BookingsViewProps) {
   const [bookings, setBookings] = useState<Booking[]>(initialBookings)
-  const [availabilityRules, setAvailabilityRules] = useState<AvailabilityRule[]>(initialRules)
   const staffMembers = initialStaff
   const [modalState, setModalState] = useState<ModalState>({ mode: "closed" })
-  const [availabilityOpen, setAvailabilityOpen] = useState(false)
-  const isMobile = useIsMobile()
   const [businessFilter, setBusinessFilter] = useState(
     fixedBusinessId || initialFilters.business || ""
   )
@@ -109,8 +93,6 @@ export function BookingsView({
       if (err instanceof Error && err.name === "AbortError") return
     }
   }
-
-  const availabilityBusinessId = fixedBusinessId || access.businesses[0]?.id || ""
 
   /** Match server /bookings page: local calendar week (same as setDate + setHours). */
   function getWeekEnd(start: Date): Date {
@@ -191,43 +173,6 @@ export function BookingsView({
 
   return (
     <div className="space-y-4">
-      {access.canManageAvailability && availabilityBusinessId && (
-        <div className="flex justify-end">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setAvailabilityOpen(true)}
-          >
-            <Settings className="h-4 w-4 mr-2" />
-            Disponibilidad
-          </Button>
-        </div>
-      )}
-
-      {access.canManageAvailability && (
-        <Sheet open={availabilityOpen} onOpenChange={setAvailabilityOpen}>
-          <SheetContent
-            side={isMobile ? "bottom" : "right"}
-            className="flex min-h-0 w-full flex-col gap-0 overflow-hidden p-0 max-sm:max-h-[90dvh] max-sm:rounded-t-xl sm:h-full sm:max-h-[100dvh] sm:max-w-2xl"
-          >
-            <SheetHeader className="shrink-0 space-y-1 border-b px-4 pb-3 pt-6 text-left pr-12">
-              <SheetTitle>Horario y disponibilidad</SheetTitle>
-              <SheetDescription>
-                Horarios de atencion y duracion de turnos para este negocio. El calendario se mantiene visible detras de este panel.
-              </SheetDescription>
-            </SheetHeader>
-            {availabilityBusinessId && (
-              <AvailabilitySettings
-                embedded
-                businessId={availabilityBusinessId}
-                initialRules={availabilityRules}
-                onRulesUpdated={setAvailabilityRules}
-              />
-            )}
-          </SheetContent>
-        </Sheet>
-      )}
-
       <BookingsCalendar
         bookings={bookings}
         weekStart={weekStart}

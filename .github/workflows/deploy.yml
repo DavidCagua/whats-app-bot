@@ -1,0 +1,100 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+# Prevent overlapping deploys if two pushes land in quick succession.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  # Tests are intentionally NOT in the deploy pipeline. Run them locally
+  # before pushing risky changes via `./scripts/test.sh [tier]`. The
+  # rationale: integration/evals/e2e cost OpenAI tokens and unit tests
+  # alone don't justify a CI tier when one developer pushes everything.
+  # Re-add a `test` job here when a second contributor joins.
+
+  migrate:
+    name: Apply migrations (alembic upgrade head)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install alembic + app deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Show current + pending revisions
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          alembic current || true
+          alembic heads || true
+
+      - name: Alembic upgrade head
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          alembic upgrade head
+          alembic current
+
+  deploy-vercel:
+    name: Deploy admin console (Vercel CLI)
+    needs: migrate
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: admin-console/package-lock.json
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      # `vercel pull` from repo root creates ./.vercel/project.json.
+      # The Vercel project has `rootDirectory: admin-console` configured
+      # in its dashboard settings, so subsequent `vercel build` / `vercel
+      # deploy` called from repo root will correctly target the
+      # admin-console subdirectory. Running vercel commands from inside
+      # admin-console/ instead causes a double-nesting bug (it tries to
+      # find admin-console/admin-console/package.json).
+      - name: Vercel pull (env + project config)
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Install admin-console deps + generate Prisma client
+        working-directory: admin-console
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          npm ci
+          # schema.prisma is committed and is the source of truth.
+          # Devs run `prisma db pull` locally after a migration and
+          # commit the regenerated schema. CI just generates the client.
+          npx prisma generate
+
+      - name: Vercel build (prod)
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy prebuilt artifacts
+        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+  # No deploy-railway job — Railway's "Wait for CI" toggle handles the bot:
+  # https://docs.railway.com/deployments/github-autodeploys
+  # Railway enters WAITING during this workflow, SKIPPED if any job fails,
+  # and deploys the bot automatically once all jobs pass.

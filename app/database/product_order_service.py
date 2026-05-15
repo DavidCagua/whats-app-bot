@@ -8,41 +8,75 @@ import unicodedata
 import uuid
 from typing import Dict, List, Optional, Any
 
-from .models import Product, Order, OrderItem, get_db_session
+from sqlalchemy import text as sa_text
+
+from .models import Product, Order, OrderItem, OrderPromotion, get_db_session
 from .customer_service import customer_service
+from ..services.order_status_machine import STATUS_PENDING
+from ..services import promotion_service
+# Re-export AmbiguousProductError from the new search module for backward compat
+from ..services.product_search import (
+    AmbiguousProductError,
+    ProductNotFoundError,
+    search_products as _search_products_hybrid,
+)
 
 logger = logging.getLogger(__name__)
 
 # Map natural-language category terms to canonical DB category values
 CATEGORY_MAP = {
-    "hamburguesa": "BURGERS",
-    "hamburguesas": "BURGERS",
-    "burger": "BURGERS",
-    "burgers": "BURGERS",
+    # Multi-word phrases first (full-phrase lookup runs before word-by-word)
+    "hamburguesas de pollo": "HAMBURGUESAS DE POLLO",
+    "hamburguesa de pollo": "HAMBURGUESAS DE POLLO",
+    "chicken burgers": "HAMBURGUESAS DE POLLO",
+    "chicken burger": "HAMBURGUESAS DE POLLO",
+    "perro caliente": "PERROS CALIENTES",
+    "perros calientes": "PERROS CALIENTES",
+    "hot dog": "PERROS CALIENTES",
+    "hot dogs": "PERROS CALIENTES",
+    "papas fritas": "SALCHIPAPAS",
+    "menu infantil": "MENÚ INFANTIL",
+    "steak & ribs": "PARRILLA",
+    # Single-word lookups (word-by-word fallback)
+    "hamburguesa": "HAMBURGUESAS",
+    "hamburguesas": "HAMBURGUESAS",
+    "burger": "HAMBURGUESAS",
+    "burgers": "HAMBURGUESAS",
+    "pollo": "HAMBURGUESAS DE POLLO",
+    "chicken": "HAMBURGUESAS DE POLLO",
     "bebida": "BEBIDAS",
     "bebidas": "BEBIDAS",
     "drink": "BEBIDAS",
     "drinks": "BEBIDAS",
-    "postre": "DESSERTS",
-    "postres": "DESSERTS",
-    "dessert": "DESSERTS",
-    "desserts": "DESSERTS",
-    "papas": "FRIES",
-    "fries": "FRIES",
-    "hot dog": "HOT DOGS",
-    "hot dogs": "HOT DOGS",
-    "perro": "HOT DOGS",
-    "perros": "HOT DOGS",
-    "pollo": "CHICKEN BURGERS",
-    "chicken": "CHICKEN BURGERS",
+    "postre": "POSTRES",
+    "postres": "POSTRES",
+    "dessert": "POSTRES",
+    "desserts": "POSTRES",
+    "salchipapa": "SALCHIPAPAS",
+    "salchipapas": "SALCHIPAPAS",
+    "papas": "SALCHIPAPAS",
+    "fries": "SALCHIPAPAS",
+    "perro": "PERROS CALIENTES",
+    "perros": "PERROS CALIENTES",
     "infantil": "MENÚ INFANTIL",
-    "niños": "MENÚ INFANTIL",
-    "niñas": "MENÚ INFANTIL",
-    "steak": "STEAK & RIBS",
-    "ribs": "STEAK & RIBS",
-    "costilla": "STEAK & RIBS",
-    "costillas": "STEAK & RIBS",
+    "menu": "MENÚ INFANTIL",
+    "ninos": "MENÚ INFANTIL",
+    "ninas": "MENÚ INFANTIL",
+    "parrilla": "PARRILLA",
+    "steak": "PARRILLA",
+    "ribs": "PARRILLA",
+    "costilla": "PARRILLA",
+    "costillas": "PARRILLA",
 }
+
+
+def _normalize_for_category_check(s: str) -> str:
+    """Lowercase + accent-strip for case/accent-insensitive category overlap."""
+    if not s:
+        return ""
+    raw = s.strip().lower()
+    nfkd = unicodedata.normalize("NFD", raw)
+    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
 
 
 def normalize_category(input_category: str) -> str:
@@ -56,7 +90,17 @@ def normalize_category(input_category: str) -> str:
     # Strip accents for lookup (e.g. "bebidas" vs "bebídas")
     normalized_key = unicodedata.normalize("NFD", raw)
     normalized_key = "".join(c for c in normalized_key if unicodedata.category(c) != "Mn")
-    canonical = CATEGORY_MAP.get(normalized_key) or CATEGORY_MAP.get(raw)
+    # Try full phrase first, then accent-stripped, then individual words
+    canonical = (
+        CATEGORY_MAP.get(normalized_key)
+        or CATEGORY_MAP.get(raw)
+    )
+    if not canonical:
+        # Try individual words (e.g. "menu infantil" -> try "infantil")
+        for word in normalized_key.split():
+            canonical = CATEGORY_MAP.get(word)
+            if canonical:
+                break
     if canonical:
         logger.warning(
             "[CATEGORY_NORMALIZATION] input=%s normalized=%s",
@@ -65,22 +109,6 @@ def normalize_category(input_category: str) -> str:
         )
         return canonical
     return input_category.strip()
-
-
-# Common words to skip when searching by tokens (Spanish)
-_SEARCH_STOPWORDS = frozenset(
-    {"una", "un", "la", "el", "de", "con", "para", "por", "y", "e", "o", "u", "del", "al", "los", "las", "unos", "unas",
-     "que", "en", "lo", "le", "se", "da", "al", "algo", "uno", "como", "mas", "pero", "sus", "este", "esta", "este",
-     "hamburguesa", "burger", "bebida", "gaseosa", "refresco"}  # generic product terms - search by distinctive part
-)
-
-
-def _search_tokens(query: str) -> list:
-    """Extract significant search tokens from query, normalized."""
-    if not query or not query.strip():
-        return []
-    words = query.strip().lower().replace("-", " ").replace(",", " ").split()
-    return [w for w in words if len(w) > 1 and w not in _SEARCH_STOPWORDS]
 
 
 class ProductOrderService:
@@ -108,6 +136,7 @@ class ProductOrderService:
                 .filter(
                     Product.business_id == uuid.UUID(business_id),
                     Product.is_active == True,
+                    Product.promo_only == False,
                 )
                 .order_by(Product.category, Product.name)
             )
@@ -140,6 +169,7 @@ class ProductOrderService:
                 .filter(
                     Product.business_id == uuid.UUID(business_id),
                     Product.is_active == True,
+                    Product.promo_only == False,
                     Product.category.isnot(None),
                     Product.category != "",
                 )
@@ -159,131 +189,78 @@ class ProductOrderService:
         product_id: Optional[str] = None,
         product_name: Optional[str] = None,
         business_id: Optional[str] = None,
+        *,
+        include_unavailable: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
-        Get a single product by ID or by name (fuzzy match).
+        Get a single product by ID or by name.
 
-        Args:
-            product_id: Product UUID (takes precedence)
-            product_name: Product name to search (used if product_id not provided)
-            business_id: Business UUID (required for name search)
+        For ID lookup: direct DB fetch.
+        For name lookup: delegates to the hybrid search module with unique=True,
+        which raises AmbiguousProductError if there's no clear winner.
 
-        Returns:
-            Product dict or None if not found
+        ``include_unavailable=True`` lets the lookup return rows that are
+        ``is_active=False`` or ``promo_only=True``. The caller is
+        expected to inspect those flags and decide what to do (e.g. the
+        search/details tools surface a marker so the LLM can communicate
+        the restriction; add_to_cart still refuses).
         """
         try:
-            db_session = get_db_session()
-            product = None
-
             if product_id:
-                product = (
-                    db_session.query(Product)
-                    .filter(
-                        Product.id == uuid.UUID(product_id),
-                        Product.is_active == True,
-                    )
-                    .first()
+                db_session = get_db_session()
+                q = db_session.query(Product).filter(Product.id == uuid.UUID(product_id))
+                if not include_unavailable:
+                    q = q.filter(Product.is_active == True)
+                product = q.first()
+                result = product.to_dict() if product else None
+                db_session.close()
+                return result
+            if product_name and business_id:
+                results = _search_products_hybrid(
+                    business_id=business_id,
+                    query=product_name.strip(),
+                    limit=5,
+                    unique=True,
+                    include_unavailable=include_unavailable,
                 )
-            elif product_name and business_id:
-                product = self._find_product_by_name_or_desc(
-                    db_session, business_id, product_name.strip()
-                )
-
-            result = product.to_dict() if product else None
-            db_session.close()
-            return result
+                return results[0] if results else None
+            return None
+        except AmbiguousProductError:
+            raise
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error getting product: {e}")
             return None
-
-    def _find_product_by_name_or_desc(
-        self, db_session, business_id: str, query: str
-    ) -> Optional[Any]:
-        """Find a product by name or description. Tries full query, then token-by-token."""
-        from sqlalchemy import or_, func
-
-        business_uuid = uuid.UUID(business_id)
-        qnorm = query.strip().lower()
-
-        def name_or_desc_contains(term: str):
-            desc_col = func.coalesce(Product.description, "")
-            return or_(
-                Product.name.ilike(f"%{term}%"),
-                desc_col.ilike(f"%{term}%"),
-            )
-
-        base = db_session.query(Product).filter(
-            Product.business_id == business_uuid,
-            Product.is_active == True,
-        )
-
-        # 1. Try full query in name
-        product = base.filter(Product.name.ilike(f"%{qnorm}%")).first()
-        if product:
-            return product
-
-        # 2. Try full query in name or description
-        product = base.filter(name_or_desc_contains(qnorm)).first()
-        if product:
-            return product
-
-        # 3. Try each significant token (e.g. "hamburguesa barracuda" -> "barracuda")
-        tokens = _search_tokens(query)
-        for tok in tokens:
-            product = base.filter(name_or_desc_contains(tok)).first()
-            if product:
-                return product
-
-        return None
 
     def search_products(
         self,
         business_id: str,
         query: str,
+        limit: int = 20,
+        unique: bool = False,
+        *,
+        include_unavailable: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Search products by name, description, or category. Handles multi-word queries:
-        - "hamburguesa barracuda" -> matches BARRACUDA
-        - "bebidas" -> matches products in category BEBIDAS
-        - "coca zero" -> matches Coca-Cola Zero
+        Search products by name, description, category, tags, and semantic
+        similarity. Delegates to the hybrid product_search module.
+
+        ``limit`` and ``unique`` are forwarded so callers (e.g.
+        catalog_service.search_products, which accepts these as a public
+        contract) don't crash with TypeError. Prior to this signature
+        fix, the catalog_service refactor in 3e9e02e silently passed
+        these kwargs and SEARCH_PRODUCTS in order_flow always crashed
+        with "got an unexpected keyword argument 'limit'".
         """
         try:
             if not query or not query.strip():
                 return []
-            from sqlalchemy import or_, func
-
-            db_session = get_db_session()
-            business_uuid = uuid.UUID(business_id)
-            qnorm = query.strip().lower()
-
-            def name_desc_or_category_contains(term: str):
-                desc_col = func.coalesce(Product.description, "")
-                cat_col = func.coalesce(Product.category, "")
-                return or_(
-                    Product.name.ilike(f"%{term}%"),
-                    desc_col.ilike(f"%{term}%"),
-                    cat_col.ilike(f"%{term}%"),
-                )
-
-            base = (
-                db_session.query(Product)
-                .filter(
-                    Product.business_id == business_uuid,
-                    Product.is_active == True,
-                )
+            return _search_products_hybrid(
+                business_id=business_id,
+                query=query.strip(),
+                limit=limit,
+                unique=unique,
+                include_unavailable=include_unavailable,
             )
-
-            # Build OR of: full query + each significant token
-            conditions = [name_desc_or_category_contains(qnorm)]
-            for tok in _search_tokens(query):
-                if tok != qnorm:
-                    conditions.append(name_desc_or_category_contains(tok))
-
-            combined = or_(*conditions)
-            products = base.filter(combined).order_by(Product.name).all()
-            result = [p.to_dict() for p in products]
-            db_session.close()
-            return result
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error searching products: {e}")
             return []
@@ -294,43 +271,16 @@ class ProductOrderService:
         query: str,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """
-        Search products by name and description (and ingredients if column exists) using ILIKE.
-        No embeddings; for small menus. Used as fallback when category lookup returns no rows.
-        """
+        """Deprecated alias — kept for callers. Delegates to hybrid search."""
         try:
             if not query or not query.strip():
                 return []
-            from sqlalchemy import or_, func
-
-            db_session = get_db_session()
-            business_uuid = uuid.UUID(business_id)
-            q = query.strip()
-            desc_col = func.coalesce(Product.description, "")
-            # name OR description (ingredients not in schema; description often holds ingredients)
-            condition = or_(
-                Product.name.ilike(f"%{q}%"),
-                desc_col.ilike(f"%{q}%"),
+            return _search_products_hybrid(
+                business_id=business_id,
+                query=query.strip(),
+                limit=limit,
+                unique=False,
             )
-            products = (
-                db_session.query(Product)
-                .filter(
-                    Product.business_id == business_uuid,
-                    Product.is_active == True,
-                    condition,
-                )
-                .order_by(Product.name)
-                .limit(limit)
-                .all()
-            )
-            result = [p.to_dict() for p in products]
-            db_session.close()
-            logger.warning(
-                "[SEMANTIC_SEARCH] query=%s results=%s",
-                q,
-                len(result),
-            )
-            return result
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error in search_products_semantic: {e}")
             return []
@@ -341,20 +291,35 @@ class ProductOrderService:
         category: str,
     ) -> List[Dict[str, Any]]:
         """
-        List products by category with normalization and semantic fallback.
+        List products by category with normalization and bounded fallback.
+
         1) Normalize category (e.g. hamburguesas -> BURGERS), list by category.
-        2) If no rows, run semantic search on the original category/query string.
+        2) If no rows, fall back to the hybrid search. The hybrid search's
+           pure-embedding filter (in search_products) already handles the
+           "pizza at a burger shop" case — it returns empty when only
+           embedding-based candidates exist and no lexical/tag signal matches.
+           This means sub-category terms like "cervezas" (which exist as tags
+           on beer products but not as a DB category) now correctly resolve
+           to the matching products instead of returning "no tenemos cervezas".
+
+        Historical note: commit ac2a6a3 added a category-existence pre-check
+        here that blocked the fallback when the search term didn't overlap
+        any DB category name. That pre-check was redundant with the
+        pure-embedding filter and overly aggressive — it blocked legitimate
+        tag-based sub-category searches like "cervezas" (products are in
+        category BEBIDAS but tagged "cerveza"). Removed in this commit.
         """
         raw = (category or "").strip()
         normalized = normalize_category(category) if raw else ""
         products = self.list_products(business_id=business_id, category=normalized or None)
-        if not products and raw:
-            logger.warning(
-                "[LOOKUP_FALLBACK] category_lookup_empty → semantic_search_used category=%s",
-                raw,
-            )
-            products = self.search_products_semantic(business_id=business_id, query=raw)
-        return products
+        if products or not raw:
+            return products
+
+        logger.warning(
+            "[LOOKUP_FALLBACK] category_lookup_empty → hybrid_search_used category=%s",
+            raw,
+        )
+        return self.search_products_semantic(business_id=business_id, query=raw)
 
     def create_order(
         self,
@@ -367,6 +332,8 @@ class ProductOrderService:
         contact_phone: Optional[str] = None,
         payment_method: Optional[str] = None,
         customer_name: Optional[str] = None,
+        delivery_fee: float = 0.0,
+        fulfillment_type: str = "delivery",
     ) -> Dict[str, Any]:
         """
         Create an order with line items and delivery info.
@@ -381,16 +348,25 @@ class ProductOrderService:
             contact_phone: Contact phone (optional, for delivery)
             payment_method: Payment method for this order
             customer_name: Customer name for order; used when creating/updating customer
+            delivery_fee: Delivery fee to add to the order total (default 0)
+            fulfillment_type: 'delivery' (default) or 'pickup'. Pickup orders
+                skip the delivery fee unconditionally — even if a non-zero
+                ``delivery_fee`` is passed, the caller's intent is "pickup
+                at store" and the fee is dropped. Persisted on the order
+                row for reporting and the admin filter.
 
         Returns:
-            {"success": True, "order_id": "uuid", "total": float} or {"success": False, "error": str}
+            {"success": True, "order_id": "uuid", "subtotal": float, "total": float} or {"success": False, "error": str}
         """
         try:
             if not items:
-                return {"success": False, "error": "El carrito está vacío"}
+                return {"success": False, "error": "El pedido está vacío"}
+
+            ftype = (fulfillment_type or "delivery").strip().lower()
+            if ftype not in ("delivery", "pickup"):
+                return {"success": False, "error": f"fulfillment_type inválido: {fulfillment_type!r}"}
 
             db_session = get_db_session()
-            total = 0.0
             order_items_data = []
 
             for item in items:
@@ -415,14 +391,29 @@ class ProductOrderService:
                     db_session.close()
                     return {"success": False, "error": f"Producto no encontrado: {product_id}"}
 
-                line_total = price * quantity
-                total += line_total
+                # Pre-promo line_total. promotion_service.match_and_apply
+                # may overwrite this and split the line into a bundled +
+                # leftover pair if a promo only consumes part of it.
                 order_items_data.append({
                     "product_id": product_id,
                     "quantity": quantity,
                     "unit_price": price,
-                    "line_total": line_total,
+                    "line_total": price * quantity,
+                    "notes": (item.get("notes") or "").strip() or None,
+                    "promotion_id": item.get("promotion_id"),
+                    "promo_group_id": item.get("promo_group_id"),
                 })
+
+            # Run the promo matcher. Honors agent-set bindings, then
+            # greedily applies the best-discount promo to leftovers.
+            pricing = promotion_service.match_and_apply(
+                business_id=business_id,
+                cart_items=order_items_data,
+            )
+            order_items_data = pricing["items"]
+            subtotal = float(pricing["subtotal_after_promos"])
+            promo_discount = float(pricing["promo_discount_total"])
+            applications = pricing["applications"]
 
             # Create or update customer with delivery info
             cust = customer_service.get_customer(whatsapp_id)
@@ -446,12 +437,51 @@ class ProductOrderService:
                 )
                 customer_id = new_cust.get("id") if new_cust else None
 
+            if customer_id is not None:
+                customer_service.link_customer_to_business(
+                    customer_id=customer_id,
+                    business_id=business_id,
+                    source="auto",
+                )
+
+            effective_delivery_fee = 0.0 if ftype == "pickup" else float(delivery_fee)
+            grand_total = subtotal + effective_delivery_fee
+
+            # Atomic per-business+day display number. The UPSERT row-lock
+            # serializes concurrent inserts so two orders can't grab the
+            # same number; the unique constraint on
+            # (business_id, display_date, display_number) is the safety
+            # net behind that. Bogotá is UTC-5 year-round (no DST), so
+            # ``AT TIME ZONE 'America/Bogota'`` is a stable date pin.
+            counter_row = db_session.execute(
+                sa_text(
+                    """
+                    INSERT INTO order_counters (business_id, display_date, last_value)
+                    VALUES (
+                        :business_id,
+                        (now() AT TIME ZONE 'America/Bogota')::date,
+                        1
+                    )
+                    ON CONFLICT (business_id, display_date)
+                    DO UPDATE SET last_value = order_counters.last_value + 1
+                    RETURNING display_date, last_value
+                    """
+                ),
+                {"business_id": business_id},
+            ).first()
+            display_date = counter_row[0]
+            display_number = int(counter_row[1])
+
             order = Order(
                 business_id=uuid.UUID(business_id),
                 customer_id=customer_id,
                 whatsapp_id=whatsapp_id,
-                status="pending",
-                total_amount=total,
+                status=STATUS_PENDING,
+                fulfillment_type=ftype,
+                display_number=display_number,
+                display_date=display_date,
+                total_amount=grand_total,
+                promo_discount_amount=promo_discount,
                 notes=notes,
                 delivery_address=delivery_address,
                 contact_phone=contact_phone,
@@ -467,18 +497,46 @@ class ProductOrderService:
                     quantity=oi["quantity"],
                     unit_price=oi["unit_price"],
                     line_total=oi["line_total"],
+                    notes=oi.get("notes"),
+                    promotion_id=uuid.UUID(oi["promotion_id"]) if oi.get("promotion_id") else None,
+                    promo_group_id=uuid.UUID(oi["promo_group_id"]) if oi.get("promo_group_id") else None,
                 )
                 db_session.add(order_item)
+
+            for app in applications:
+                db_session.add(OrderPromotion(
+                    order_id=order.id,
+                    promotion_id=uuid.UUID(app["promotion_id"]),
+                    promotion_name=app["promotion_name"],
+                    pricing_mode=app["pricing_mode"],
+                    discount_applied=app["discount_applied"],
+                ))
 
             db_session.commit()
             order_id = str(order.id)
             db_session.close()
 
             logger.info(
-                f"[PRODUCT_ORDER] Created order {order_id} for {whatsapp_id}, total={total}, "
-                f"address={bool(delivery_address)}"
+                f"[PRODUCT_ORDER] Created order {order_id} (#{display_number} {display_date}) "
+                f"for {whatsapp_id}, "
+                f"fulfillment_type={ftype}, subtotal={subtotal}, "
+                f"promo_discount={promo_discount}, "
+                f"delivery_fee={effective_delivery_fee}, total={grand_total}, "
+                f"applied_promos={len(applications)}, address={bool(delivery_address)}"
             )
-            return {"success": True, "order_id": order_id, "total": total}
+            return {
+                "success": True,
+                "order_id": order_id,
+                "display_number": display_number,
+                "display_date": display_date.isoformat(),
+                "subtotal": subtotal,
+                "total": grand_total,
+                "promo_discount": promo_discount,
+                "applied_promos": [
+                    {"name": a["promotion_name"], "discount": a["discount_applied"]}
+                    for a in applications
+                ],
+            }
         except Exception as e:
             logger.error(f"[PRODUCT_ORDER] Error creating order: {e}")
             try:

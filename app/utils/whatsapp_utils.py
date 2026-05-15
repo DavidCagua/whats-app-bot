@@ -14,6 +14,37 @@ def log_http_response(response):
     logging.info(f"Body: {response.text}")
 
 
+def _split_for_twilio(text: str, limit: int = 1500) -> list:
+    """
+    Split a message into chunks at most `limit` characters each, preferring
+    natural boundaries (blank lines, newlines, sentences, spaces). Twilio's
+    WhatsApp sender rejects bodies over 1600 chars (error 21617); default
+    1500 leaves margin for any transport overhead.
+    """
+    if not text:
+        return [""]
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        split_at = -1
+        for sep in ("\n\n", "\n", ". ", " "):
+            idx = window.rfind(sep)
+            if idx > limit * 0.5:
+                split_at = idx + len(sep)
+                break
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 def get_text_message_input(recipient, text):
     # Ensure recipient is a valid phone number format
     # Remove any non-digit characters except + at the beginning
@@ -110,7 +141,15 @@ def send_message(data, business_context=None):
                 msg = client.messages.create(**create_kw)
             else:
                 body_text = (payload.get("text") or {}).get("body", "")
-                msg = client.messages.create(body=body_text, from_=from_number, to=to_whatsapp)
+                # Twilio WhatsApp enforces a 1600-char limit per message (error 21617).
+                # Split long responses at natural boundaries and send as multiple messages.
+                chunks = _split_for_twilio(body_text, limit=1500)
+                last_sid = None
+                for chunk in chunks:
+                    msg = client.messages.create(body=chunk, from_=from_number, to=to_whatsapp)
+                    last_sid = msg.sid
+                msg = type("Msg", (), {})()
+                msg.sid = last_sid or ""
 
             mock_response = type("Response", (), {})()
             mock_response.status_code = 200
@@ -187,6 +226,58 @@ def send_message(data, business_context=None):
         return None
     except requests.RequestException as e:  # This will catch any general request exception
         logging.error(f"Request failed due to: {e}")
+        return None
+
+
+def send_twilio_cta(
+    content_sid,
+    variables,
+    to,
+    business_context=None,
+):
+    """
+    Send a Twilio WhatsApp Content Template (e.g. twilio/call-to-action)
+    by ContentSid. Used for the welcome message so customers see a
+    button-styled CTA instead of a raw URL. Inside the 24h customer-care
+    window no Meta template approval is required.
+
+    Returns the Twilio Message object on success, None on failure.
+    """
+    if is_mock_mode():
+        return mock_send_message(
+            json.dumps({"to": to, "content_sid": content_sid, "content_variables": variables}),
+            business_context,
+        )
+    try:
+        import os
+        account_sid = current_app.config.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
+        auth_token = current_app.config.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
+        from_number = (business_context or {}).get("twilio_phone_number") or (
+            current_app.config.get("TWILIO_WHATSAPP_NUMBER") or os.getenv("TWILIO_WHATSAPP_NUMBER")
+        )
+        if from_number and not str(from_number).startswith("whatsapp:"):
+            from_number = f"whatsapp:{from_number}"
+        if not all([account_sid, auth_token, from_number, content_sid]):
+            logging.error("[CTA_SEND] Missing credentials or content_sid")
+            return None
+        to_whatsapp = f"whatsapp:{to}" if to and not str(to).startswith("whatsapp:") else to
+
+        from twilio.rest import Client
+        client = Client(account_sid, auth_token)
+        msg = client.messages.create(
+            from_=from_number,
+            to=to_whatsapp,
+            content_sid=content_sid,
+            content_variables=json.dumps(variables or {}),
+        )
+        logging.warning(
+            f"[CTA_SEND] ✅ sent content_sid={content_sid} to={to_whatsapp} msg_sid={msg.sid}"
+        )
+        return msg
+    except Exception as e:
+        logging.error(f"[CTA_SEND] ❌ send failed: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         return None
 
 

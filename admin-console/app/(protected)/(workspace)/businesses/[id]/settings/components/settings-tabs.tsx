@@ -1,16 +1,17 @@
 "use client"
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Building2, Plug, Bot } from "lucide-react"
+import { Building2, Plug, Bot, Layers } from "lucide-react"
 import { ReactNode } from "react"
 
-export type SettingsTab = "general" | "integrations" | "agents"
+export type SettingsTab = "general" | "integrations" | "agents" | "modules"
 
 interface SettingsTabsProps {
   defaultTab?: SettingsTab
   generalContent: ReactNode
   integrationsContent: ReactNode
   agentsContent: ReactNode
+  modulesContent?: ReactNode
 }
 
 export function SettingsTabs({
@@ -18,6 +19,7 @@ export function SettingsTabs({
   generalContent,
   integrationsContent,
   agentsContent,
+  modulesContent,
 }: SettingsTabsProps) {
   return (
     <Tabs defaultValue={defaultTab} className="w-full">
@@ -34,6 +36,12 @@ export function SettingsTabs({
           <Bot className="h-4 w-4" />
           Agentes
         </TabsTrigger>
+        {modulesContent && (
+          <TabsTrigger value="modules" className="gap-2">
+            <Layers className="h-4 w-4" />
+            Módulos
+          </TabsTrigger>
+        )}
       </TabsList>
       <TabsContent value="general" className="space-y-6">
         {generalContent}
@@ -44,6 +52,11 @@ export function SettingsTabs({
       <TabsContent value="agents" className="space-y-6">
         {agentsContent}
       </TabsContent>
+      {modulesContent && (
+        <TabsContent value="modules" className="space-y-6">
+          {modulesContent}
+        </TabsContent>
+      )}
     </Tabs>
   )
 }

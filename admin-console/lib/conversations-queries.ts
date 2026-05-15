@@ -1,3 +1,4 @@
+import { unstable_cache } from "next/cache"
 import { prisma } from "./prisma"
 import { Prisma } from "@prisma/client"
 
@@ -10,6 +11,10 @@ export type ConversationGroup = {
   last_timestamp: Date
   message_count: number
   whatsapp_number: string | null
+  /** Reason the bot is currently disabled, or null if it's active.
+   * "delivery_handoff" is set automatically by the customer-service
+   * flow when the 50-min order-status threshold trips. */
+  handoff_reason: string | null
 }
 
 export type ConversationMessageAttachment = {
@@ -45,11 +50,16 @@ export type ConversationThread = {
   phone_number: string | null
   /** Conversation-level agent enable flag (defaults to true). */
   agent_enabled: boolean
+  /** Reason the bot is currently disabled (e.g. "delivery_handoff"); null when enabled. */
+  handoff_reason: string | null
 }
 
 /**
  * Get grouped conversations (one row per whatsapp_id + business_id)
- * with permission-based filtering
+ * with permission-based filtering. Uses Postgres DISTINCT ON to fetch
+ * the actual latest message per group — Prisma's `_max: { message }`
+ * returns the lexicographically max string, not the message at the
+ * latest timestamp, which surfaces as random old messages in the list.
  */
 export async function getConversations({
   businessIds,
@@ -68,59 +78,78 @@ export async function getConversations({
   limit?: number
   offset?: number
 }): Promise<ConversationGroup[]> {
-  // Build where clause
-  const whereClause: Prisma.conversationsWhereInput = {}
+  const whereParts: Prisma.Sql[] = []
 
-  // Apply business filter
   if (businessIds !== "all") {
-    whereClause.business_id = { in: businessIds }
+    if (businessIds.length === 0) return []
+    whereParts.push(Prisma.sql`business_id = ANY(${businessIds}::uuid[])`)
   }
-
-  // Apply specific business filter (from dropdown)
   if (businessFilter) {
-    whereClause.business_id = businessFilter
+    whereParts.push(Prisma.sql`business_id = ${businessFilter}::uuid`)
   }
-
-  // Apply date range filter
-  if (dateFrom || dateTo) {
-    whereClause.timestamp = {}
-    if (dateFrom) whereClause.timestamp.gte = dateFrom
-    if (dateTo) whereClause.timestamp.lte = dateTo
-  }
-
-  // Apply search filter
   if (searchQuery) {
-    whereClause.OR = [
-      { whatsapp_id: { contains: searchQuery } },
-      { message: { contains: searchQuery, mode: "insensitive" } },
-    ]
+    const pattern = `%${searchQuery}%`
+    whereParts.push(
+      Prisma.sql`(whatsapp_id ILIKE ${pattern} OR message ILIKE ${pattern})`
+    )
+  }
+  if (dateFrom) {
+    whereParts.push(Prisma.sql`timestamp >= ${dateFrom}`)
+  }
+  if (dateTo) {
+    whereParts.push(Prisma.sql`timestamp <= ${dateTo}`)
   }
 
-  // Get grouped conversations
-  const groupedConversations = await prisma.conversations.groupBy({
-    by: ["whatsapp_id", "business_id"],
-    where: whereClause,
-    _count: { id: true },
-    _max: {
-      timestamp: true,
-      message: true,
-    },
-    orderBy: {
-      _max: { timestamp: "desc" },
-    },
-    take: limit,
-    skip: offset,
-  })
+  const whereClause =
+    whereParts.length > 0
+      ? Prisma.sql`WHERE ${Prisma.join(whereParts, " AND ")}`
+      : Prisma.empty
 
-  // Get business and customer data for enrichment
-  const businessIds_to_fetch = [
-    ...new Set(groupedConversations.map((c) => c.business_id)),
-  ]
-  const whatsappIds_to_fetch = [
-    ...new Set(groupedConversations.map((c) => c.whatsapp_id)),
-  ]
+  const rows = await prisma.$queryRaw<
+    Array<{
+      whatsapp_id: string
+      business_id: string
+      last_message: string
+      last_timestamp: Date
+      message_count: bigint
+    }>
+  >`
+    WITH filtered AS (
+      SELECT whatsapp_id, business_id, message, timestamp
+      FROM conversations
+      ${whereClause}
+    ),
+    latest AS (
+      SELECT DISTINCT ON (whatsapp_id, business_id)
+        whatsapp_id,
+        business_id,
+        message AS last_message,
+        timestamp AS last_timestamp
+      FROM filtered
+      ORDER BY whatsapp_id, business_id, timestamp DESC
+    ),
+    counts AS (
+      SELECT whatsapp_id, business_id, COUNT(*) AS message_count
+      FROM filtered
+      GROUP BY whatsapp_id, business_id
+    )
+    SELECT l.whatsapp_id,
+           l.business_id,
+           l.last_message,
+           l.last_timestamp,
+           c.message_count
+    FROM latest l
+    JOIN counts c USING (whatsapp_id, business_id)
+    ORDER BY l.last_timestamp DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `
 
-  const [businesses, customers, whatsappNumbers] = await Promise.all([
+  if (rows.length === 0) return []
+
+  const businessIds_to_fetch = [...new Set(rows.map((r) => r.business_id))]
+  const whatsappIds_to_fetch = [...new Set(rows.map((r) => r.whatsapp_id))]
+
+  const [businesses, customers, whatsappNumbers, handoffRows] = await Promise.all([
     prisma.businesses.findMany({
       where: { id: { in: businessIds_to_fetch } },
       select: { id: true, name: true },
@@ -133,64 +162,102 @@ export async function getConversations({
       where: { business_id: { in: businessIds_to_fetch } },
       select: { business_id: true, phone_number: true },
     }),
+    prisma.conversation_agent_settings.findMany({
+      where: {
+        business_id: { in: businessIds_to_fetch },
+        whatsapp_id: { in: whatsappIds_to_fetch },
+        handoff_reason: { not: null },
+      },
+      select: { business_id: true, whatsapp_id: true, handoff_reason: true },
+    }),
   ])
 
-  // Create lookup maps
   const businessMap = new Map(businesses.map((b) => [b.id, b.name]))
   const customerMap = new Map(customers.map((c) => [c.whatsapp_id, c.name]))
   const whatsappNumberMap = new Map(
     whatsappNumbers.map((w) => [w.business_id, w.phone_number])
   )
+  // Composite key (business_id|whatsapp_id) → reason. Filtered to non-null
+  // reasons so a "manual disable" doesn't decorate the row in the UI —
+  // those convos still appear normal until they auto-escalate.
+  const handoffKey = (b: string, w: string) => `${b}|${w}`
+  const handoffMap = new Map(
+    handoffRows.map((h) => [handoffKey(h.business_id, h.whatsapp_id), h.handoff_reason])
+  )
 
-  // Enrich and return
-  return groupedConversations.map((conv) => ({
-    whatsapp_id: conv.whatsapp_id,
-    business_id: conv.business_id,
-    business_name: businessMap.get(conv.business_id) || "Unknown Business",
-    customer_name: customerMap.get(conv.whatsapp_id) || null,
-    last_message: conv._max.message || "",
-    last_timestamp: conv._max.timestamp || new Date(),
-    message_count: conv._count.id,
-    whatsapp_number: whatsappNumberMap.get(conv.business_id) || null,
+  return rows.map((r) => ({
+    whatsapp_id: r.whatsapp_id,
+    business_id: r.business_id,
+    business_name: businessMap.get(r.business_id) || "Unknown Business",
+    customer_name: customerMap.get(r.whatsapp_id) || null,
+    last_message: r.last_message ?? "",
+    last_timestamp: r.last_timestamp,
+    message_count: Number(r.message_count),
+    whatsapp_number: whatsappNumberMap.get(r.business_id) || null,
+    handoff_reason: handoffMap.get(handoffKey(r.business_id, r.whatsapp_id)) ?? null,
   }))
 }
 
 /**
- * Get full conversation thread for a specific whatsapp_id and business
+ * Cursor-paginated conversation thread. Default returns the latest
+ * `limit` messages newest-first reversed to chronological order; when
+ * `before` is set, returns the next page of messages with id < before.
+ *
+ * `total_messages` is the grand total count for the conversation, not
+ * the size of the returned slice — the client uses it to compute
+ * `hasMoreOlder = localMessages.length < total_messages`.
  */
 export async function getConversationThread({
   whatsappId,
   businessId,
+  limit = 50,
+  before,
 }: {
   whatsappId: string
   businessId: string
+  limit?: number
+  before?: number
 }): Promise<ConversationThread | null> {
-  // Get all messages for this conversation (and whatsapp_number_id for channel resolution)
-  const rawMessages = await prisma.conversations.findMany({
-    where: {
-      whatsapp_id: whatsappId,
-      business_id: businessId,
-    },
-    orderBy: { timestamp: "asc" },
-    select: {
-      id: true,
-      whatsapp_id: true,
-      message: true,
-      role: true,
-      timestamp: true,
-      created_at: true,
-      whatsapp_number_id: true,
-    },
-  })
+  const messageWhere: Prisma.conversationsWhereInput = {
+    whatsapp_id: whatsappId,
+    business_id: businessId,
+  }
+  if (before !== undefined) {
+    messageWhere.id = { lt: before }
+  }
 
-  if (rawMessages.length === 0) {
+  const [rawMessagesDesc, totalMessages] = await Promise.all([
+    prisma.conversations.findMany({
+      where: messageWhere,
+      orderBy: { id: "desc" },
+      take: limit,
+      select: {
+        id: true,
+        whatsapp_id: true,
+        message: true,
+        role: true,
+        timestamp: true,
+        created_at: true,
+        whatsapp_number_id: true,
+      },
+    }),
+    prisma.conversations.count({
+      where: { whatsapp_id: whatsappId, business_id: businessId },
+    }),
+  ])
+
+  if (totalMessages === 0) {
     return null
   }
 
+  const rawMessages = rawMessagesDesc.slice().reverse()
+
   const conversationIds = rawMessages.map((m) => m.id)
-  const attachments = await prisma.conversation_attachments.findMany({
-    where: { conversation_id: { in: conversationIds } },
-  })
+  const attachments = conversationIds.length
+    ? await prisma.conversation_attachments.findMany({
+        where: { conversation_id: { in: conversationIds } },
+      })
+    : []
   const attachmentsByConversationId = new Map<number, typeof attachments>()
   for (const a of attachments) {
     const list = attachmentsByConversationId.get(a.conversation_id) ?? []
@@ -215,13 +282,23 @@ export async function getConversationThread({
     })),
   }))
 
-  // Resolve channel (phone_number_id and/or phone_number) so send uses same number as routing
-  const firstWithNumber = rawMessages.find((m) => m.whatsapp_number_id != null)
+  // Channel resolution must look across the whole conversation so the
+  // answer is stable regardless of which page is loaded.
+  const channelMsg = await prisma.conversations.findFirst({
+    where: {
+      whatsapp_id: whatsappId,
+      business_id: businessId,
+      whatsapp_number_id: { not: null },
+    },
+    orderBy: { id: "asc" },
+    select: { whatsapp_number_id: true },
+  })
+
   let phone_number_id: string | null = null
   let phone_number: string | null = null
-  if (firstWithNumber?.whatsapp_number_id) {
+  if (channelMsg?.whatsapp_number_id) {
     const wn = await prisma.whatsapp_numbers.findUnique({
-      where: { id: firstWithNumber.whatsapp_number_id },
+      where: { id: channelMsg.whatsapp_number_id },
       select: { phone_number_id: true, phone_number: true },
     })
     phone_number_id = wn?.phone_number_id ?? null
@@ -239,7 +316,7 @@ export async function getConversationThread({
   const agentRow = await prisma.conversation_agent_settings.findFirst({
     where: { business_id: businessId, whatsapp_id: whatsappId },
     orderBy: { updated_at: "desc" },
-    select: { agent_enabled: true },
+    select: { agent_enabled: true, handoff_reason: true },
   })
 
   const [business, customer] = await Promise.all([
@@ -260,21 +337,26 @@ export async function getConversationThread({
     customer_name: customer?.name || null,
     customer_phone: whatsappId,
     messages,
-    total_messages: messages.length,
+    total_messages: totalMessages,
     phone_number_id,
     phone_number,
     agent_enabled: agentRow?.agent_enabled ?? true,
+    handoff_reason: agentRow?.handoff_reason ?? null,
   }
 }
 
 /**
- * Get conversation statistics
+ * Get conversation statistics. Wrapped in unstable_cache so the slow
+ * `groupBy` for unique-customer count doesn't gate the inbox RSC paint
+ * on every navigation; only revalidates once per minute. The header
+ * stats can tolerate a 60s lag without affecting message correctness.
  */
-export async function getConversationStats({
-  businessIds,
-}: {
-  businessIds: string[] | "all"
-}) {
+async function _getConversationStats(
+  businessIdsKey: string
+): Promise<{ totalMessages: number; uniqueCustomers: number; todayMessages: number }> {
+  const businessIds: string[] | "all" =
+    businessIdsKey === "all" ? "all" : (JSON.parse(businessIdsKey) as string[])
+
   const whereClause: Prisma.conversationsWhereInput =
     businessIds !== "all" ? { business_id: { in: businessIds } } : {}
 
@@ -296,9 +378,22 @@ export async function getConversationStats({
     }),
   ])
 
-  return {
-    totalMessages,
-    uniqueCustomers,
-    todayMessages,
-  }
+  return { totalMessages, uniqueCustomers, todayMessages }
+}
+
+const _cachedConversationStats = unstable_cache(
+  _getConversationStats,
+  ["conversation-stats"],
+  { revalidate: 60, tags: ["conversation-stats"] }
+)
+
+export async function getConversationStats({
+  businessIds,
+}: {
+  businessIds: string[] | "all"
+}) {
+  // Stable key: sorted JSON for arrays so [a,b] and [b,a] hit the same entry.
+  const key =
+    businessIds === "all" ? "all" : JSON.stringify([...businessIds].sort())
+  return _cachedConversationStats(key)
 }

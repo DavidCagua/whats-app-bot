@@ -1,0 +1,845 @@
+"""
+Promotion matcher and applicator.
+
+Two surfaces:
+
+- `list_active_promos(business_id, when=None)` — read API used by the
+  customer service agent to answer "qué promos hay". Filters by
+  schedule (day-of-week, time window, date window).
+
+- `match_and_apply(business_id, cart_items, when=None)` — pricing API
+  called by `product_order_service.place_order` when an order is
+  written. Decides which promo(s) apply, returns line-level pricing
+  decisions and a list of applications for the audit table.
+
+Matching rules (Phase 1):
+
+- A promo's components must ALL be present in the cart in at least the
+  required quantity for the promo to "apply once". If the cart has more,
+  the promo applies multiple times (greedy multi-apply).
+
+- When multiple promos qualify, we pick the one that yields the BIGGEST
+  per-application discount. Don't stack. Apply it as many times as
+  possible, then re-run the matcher on what's left in the cart.
+
+- Bindings the agent set at add-time (`promotion_id`/`promo_group_id`
+  on cart items) are honored as-is: those items get the promo's price
+  and aren't re-matched. Unbound items go through the matcher fresh.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections import defaultdict
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from sqlalchemy.orm import joinedload
+
+from ..database.models import Business, Promotion, get_db_session
+
+
+logger = logging.getLogger(__name__)
+
+
+PRICING_FIXED_PRICE = "fixed_price"
+PRICING_DISCOUNT_AMOUNT = "discount_amount"
+PRICING_DISCOUNT_PCT = "discount_pct"
+
+# Default for when a business has no timezone configured. Matches the
+# default in business_config_service.get_business_info.
+_DEFAULT_TIMEZONE = "America/Bogota"
+
+
+def _to_zoneinfo(tz_name: Optional[str]) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name or _DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning("[PROMO] unknown timezone %r, falling back to %s", tz_name, _DEFAULT_TIMEZONE)
+        return ZoneInfo(_DEFAULT_TIMEZONE)
+
+
+def _to_local(when: datetime, tz: ZoneInfo) -> datetime:
+    """Convert a datetime to the business's local timezone.
+    Naive inputs are treated as UTC (consistent with `datetime.now(timezone.utc)`)."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(tz)
+
+
+def timezone_from_business_context(business_context: Optional[Dict[str, Any]]) -> str:
+    """Pull the IANA tz name from business_context, defaulting safely.
+    Used by callers (CS flow, order_flow) to thread tz into the matcher."""
+    if not business_context:
+        return _DEFAULT_TIMEZONE
+    biz = business_context.get("business") or {}
+    settings = biz.get("settings") or {}
+    return settings.get("timezone") or _DEFAULT_TIMEZONE
+
+
+def _resolve_timezone(business_id: str, override: Optional[str]) -> str:
+    """Return the timezone to use. Caller-supplied override wins; otherwise
+    look up the business's stored setting; otherwise default."""
+    if override:
+        return override
+    if not business_id:
+        return _DEFAULT_TIMEZONE
+    session = get_db_session()
+    try:
+        row = (
+            session.query(Business)
+            .filter(Business.id == uuid.UUID(business_id))
+            .first()
+        )
+        if not row:
+            return _DEFAULT_TIMEZONE
+        settings = row.settings or {}
+        return settings.get("timezone") or _DEFAULT_TIMEZONE
+    except Exception as exc:
+        logger.warning("[PROMO] _resolve_timezone failed: %s", exc)
+        return _DEFAULT_TIMEZONE
+    finally:
+        session.close()
+
+
+def list_active_promos(
+    business_id: str,
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Return active promos for a business that are valid at `when`
+    (default: now). Schedule math runs in the business's local timezone.
+    """
+    if not business_id:
+        return []
+    when = when or datetime.now(timezone.utc)
+    tz = _to_zoneinfo(_resolve_timezone(business_id, timezone_name))
+
+    session = get_db_session()
+    try:
+        rows = (
+            session.query(Promotion)
+            .options(joinedload(Promotion.components))
+            .filter(
+                Promotion.business_id == uuid.UUID(business_id),
+                Promotion.is_active.is_(True),
+            )
+            .all()
+        )
+        valid = [r for r in rows if _schedule_matches(r, when, tz)]
+        return [r.to_dict() for r in valid]
+    except Exception as exc:
+        logger.error("[PROMO] list_active_promos failed: %s", exc, exc_info=True)
+        return []
+    finally:
+        session.close()
+
+
+def list_promos_for_listing(
+    business_id: str,
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Two-bucket view of active promos for the customer-service listing
+    surface: what's on RIGHT NOW vs. what's coming up later this week.
+
+    Returns:
+        {
+          "active_now": [<promo_dict>, ...],
+          "upcoming":   [<promo_dict + next_active_day>, ...],
+        }
+
+    "upcoming" only contains promos that are NOT active now AND that
+    have at least one day_of_week (or future starts_on/ends_on) where
+    they'd light up within the next 7 days. Each upcoming entry adds a
+    `next_active_day` field with the ISO weekday number of the next
+    occurrence so the response template can name it.
+    """
+    if not business_id:
+        return {"active_now": [], "upcoming": []}
+    when = when or datetime.now(timezone.utc)
+    tz = _to_zoneinfo(_resolve_timezone(business_id, timezone_name))
+    when_local = _to_local(when, tz)
+
+    session = get_db_session()
+    try:
+        rows = (
+            session.query(Promotion)
+            .options(joinedload(Promotion.components))
+            .filter(
+                Promotion.business_id == uuid.UUID(business_id),
+                Promotion.is_active.is_(True),
+            )
+            .all()
+        )
+    except Exception as exc:
+        logger.error("[PROMO] list_promos_for_listing failed: %s", exc, exc_info=True)
+        return {"active_now": [], "upcoming": []}
+    finally:
+        session.close()
+
+    active_now: List[Dict[str, Any]] = []
+    upcoming: List[Dict[str, Any]] = []
+    for r in rows:
+        if _schedule_matches(r, when, tz):
+            active_now.append(r.to_dict())
+            continue
+        next_day = _next_active_iso_weekday(r, when_local)
+        if next_day is not None:
+            d = r.to_dict()
+            d["next_active_day"] = next_day
+            upcoming.append(d)
+
+    return {"active_now": active_now, "upcoming": upcoming}
+
+
+def find_promos_containing_product(
+    business_id: str,
+    product_id: str,
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Return promos whose components reference ``product_id``, split into
+    two buckets: active right now vs. upcoming this week.
+
+    Used by the order tools to explain ``promo_only`` products: "Solo se
+    vende como parte de [promo X]". When no promo is active right now,
+    the caller can fall back to the next-active day from the upcoming
+    bucket (same shape as ``list_promos_for_listing``).
+
+    Returns:
+        {
+          "active":   [<promo_dict>, ...],
+          "upcoming": [<promo_dict + next_active_day>, ...],
+        }
+        Empty lists when the product isn't a component of any promo.
+    """
+    if not business_id or not product_id:
+        return {"active": [], "upcoming": []}
+
+    buckets = list_promos_for_listing(
+        business_id, when=when, timezone_name=timezone_name,
+    )
+    target = str(product_id)
+
+    def _contains(promo: Dict[str, Any]) -> bool:
+        components = promo.get("components") or []
+        return any(str(c.get("product_id")) == target for c in components)
+
+    return {
+        "active": [p for p in (buckets.get("active_now") or []) if _contains(p)],
+        "upcoming": [p for p in (buckets.get("upcoming") or []) if _contains(p)],
+    }
+
+
+def get_promotion(business_id: str, promotion_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch one promo by id, scoped to business. Returns None if absent."""
+    if not business_id or not promotion_id:
+        return None
+    session = get_db_session()
+    try:
+        row = (
+            session.query(Promotion)
+            .options(joinedload(Promotion.components))
+            .filter(
+                Promotion.id == uuid.UUID(promotion_id),
+                Promotion.business_id == uuid.UUID(business_id),
+            )
+            .first()
+        )
+        return row.to_dict() if row else None
+    except Exception as exc:
+        logger.error("[PROMO] get_promotion failed: %s", exc, exc_info=True)
+        return None
+    finally:
+        session.close()
+
+
+# Filler tokens to drop before fuzzy-matching a promo by name. Lets us
+# resolve "dame una promo de honey" → just "honey" → match against
+# "2 Honey Burger con papas".
+_PROMO_QUERY_STOPWORDS = frozenset({
+    "promo", "promos", "promocion", "promoción", "promociones",
+    "combo", "combos", "oferta", "ofertas",
+    "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "para", "por", "con",
+    "dame", "quiero", "ese", "esa", "esos", "esas", "este", "esta",
+    "mi", "tu", "su",
+})
+
+
+def _normalize_promo_query(query: str) -> List[str]:
+    """Lowercase, strip filler tokens, return remaining content tokens."""
+    if not query:
+        return []
+    raw = [t for t in query.lower().strip().split() if t]
+    return [t for t in raw if t not in _PROMO_QUERY_STOPWORDS]
+
+
+def find_promo_by_query(
+    business_id: str,
+    query: str,
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Resolve a free-text promo reference against the active list.
+
+    Three matching passes against each promo's `name`, returning the
+    most-precise non-empty result:
+      1. Stripped full-query substring.
+      2. All content tokens present.
+      3. Any content token present (most lenient).
+
+    Returns 0, 1, or many matches. Caller decides UX:
+      - 0 → "no encontré esa promo"
+      - 1 → resolve to that promo (`promo["id"]`)
+      - many → ambiguity, ask the customer to be more specific
+
+    Schedule-filtered: only matches promos active at `when` in the
+    business's local timezone.
+    """
+    if not business_id or not query:
+        return []
+
+    promos = list_active_promos(business_id, when=when, timezone_name=timezone_name)
+    if not promos:
+        return []
+
+    tokens = _normalize_promo_query(query)
+    if not tokens:
+        return []
+    joined = " ".join(tokens)
+
+    def name_lower(p: Dict[str, Any]) -> str:
+        return (p.get("name") or "").lower()
+
+    pass1 = [p for p in promos if joined in name_lower(p)]
+    if pass1:
+        return pass1
+
+    pass2 = [p for p in promos if all(t in name_lower(p) for t in tokens)]
+    if pass2:
+        return pass2
+
+    # pass3 ("any token") is intentionally restricted to SINGLE-TOKEN
+    # queries. With multi-token queries it silently substitutes one
+    # promo for another that happens to share a boilerplate word
+    # (production 2026-05-11 / Biela: query "Dos Misuri con papas"
+    # returned "Dos Oregon con papas" because both share "dos" / "papas",
+    # and Misuri was schedule-filtered out). Single-token queries like
+    # "honey" or "lunes" still benefit and remain unambiguous.
+    if len(tokens) == 1:
+        return [p for p in promos if tokens[0] in name_lower(p)]
+    return []
+
+
+def match_and_apply(
+    *,
+    business_id: str,
+    cart_items: List[Dict[str, Any]],
+    when: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Decide which promos apply to a cart and return pricing decisions.
+
+    `cart_items` shape (matching what product_order_service.place_order
+    builds from the session cart):
+        [
+          {
+            "product_id": str,
+            "quantity": int,
+            "unit_price": float | Decimal,
+            "promotion_id": str | None,    # set by ADD_PROMO_TO_CART
+            "promo_group_id": str | None,  # set by ADD_PROMO_TO_CART
+          },
+          ...
+        ]
+
+    Returns:
+        {
+          "items": [<cart_item with line_total set>...],
+          "subtotal_before_promos": float,
+          "promo_discount_total": float,
+          "subtotal_after_promos": float,
+          "applications": [
+            {
+              "promotion_id": str,
+              "promotion_name": str,
+              "pricing_mode": str,
+              "discount_applied": float,
+              "promo_group_id": str,    # tags the consumed lines
+              "consumed": [{"product_id", "quantity"}],
+            }, ...
+          ],
+        }
+    """
+    when = when or datetime.now(timezone.utc)
+
+    # Pre-compute base line totals; we'll re-write them as promos consume items.
+    items = [_normalize_item(it) for it in cart_items]
+    subtotal_before = sum(it["unit_price"] * it["quantity"] for it in items)
+
+    applications: List[Dict[str, Any]] = []
+
+    # Step 1: honor bindings the agent already attached at add-time.
+    # Group bound items by (promotion_id, promo_group_id) and price each
+    # group as one promo application.
+    bound_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for it in items:
+        if it["promotion_id"] and it["promo_group_id"]:
+            bound_groups[(it["promotion_id"], it["promo_group_id"])].append(it)
+
+    for (promo_id, group_id), group_items in bound_groups.items():
+        promo = get_promotion(business_id, promo_id)
+        if not promo or not promo.get("is_active"):
+            # Promo got disabled/deleted between add-time and place. Drop the
+            # binding from those items so they price at base.
+            for it in group_items:
+                it["promotion_id"] = None
+                it["promo_group_id"] = None
+            continue
+        # Don't re-validate schedule here: the customer was promised this
+        # price when they added it. Honor the commitment.
+        app = _apply_promo_to_items(promo, group_items)
+        if app:
+            applications.append(app)
+
+    # Step 2: matcher runs on the remaining unbound items.
+    unbound_items = [it for it in items if not it["promotion_id"]]
+    available_promos = list_active_promos(
+        business_id, when=when, timezone_name=timezone_name,
+    )
+    # Promos with zero components (cart-wide discounts) require special
+    # handling — defer those past Phase 1.
+    component_promos = [p for p in available_promos if p.get("components")]
+
+    while True:
+        best_app, best_promo = _pick_best_application(component_promos, unbound_items)
+        if best_app is None:
+            break
+        applications.append(best_app)
+        # Mark consumed items so subsequent rounds don't double-count.
+        _consume_for_application(best_promo, unbound_items, best_app)
+
+    # Sum discount.
+    promo_discount_total = sum(Decimal(str(a["discount_applied"])) for a in applications)
+    subtotal_after = subtotal_before - promo_discount_total
+
+    return {
+        "items": items,
+        "subtotal_before_promos": float(subtotal_before),
+        "promo_discount_total": float(promo_discount_total),
+        "subtotal_after_promos": float(subtotal_after),
+        "applications": applications,
+    }
+
+
+# ── internals ────────────────────────────────────────────────────────
+
+
+def _normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
+    """Defensive copy with consistent types and a placeholder line_total."""
+    return {
+        "product_id": str(it["product_id"]),
+        "quantity": int(it.get("quantity") or 0),
+        "unit_price": Decimal(str(it.get("unit_price") or 0)),
+        "notes": it.get("notes"),
+        "promotion_id": (str(it["promotion_id"]) if it.get("promotion_id") else None),
+        "promo_group_id": (str(it["promo_group_id"]) if it.get("promo_group_id") else None),
+        "line_total": Decimal(str(it.get("unit_price") or 0)) * int(it.get("quantity") or 0),
+    }
+
+
+def _promo_date(value: Any) -> Optional[date]:
+    """Coerce starts_on/ends_on (datetime or date) to a plain date."""
+    if value is None:
+        return None
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _schedule_matches(promo: Promotion, when: datetime, tz: ZoneInfo) -> bool:
+    """True if `promo` is valid at `when`, evaluated in the business's tz.
+    Comparing day-of-week / start_time / end_time in UTC misfires for
+    schedules that straddle midnight (e.g. 22:00–02:00) — must be local."""
+    when_local = _to_local(when, tz)
+    today = when_local.date()
+
+    starts = _promo_date(promo.starts_on)
+    ends = _promo_date(promo.ends_on)
+    if starts and today < starts:
+        return False
+    if ends and today > ends:
+        return False
+
+    if promo.days_of_week:
+        # Postgres ISO: 1=Monday..7=Sunday. Python isoweekday() matches.
+        if when_local.isoweekday() not in promo.days_of_week:
+            return False
+
+    now_t = when_local.time()
+    if promo.start_time and now_t < promo.start_time:
+        return False
+    if promo.end_time and now_t > promo.end_time:
+        return False
+
+    return True
+
+
+def _next_active_iso_weekday(promo: Promotion, when_local: datetime) -> Optional[int]:
+    """
+    Return the ISO weekday (1=Mon..7=Sun) of the next day in the next 7
+    on which `promo` would be active (ignoring time-of-day window).
+    Returns None when the promo has no day_of_week constraint (it'd be
+    "active today" by definition then), is past `ends_on`, or has no
+    matching day in the lookahead window.
+    """
+    days = promo.days_of_week or []
+    if not days:
+        return None  # always-on; not "upcoming", it's just not active right now (probably outside time window)
+    today = when_local.date()
+    ends = _promo_date(promo.ends_on)
+    starts = _promo_date(promo.starts_on)
+    today_iso = when_local.isoweekday()
+
+    for offset in range(1, 8):
+        candidate_date = today + timedelta(days=offset)
+        candidate_iso = ((today_iso - 1 + offset) % 7) + 1
+        if candidate_iso not in days:
+            continue
+        if starts and candidate_date < starts:
+            continue
+        if ends and candidate_date > ends:
+            continue
+        return candidate_iso
+    return None
+
+
+def _apply_promo_to_items(
+    promo: Dict[str, Any],
+    group_items: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Compute discount for an explicit (already-bound) promo group.
+    Doesn't validate components — trusts what the agent set at add-time.
+    """
+    if not group_items:
+        return None
+    base_total = sum(it["unit_price"] * it["quantity"] for it in group_items)
+    discount, mode = _compute_discount(promo, base_total)
+
+    if discount <= 0:
+        return None
+
+    # Re-write line_total per item proportionally so receipts add up.
+    if mode == PRICING_FIXED_PRICE:
+        # Distribute the fixed_price across lines proportional to base.
+        fixed_price = Decimal(str(promo["fixed_price"]))
+        if base_total > 0:
+            for it in group_items:
+                share = (it["unit_price"] * it["quantity"]) / base_total
+                it["line_total"] = (fixed_price * share).quantize(Decimal("0.01"))
+    else:
+        # discount_amount / discount_pct — apply proportionally.
+        for it in group_items:
+            share = (it["unit_price"] * it["quantity"]) / base_total if base_total > 0 else Decimal(0)
+            it["line_total"] = (it["unit_price"] * it["quantity"] - discount * share).quantize(Decimal("0.01"))
+
+    promo_group_id = group_items[0]["promo_group_id"]
+    return {
+        "promotion_id": str(promo["id"]),
+        "promotion_name": promo["name"],
+        "pricing_mode": mode,
+        "discount_applied": float(discount),
+        "promo_group_id": promo_group_id,
+        "consumed": [{"product_id": it["product_id"], "quantity": it["quantity"]} for it in group_items],
+    }
+
+
+def _pick_best_application(
+    candidate_promos: List[Dict[str, Any]],
+    unbound_items: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Among `candidate_promos`, find the (promo, application) pair that
+    yields the largest discount given the current unbound items.
+    Returns (None, None) when no promo qualifies.
+    """
+    best_app: Optional[Dict[str, Any]] = None
+    best_promo: Optional[Dict[str, Any]] = None
+    best_discount = Decimal(0)
+
+    cart_qty = _cart_qty_map(unbound_items)
+
+    for promo in candidate_promos:
+        components = promo.get("components") or []
+        if not components or not _components_satisfied(components, cart_qty):
+            continue
+
+        # Build the consumed-item slice for ONE application of this promo.
+        consumed_items = _slice_consumed_items(components, unbound_items)
+        if not consumed_items:
+            continue
+        base_total = sum(it["unit_price"] * it["quantity"] for it in consumed_items)
+        discount, mode = _compute_discount(promo, base_total)
+
+        if discount > best_discount:
+            best_discount = discount
+            best_promo = promo
+            promo_group_id = str(uuid.uuid4())
+            best_app = {
+                "promotion_id": str(promo["id"]),
+                "promotion_name": promo["name"],
+                "pricing_mode": mode,
+                "discount_applied": float(discount),
+                "promo_group_id": promo_group_id,
+                "consumed": [{"product_id": it["product_id"], "quantity": it["quantity"]} for it in consumed_items],
+                "_consumed_refs": consumed_items,  # internal: for line_total rewrite
+                "_base_total": base_total,         # internal
+            }
+
+    return best_app, best_promo
+
+
+def _consume_for_application(
+    promo: Dict[str, Any],
+    unbound_items: List[Dict[str, Any]],
+    app: Dict[str, Any],
+) -> None:
+    """
+    Reduce qty / mark items as bound to record that this application
+    consumed them. Re-prices the consumed items proportionally so the
+    sum equals the promo price.
+    """
+    consumed_refs: List[Dict[str, Any]] = app["_consumed_refs"]
+    base_total: Decimal = app["_base_total"]
+    promo_group_id = app["promo_group_id"]
+    mode = app["pricing_mode"]
+
+    if mode == PRICING_FIXED_PRICE:
+        fixed_price = Decimal(str(promo["fixed_price"]))
+        for it in consumed_refs:
+            share = (it["unit_price"] * it["quantity"]) / base_total if base_total > 0 else Decimal(0)
+            it["line_total"] = (fixed_price * share).quantize(Decimal("0.01"))
+            it["promotion_id"] = str(promo["id"])
+            it["promo_group_id"] = promo_group_id
+    else:
+        discount = Decimal(str(app["discount_applied"]))
+        for it in consumed_refs:
+            share = (it["unit_price"] * it["quantity"]) / base_total if base_total > 0 else Decimal(0)
+            it["line_total"] = (it["unit_price"] * it["quantity"] - discount * share).quantize(Decimal("0.01"))
+            it["promotion_id"] = str(promo["id"])
+            it["promo_group_id"] = promo_group_id
+
+    # Drop the internal helpers so callers don't see them.
+    app.pop("_consumed_refs", None)
+    app.pop("_base_total", None)
+
+
+def _cart_qty_map(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    """product_id -> total available qty among items not yet bound to a promo."""
+    qty: Dict[str, int] = defaultdict(int)
+    for it in items:
+        if it["promotion_id"] is None:
+            qty[it["product_id"]] += it["quantity"]
+    return qty
+
+
+def _components_satisfied(components: List[Dict[str, Any]], cart_qty: Dict[str, int]) -> bool:
+    for c in components:
+        if cart_qty.get(str(c["product_id"]), 0) < int(c["quantity"]):
+            return False
+    return True
+
+
+def _slice_consumed_items(
+    components: List[Dict[str, Any]],
+    unbound_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Pick which actual cart-line items represent the consumption of ONE
+    promo application. We split lines if needed (e.g. cart has 4 burgers
+    on one line, promo wants 2 — we split to a 2-line + 2-line so the
+    promo's items are independently price-able).
+
+    Returns references into `unbound_items` (mutating list).
+    """
+    needed: Dict[str, int] = {str(c["product_id"]): int(c["quantity"]) for c in components}
+    out: List[Dict[str, Any]] = []
+
+    for product_id, qty_needed in needed.items():
+        remaining = qty_needed
+        for idx, it in enumerate(unbound_items):
+            if remaining <= 0:
+                break
+            if it["promotion_id"] is not None:
+                continue
+            if it["product_id"] != product_id:
+                continue
+            if it["quantity"] <= remaining:
+                # consume the whole line
+                remaining -= it["quantity"]
+                out.append(it)
+            else:
+                # split: keep the leftover as a new line, take the consumed slice
+                consumed_slice = dict(it)
+                consumed_slice["quantity"] = remaining
+                consumed_slice["line_total"] = consumed_slice["unit_price"] * remaining
+                it["quantity"] -= remaining
+                it["line_total"] = it["unit_price"] * it["quantity"]
+                # Insert the slice into the working list so downstream re-pricing
+                # sees it as a real item.
+                unbound_items.insert(idx, consumed_slice)
+                out.append(consumed_slice)
+                remaining = 0
+        if remaining > 0:
+            # Should never happen — _components_satisfied already verified.
+            return []
+    return out
+
+
+def _compute_discount(promo: Dict[str, Any], base_total: Decimal) -> Tuple[Decimal, str]:
+    """Return (discount_amount, pricing_mode_label)."""
+    if promo.get("fixed_price") is not None:
+        fixed = Decimal(str(promo["fixed_price"]))
+        return (max(Decimal(0), base_total - fixed), PRICING_FIXED_PRICE)
+    if promo.get("discount_amount") is not None:
+        amt = Decimal(str(promo["discount_amount"]))
+        return (min(amt, base_total), PRICING_DISCOUNT_AMOUNT)
+    if promo.get("discount_pct") is not None:
+        pct = Decimal(str(promo["discount_pct"]))
+        return ((base_total * pct / Decimal(100)).quantize(Decimal("0.01")), PRICING_DISCOUNT_PCT)
+    return (Decimal(0), "")
+
+
+# ── display preview ────────────────────────────────────────────────
+
+
+def preview_cart(
+    business_id: str,
+    cart_items: List[Dict[str, Any]],
+    timezone_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Compute matcher-aware totals + display-grouped lines for an in-progress
+    cart, so every surface (planner prompts, response templates, tool return
+    strings) shows the same numbers the customer will actually pay.
+
+    Two output shapes:
+
+    `display_groups`: bundle-aware ordering for human display.
+      [
+        # When a promo applied, its components collapse into one group.
+        {
+          "kind": "promo_bundle",
+          "promotion_name": str,
+          "promo_price": float,         # what the bundle costs after discount
+          "components": [{"name", "quantity"}, ...],
+          "discount_applied": float,
+        },
+        # Items not bound to any promo render as plain rows.
+        {
+          "kind": "item",
+          "name": str,
+          "quantity": int,
+          "unit_price": float,
+          "line_total": float,
+          "notes": str | None,
+        },
+        ...
+      ]
+
+    Plus the scalar totals from the matcher run:
+      `subtotal_before_promos`, `promo_discount_total`, `subtotal`.
+    """
+    cart_input = [
+        {
+            "product_id": it.get("product_id"),
+            "quantity": int(it.get("quantity") or 0),
+            "unit_price": float(it.get("price") or it.get("unit_price") or 0),
+            "notes": it.get("notes"),
+            "promotion_id": it.get("promotion_id"),
+            "promo_group_id": it.get("promo_group_id"),
+            "name": it.get("name"),  # carried through for display
+        }
+        for it in (cart_items or [])
+    ]
+    if not cart_input:
+        return {
+            "display_groups": [],
+            "subtotal_before_promos": 0.0,
+            "promo_discount_total": 0.0,
+            "subtotal": 0.0,
+            "applications": [],
+        }
+
+    pricing = match_and_apply(
+        business_id=business_id,
+        cart_items=cart_input,
+        timezone_name=timezone_name,
+    )
+
+    # Index applications by promo_group_id so we can attach the bundle
+    # name + discount to its component rows.
+    apps_by_group: Dict[str, Dict[str, Any]] = {
+        a.get("promo_group_id"): a for a in (pricing.get("applications") or [])
+        if a.get("promo_group_id")
+    }
+
+    # Walk the priced items and bucket them into display groups. Items
+    # that share a promo_group_id collapse into one promo_bundle group.
+    seen_groups: set = set()
+    groups: List[Dict[str, Any]] = []
+    for it in pricing["items"]:
+        gid = it.get("promo_group_id")
+        if gid:
+            if gid in seen_groups:
+                continue
+            seen_groups.add(gid)
+            app = apps_by_group.get(gid) or {}
+            members = [m for m in pricing["items"] if m.get("promo_group_id") == gid]
+            base_total = sum(
+                float(m.get("unit_price") or 0) * int(m.get("quantity") or 0)
+                for m in members
+            )
+            promo_total = float(base_total) - float(app.get("discount_applied") or 0)
+            # Use the original cart_input names so we keep the human label.
+            name_by_pid = {str(c["product_id"]): c.get("name") for c in cart_input if c.get("name")}
+            groups.append({
+                "kind": "promo_bundle",
+                "promotion_name": app.get("promotion_name") or "Promo",
+                "promo_price": promo_total,
+                "discount_applied": float(app.get("discount_applied") or 0),
+                "components": [
+                    {
+                        "name": name_by_pid.get(str(m["product_id"])) or m["product_id"],
+                        "quantity": int(m.get("quantity") or 0),
+                    }
+                    for m in members
+                ],
+            })
+        else:
+            name_by_pid = {str(c["product_id"]): c.get("name") for c in cart_input if c.get("name")}
+            groups.append({
+                "kind": "item",
+                "name": name_by_pid.get(str(it["product_id"])) or it.get("product_id"),
+                "quantity": int(it.get("quantity") or 0),
+                "unit_price": float(it.get("unit_price") or 0),
+                "line_total": float(it.get("line_total") or 0),
+                "notes": it.get("notes"),
+            })
+
+    return {
+        "display_groups": groups,
+        "subtotal_before_promos": float(pricing["subtotal_before_promos"]),
+        "promo_discount_total": float(pricing["promo_discount_total"]),
+        "subtotal": float(pricing["subtotal_after_promos"]),
+        "applications": pricing.get("applications") or [],
+    }

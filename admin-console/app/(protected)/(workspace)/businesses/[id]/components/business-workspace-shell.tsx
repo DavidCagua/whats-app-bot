@@ -20,94 +20,80 @@ import { cn } from "@/lib/utils"
 import { UserNav } from "@/components/user-nav"
 import type { SwitcherBusiness } from "@/lib/workspace-businesses"
 import { BusinessSwitcher } from "./business-switcher"
+import { OrdersAttentionBanner } from "./orders-attention-banner"
 import logo from "@/app/logo.png"
+import { MODULES, type ModuleKey } from "@/lib/modules"
 import {
   BookUser,
   CalendarDays,
   ChevronLeft,
+  Clock,
+  Contact,
   LayoutDashboard,
   MessageSquare,
   Package,
   Scissors,
   Settings,
   ShoppingCart,
+  Tag,
   UserCog,
   Users,
+  type LucideIcon,
 } from "lucide-react"
 
-const nav = (id: string) =>
-  [
-    {
-      href: `/businesses/${id}`,
-      label: "Resumen",
-      icon: LayoutDashboard,
-    },
-    {
-      href: `/businesses/${id}/inbox`,
-      label: "Bandeja de entrada",
-      icon: MessageSquare,
-    },
-    {
-      href: `/businesses/${id}/bookings`,
-      label: "Reservas",
-      icon: CalendarDays,
-    },
-    {
-      href: `/businesses/${id}/orders`,
-      label: "Pedidos",
-      icon: ShoppingCart,
-    },
-    {
-      href: `/businesses/${id}/products`,
-      label: "Productos",
-      icon: Package,
-    },
-    {
-      href: `/businesses/${id}/services`,
-      label: "Servicios",
-      icon: Scissors,
-    },
-    {
-      href: `/businesses/${id}/staff`,
-      label: "Personal",
-      icon: Users,
-    },
-    {
-      href: `/businesses/${id}/team`,
-      label: "Acceso",
-      icon: UserCog,
-    },
-    {
-      href: `/businesses/${id}/settings`,
-      label: "Configuración",
-      icon: Settings,
-    },
-  ] as const
+const MODULE_ICONS: Record<ModuleKey, LucideIcon> = {
+  overview: LayoutDashboard,
+  inbox: MessageSquare,
+  bookings: CalendarDays,
+  availability: Clock,
+  orders: ShoppingCart,
+  products: Package,
+  promotions: Tag,
+  services: Scissors,
+  customers: Contact,
+  staff: Users,
+  team: UserCog,
+  settings: Settings,
+}
+
+function buildNav(businessId: string, enabledModules: string[]) {
+  const enabled = new Set(enabledModules)
+  return MODULES.filter((m) => m.required || enabled.has(m.key)).map((m) => ({
+    href: `/businesses/${businessId}${m.hrefSegment}`,
+    label: m.label,
+    icon: MODULE_ICONS[m.key],
+  }))
+}
 
 type BusinessWorkspaceShellProps = {
   businessId: string
   businessName: string
+  /** Optional module keys this business has access to, from businesses.enabled_modules. */
+  enabledModules: string[]
   switcherBusinesses: SwitcherBusiness[]
   userName: string | null | undefined
   userEmail: string | null | undefined
   isSuperAdmin: boolean
   /** Server action sign-out form (cannot call signOut from this client component). */
   signOutSlot: ReactNode
+  initialOrderCounts: { pending: number; inFlight: number; awaitingHandoff: number }
   children: React.ReactNode
 }
 
 export function BusinessWorkspaceShell({
   businessId,
   businessName,
+  enabledModules,
   switcherBusinesses,
   userName,
   userEmail,
   isSuperAdmin,
   signOutSlot,
+  initialOrderCounts,
   children,
 }: BusinessWorkspaceShellProps) {
   const pathname = usePathname()
-  const items = nav(businessId)
+  const items = buildNav(businessId, enabledModules)
 
   function isNavActive(href: string) {
     if (pathname === href) return true
@@ -189,6 +175,12 @@ export function BusinessWorkspaceShell({
           <div className="flex h-14 items-center border-b px-4 md:px-6">
             <SidebarTrigger className={cn("-ml-1")} />
           </div>
+          {enabledModules.includes("orders") && (
+            <OrdersAttentionBanner
+              businessId={businessId}
+              initialCounts={initialOrderCounts}
+            />
+          )}
           <div className="flex-1 overflow-auto p-4 md:p-6">{children}</div>
         </main>
       </div>

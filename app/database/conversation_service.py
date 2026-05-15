@@ -8,7 +8,7 @@ import uuid
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from .models import Conversation, ConversationAttachment, get_db_session, create_tables
+from .models import Conversation, ConversationAttachment, get_db_session
 
 # Default business ID for backward compatibility
 DEFAULT_BUSINESS_ID = "00000000-0000-0000-0000-000000000001"
@@ -17,18 +17,10 @@ class ConversationService:
     """Service for managing conversation history in PostgreSQL."""
 
     def __init__(self):
-        """Initialize the conversation service."""
-        self.ensure_tables_exist()
+        """Initialize the conversation service. Schema is managed by Alembic,
+        not by create_all at runtime — import is side-effect-free so unit
+        tests don't need a live database."""
         logging.info("ConversationService initialized with PostgreSQL backend")
-
-    def ensure_tables_exist(self):
-        """Ensure database tables are created."""
-        try:
-            create_tables()
-            logging.info("Database tables verified/created successfully")
-        except Exception as e:
-            logging.error(f"Error creating database tables: {e}")
-            raise
 
     def get_conversation_history(self, wa_id: str, limit: int = 10, business_id: Optional[str] = None) -> List[Dict]:
         """
@@ -73,7 +65,8 @@ class ConversationService:
 
     def store_conversation_message(self, wa_id: str, message: str, role: str,
                                    business_id: Optional[str] = None,
-                                   whatsapp_number_id: Optional[str] = None) -> bool:
+                                   whatsapp_number_id: Optional[str] = None,
+                                   agent_type: Optional[str] = None) -> bool:
         """
         Store a single conversation message.
 
@@ -83,6 +76,9 @@ class ConversationService:
             role: 'user' or 'assistant'
             business_id: Business UUID (optional, defaults to default business)
             whatsapp_number_id: WhatsApp number UUID (optional)
+            agent_type: Source tag. ``'operator'`` for admin-console manual
+                sends so planners can distinguish them from real bot turns.
+                Leave None for bot-generated assistant messages.
 
         Returns:
             True if stored successfully, False otherwise
@@ -100,7 +96,8 @@ class ConversationService:
                 whatsapp_number_id=uuid.UUID(whatsapp_number_id) if whatsapp_number_id else None,
                 whatsapp_id=wa_id,
                 message=message,
-                role=role
+                role=role,
+                agent_type=agent_type,
             )
 
             session.add(conversation)
@@ -122,6 +119,7 @@ class ConversationService:
         attachments: List[Dict],
         business_id: Optional[str] = None,
         whatsapp_number_id: Optional[str] = None,
+        agent_type: Optional[str] = None,
     ) -> Optional[int]:
         """
         Store one conversation message and N attachment rows (provider URLs only).
@@ -148,6 +146,7 @@ class ConversationService:
                 message=message_text or "",
                 message_type=message_type,
                 role=role,
+                agent_type=agent_type,
             )
             session.add(conv)
             session.flush()

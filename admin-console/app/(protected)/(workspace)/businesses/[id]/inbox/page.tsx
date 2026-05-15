@@ -70,7 +70,7 @@ export default async function InboxPage({
       searchQuery,
       dateFrom,
       dateTo,
-      limit: 100,
+      limit: 50,
       offset: 0,
     }),
     access.canSeeAllStats

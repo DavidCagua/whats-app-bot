@@ -3,18 +3,55 @@ Database models for Multi-Tenant WhatsApp bot.
 Includes models for businesses, users, WhatsApp numbers, customers, and conversations.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Numeric, create_engine, BigInteger
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from datetime import datetime
+from sqlalchemy import (
+    Column,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    Date,
+    DateTime,
+    Time,
+    Boolean,
+    ForeignKey,
+    Numeric,
+    create_engine,
+    BigInteger,
+    Index,
+    UniqueConstraint,
+    MetaData,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY, ENUM as PgEnum
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base
+from pgvector.sqlalchemy import Vector
+from datetime import datetime, timezone
 import os
 import uuid
 from dotenv import load_dotenv
 
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now. Used by SQLAlchemy onupdate hooks."""
+    return datetime.now(timezone.utc)
+
 load_dotenv()
 
-Base = declarative_base()
+# Naming convention matches the raw SQL migrations in /migrations/*.sql
+# so that `index=True` and unique=True produce the same names as prod.
+# - Single-column indexes: idx_<table>_<column>
+# - Unique constraints:    <table>_<column>_key   (postgres default)
+# - Composite indexes/constraints: declared explicitly in __table_args__.
+NAMING_CONVENTION = {
+    "ix": "idx_%(table_name)s_%(column_0_name)s",
+    "uq": "%(table_name)s_%(column_0_name)s_key",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "%(table_name)s_%(column_0_name)s_fkey",
+    "pk": "%(table_name)s_pkey",
+}
+
+Base = declarative_base(metadata=MetaData(naming_convention=NAMING_CONVENTION))
 
 
 # ============================================================================
@@ -24,14 +61,26 @@ Base = declarative_base()
 class Business(Base):
     """Model for businesses/organizations."""
     __tablename__ = 'businesses'
+    __table_args__ = {"comment": "Multi-tenant businesses table - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
     business_type = Column(String(50), default='barberia')
     settings = Column(JSONB, default={})
+    # Optional admin-console modules each business has access to. Required
+    # modules (overview, inbox, team/access, settings) aren't stored — they
+    # are always available. Owned by migration f1a3b6c2d8e9; mirrored here
+    # so alembic autogenerate doesn't drift.
+    enabled_modules = Column(
+        ARRAY(Text),
+        nullable=False,
+        server_default=text(
+            "ARRAY['bookings', 'orders', 'products', 'promotions', 'services', 'staff']::text[]"
+        ),
+    )
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     whatsapp_numbers = relationship("WhatsappNumber", back_populates="business", cascade="all, delete-orphan")
@@ -48,6 +97,7 @@ class Business(Base):
             'name': self.name,
             'business_type': self.business_type,
             'settings': self.settings,
+            'enabled_modules': list(self.enabled_modules) if self.enabled_modules else [],
             'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -65,15 +115,23 @@ class WhatsappNumber(Base):
     Only phone_number_id differs per business.
     """
     __tablename__ = 'whatsapp_numbers'
+    __table_args__ = {"comment": "WhatsApp Business API numbers - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
-    phone_number_id = Column(String(255), nullable=False, unique=True, index=True)  # Meta ID or "twilio:+123" for Twilio
+    # Nullable: businesses using Twilio (or any non-Meta provider) don't have
+    # a Meta phone_number_id. Migration 005 made it optional and added a
+    # partial unique index on the column where it's not null.
+    phone_number_id = Column(String(255), nullable=True, index=True)
     phone_number = Column(String(50), nullable=False)  # E.164 number for lookup (e.g., +15556738752)
-    display_name = Column(String(255), nullable=True)  # Optional friendly name
+    display_name = Column(
+        String(255),
+        nullable=True,
+        comment='Optional friendly name to identify this WhatsApp number (e.g., "Main Line", "Support Line")',
+    )
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     business = relationship("Business", back_populates="whatsapp_numbers")
@@ -99,15 +157,21 @@ class WhatsappNumber(Base):
 class User(Base):
     """Model for system users who can manage businesses."""
     __tablename__ = 'users'
+    __table_args__ = {"comment": "System users who can manage businesses - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), nullable=False, unique=True, index=True)
     password_hash = Column(Text, nullable=False)
     full_name = Column(String(255), nullable=True)
-    role = Column(String(50), nullable=True, index=True)  # 'super_admin' for OmnIA team, NULL for business users
+    role = Column(
+        String(50),
+        nullable=True,
+        index=True,
+        comment='User role: super_admin (full access), admin (org admin), staff (read-only)',
+    )
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     user_businesses = relationship("UserBusiness", back_populates="user", cascade="all, delete-orphan")
@@ -131,12 +195,13 @@ class User(Base):
 class UserBusiness(Base):
     """Model for user-business relationships (many-to-many with roles)."""
     __tablename__ = 'user_businesses'
+    __table_args__ = {"comment": "User-business access control - Migration 001"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     role = Column(String(50), default='member')  # 'admin' for business owners/admins, 'member' for employees
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     # Relationships
     user = relationship("User", back_populates="user_businesses")
@@ -168,7 +233,7 @@ class AgentType(Base):
     type = Column(String(50), nullable=False, unique=True)
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     def to_dict(self):
         return {
@@ -191,8 +256,8 @@ class BusinessAgent(Base):
     priority = Column(Integer, default=100)
     config = Column(JSONB, default={})
     created_by = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -221,8 +286,8 @@ class ConversationSession(Base):
     agent_contexts = Column(JSONB, default={})
     last_order_id = Column(String(50), nullable=True)
     last_booking_id = Column(String(50), nullable=True)
-    last_activity_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_activity_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -248,8 +313,13 @@ class ConversationAgentSetting(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     whatsapp_id = Column(String(50), nullable=False, index=True)
     agent_enabled = Column(Boolean, default=True, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Why the bot is currently disabled. NULL when agent_enabled=True or
+    # when staff disabled it manually with no specific reason. Set to a
+    # short tag (e.g. "delivery_handoff") by automated escalation paths
+    # so the admin UI can render distinct colored treatments.
+    handoff_reason = Column(Text, nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -257,6 +327,7 @@ class ConversationAgentSetting(Base):
             'business_id': str(self.business_id),
             'whatsapp_id': self.whatsapp_id,
             'agent_enabled': bool(self.agent_enabled),
+            'handoff_reason': self.handoff_reason,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -277,8 +348,8 @@ class ConversationAttachment(Base):
     duration_sec = Column(Numeric(10, 2), nullable=True)
     transcript = Column(Text, nullable=True)
     provider_metadata = Column(JSONB, default={}, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     conversation = relationship("Conversation", back_populates="attachments")
 
@@ -312,8 +383,8 @@ class Conversation(Base):
     message_type = Column(String(20), default='text', nullable=True)  # text | audio | image | document
     role = Column(String(20), nullable=False)  # 'user' or 'assistant'
     agent_type = Column(String(50), nullable=True)  # Future-proofing for per-agent history
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     # Relationships
     business = relationship("Business", back_populates="conversations")
@@ -354,8 +425,8 @@ class Customer(Base):
     address = Column(Text, nullable=True)
     phone = Column(String(50), nullable=True)
     payment_method = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def __repr__(self):
         return f"<Customer(id={self.id}, whatsapp_id='{self.whatsapp_id}', name='{self.name}')>"
@@ -375,6 +446,34 @@ class Customer(Base):
         }
 
 
+class BusinessCustomer(Base):
+    """
+    Per-business profile for a (business, customer) pair. The global
+    ``customers`` row stays as canonical identity; this row carries
+    per-business overrides on name/phone/address/payment_method and
+    drives the admin-console customers list (one query, indexed).
+    """
+    __tablename__ = 'business_customers'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id', ondelete='CASCADE'), nullable=False)
+    name = Column(String(100), nullable=True)
+    phone = Column(String(50), nullable=True)
+    address = Column(Text, nullable=True)
+    payment_method = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    source = Column(String(20), nullable=False, default='auto', server_default='auto')
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('business_id', 'customer_id', name='uq_business_customers_pair'),
+        Index('idx_business_customers_business_id', 'business_id'),
+        Index('idx_business_customers_customer_id', 'customer_id'),
+    )
+
+
 # ============================================================================
 # PRODUCTS AND ORDERS (Migration 007/008)
 # ============================================================================
@@ -392,8 +491,36 @@ class Product(Base):
     category = Column(String(50), nullable=True, index=True)
     sku = Column(String(50), nullable=True)
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # When TRUE, the product is hidden from every bot-facing discovery
+    # surface (search, category list, menu). It stays visible to lookups
+    # by ID — promo cart-add, order creation, and the admin promo picker
+    # — so a promotion can reference it without the bot offering it on
+    # its own. Pairs with ``is_active``: retired products use is_active=
+    # false; promo-only ones stay is_active=true, promo_only=true.
+    promo_only = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    tags = Column(ARRAY(Text), nullable=False, server_default="{}")
+    product_metadata = Column("metadata", JSONB, nullable=False, server_default="{}")
+    embedding = Column(Vector(1536), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_products_business_sku", "business_id", "sku"),
+        Index("idx_products_tags_gin", "tags", postgresql_using="gin"),
+        Index(
+            "idx_products_metadata_gin",
+            "metadata",
+            postgresql_using="gin",
+            postgresql_ops={"metadata": "jsonb_path_ops"},
+        ),
+        Index(
+            "idx_products_embedding_cosine",
+            "embedding",
+            postgresql_using="ivfflat",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"lists": 100},
+        ),
+    )
 
     def to_dict(self):
         return {
@@ -406,6 +533,8 @@ class Product(Base):
             'category': self.category,
             'sku': self.sku,
             'is_active': self.is_active,
+            'tags': list(self.tags or []),
+            'metadata': dict(self.product_metadata or {}),
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -423,8 +552,8 @@ class Service(Base):
     currency = Column(String(10), default='COP')
     duration_minutes = Column(Integer, nullable=False, default=60)
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -441,6 +570,24 @@ class Service(Base):
         }
 
 
+# Postgres ENUM for orders.status. The type is owned by the alembic
+# migration (a1c2d3e4f5b6); create_type=False keeps SQLAlchemy from
+# trying to CREATE TYPE again on metadata.create_all in tests.
+ORDER_STATUS_VALUES = (
+    'pending',
+    'confirmed',
+    'out_for_delivery',
+    'ready_for_pickup',
+    'completed',
+    'cancelled',
+)
+order_status_enum = PgEnum(
+    *ORDER_STATUS_VALUES,
+    name='order_status',
+    create_type=False,
+)
+
+
 class Order(Base):
     """Model for customer orders."""
     __tablename__ = 'orders'
@@ -449,16 +596,37 @@ class Order(Base):
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
     customer_id = Column(Integer, ForeignKey('customers.id', ondelete='SET NULL'), nullable=True, index=True)
     whatsapp_id = Column(String(50), nullable=True)
-    status = Column(String(20), default='pending', index=True)
+    status = Column(order_status_enum, nullable=False, default='pending', server_default='pending', index=True)
+    fulfillment_type = Column(Text, nullable=False, default='delivery', server_default='delivery', index=True)
+    # Human-facing counter — resets per business at Bogotá midnight. The
+    # UUID PK above stays the durable identity; this is what the cashier
+    # and customer say out loud ("pedido #001"). Allocated atomically
+    # against ``order_counters`` inside the create-order transaction.
+    display_number = Column(Integer, nullable=False)
+    display_date = Column(Date, nullable=False)
     total_amount = Column(Numeric(12, 2), nullable=False, default=0)
     notes = Column(Text, nullable=True)
     delivery_address = Column(Text, nullable=True)
-    contact_phone = Column(String(50), nullable=True)
-    payment_method = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    contact_phone = Column(Text, nullable=True)
+    payment_method = Column(Text, nullable=True)
+    cancellation_reason = Column(Text, nullable=True)
+    promo_discount_amount = Column(Numeric(12, 2), nullable=False, default=0, server_default='0')
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    ready_at = Column(DateTime(timezone=True), nullable=True)
+    out_for_delivery_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    # Provenance + cancel attribution for dashboard KPIs. `created_via`
+    # defaults to 'bot' at the DB layer because that's how every order
+    # arrives today; the admin console overrides it on staff-created
+    # orders. `cancelled_by` stays NULL until a cancel transition fires.
+    created_via = Column(String(20), nullable=False, default='bot', server_default='bot')
+    cancelled_by = Column(String(20), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+    applied_promotions = relationship("OrderPromotion", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -467,14 +635,42 @@ class Order(Base):
             'customer_id': self.customer_id,
             'whatsapp_id': self.whatsapp_id,
             'status': self.status,
+            'fulfillment_type': self.fulfillment_type or 'delivery',
+            'display_number': self.display_number,
+            'display_date': self.display_date.isoformat() if self.display_date else None,
             'total_amount': float(self.total_amount) if self.total_amount else 0,
             'notes': self.notes,
             'delivery_address': self.delivery_address,
             'contact_phone': self.contact_phone,
             'payment_method': self.payment_method,
+            'cancellation_reason': self.cancellation_reason,
+            'promo_discount_amount': float(self.promo_discount_amount) if self.promo_discount_amount is not None else 0,
+            'confirmed_at': self.confirmed_at.isoformat() if self.confirmed_at else None,
+            'ready_at': self.ready_at.isoformat() if self.ready_at else None,
+            'out_for_delivery_at': self.out_for_delivery_at.isoformat() if self.out_for_delivery_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'cancelled_at': self.cancelled_at.isoformat() if self.cancelled_at else None,
+            'created_via': self.created_via,
+            'cancelled_by': self.cancelled_by,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class OrderCounter(Base):
+    """Per-business+day allocator for ``orders.display_number``.
+
+    One row per (business, Bogotá-local date). The create-order path
+    UPSERTs this row with ``last_value = last_value + 1 RETURNING
+    last_value`` — the row-level lock during the UPSERT serializes
+    concurrent inserts so two orders can't grab the same number, with
+    no application-level retry logic.
+    """
+    __tablename__ = 'order_counters'
+
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), primary_key=True)
+    display_date = Column(Date, primary_key=True)
+    last_value = Column(Integer, nullable=False, default=0, server_default='0')
 
 
 class BusinessAvailability(Base):
@@ -483,14 +679,14 @@ class BusinessAvailability(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
-    day_of_week = Column(Integer, nullable=False)  # 0=Sunday, 6=Saturday
-    open_time = Column(String(5), nullable=False)   # "HH:MM"
-    close_time = Column(String(5), nullable=False)  # "HH:MM"
+    day_of_week = Column(SmallInteger, nullable=False)  # 0=Sunday, 6=Saturday
+    open_time = Column(Time, nullable=False)
+    close_time = Column(Time, nullable=False)
     slot_duration_minutes = Column(Integer, nullable=False, default=60)
     is_active = Column(Boolean, default=True)
     staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='CASCADE'), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     def to_dict(self):
         return {
@@ -522,8 +718,8 @@ class Booking(Base):
     notes = Column(Text, nullable=True)
     created_via = Column(String(20), default='whatsapp')  # whatsapp/admin/api
     staff_member_id = Column(UUID(as_uuid=True), ForeignKey('staff_members.id', ondelete='SET NULL'), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     customer = relationship("Customer", backref="bookings")
     service = relationship("Service", backref="bookings")
@@ -556,7 +752,10 @@ class OrderItem(Base):
     quantity = Column(Integer, nullable=False)
     unit_price = Column(Numeric(12, 2), nullable=False)
     line_total = Column(Numeric(12, 2), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    notes = Column(Text, nullable=True)
+    promotion_id = Column(UUID(as_uuid=True), ForeignKey('promotions.id', ondelete='SET NULL'), nullable=True, index=True)
+    promo_group_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
 
     order = relationship("Order", back_populates="order_items")
     product = relationship("Product", backref="order_items")
@@ -569,7 +768,173 @@ class OrderItem(Base):
             'quantity': self.quantity,
             'unit_price': float(self.unit_price) if self.unit_price else 0,
             'line_total': float(self.line_total) if self.line_total else 0,
+            'notes': self.notes,
+            'promotion_id': str(self.promotion_id) if self.promotion_id else None,
+            'promo_group_id': str(self.promo_group_id) if self.promo_group_id else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Promotion(Base):
+    """A configurable promo rule (schedule + components + pricing mode)."""
+    __tablename__ = 'promotions'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default='true')
+
+    # Pricing mode — exactly ONE non-null (DB CHECK enforces).
+    fixed_price = Column(Numeric(12, 2), nullable=True)
+    discount_amount = Column(Numeric(12, 2), nullable=True)
+    discount_pct = Column(SmallInteger, nullable=True)
+
+    # Schedule (NULL = no constraint on that dimension).
+    days_of_week = Column(ARRAY(SmallInteger), nullable=True)  # ISO 1=Mon..7=Sun
+    start_time = Column(Time, nullable=True)
+    end_time = Column(Time, nullable=True)
+    # Calendar boundaries — DATE, not DATETIME. Time-of-day is handled
+    # separately by start_time / end_time. Aligns with the migration
+    # b2d4e6f8a0c1 which created these as `sa.Date()`.
+    starts_on = Column(Date, nullable=True)
+    ends_on = Column(Date, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
+
+    components = relationship(
+        "PromotionComponent",
+        back_populates="promotion",
+        cascade="all, delete-orphan",
+    )
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'name': self.name,
+            'description': self.description,
+            'is_active': self.is_active,
+            'fixed_price': float(self.fixed_price) if self.fixed_price is not None else None,
+            'discount_amount': float(self.discount_amount) if self.discount_amount is not None else None,
+            'discount_pct': self.discount_pct,
+            'days_of_week': list(self.days_of_week) if self.days_of_week else None,
+            'start_time': self.start_time.isoformat() if self.start_time else None,
+            'end_time': self.end_time.isoformat() if self.end_time else None,
+            'starts_on': self.starts_on.isoformat() if self.starts_on else None,
+            'ends_on': self.ends_on.isoformat() if self.ends_on else None,
+            'components': [c.to_dict() for c in (self.components or [])],
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PromotionComponent(Base):
+    """One required (product, qty) pair belonging to a Promotion."""
+    __tablename__ = 'promotion_components'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    promotion_id = Column(UUID(as_uuid=True), ForeignKey('promotions.id', ondelete='CASCADE'), nullable=False, index=True)
+    product_id = Column(UUID(as_uuid=True), ForeignKey('products.id', ondelete='CASCADE'), nullable=False)
+    quantity = Column(SmallInteger, nullable=False, default=1, server_default='1')
+
+    promotion = relationship("Promotion", back_populates="components")
+    product = relationship("Product")
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'promotion_id': str(self.promotion_id),
+            'product_id': str(self.product_id),
+            'quantity': int(self.quantity or 0),
+        }
+
+
+class OrderPromotion(Base):
+    """Audit row: a promo applied to an order at place_order time."""
+    __tablename__ = 'order_promotions'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_id = Column(UUID(as_uuid=True), ForeignKey('orders.id', ondelete='CASCADE'), nullable=False, index=True)
+    promotion_id = Column(UUID(as_uuid=True), ForeignKey('promotions.id', ondelete='RESTRICT'), nullable=False, index=True)
+    promotion_name = Column(String(120), nullable=False)
+    pricing_mode = Column(String(20), nullable=False)
+    discount_applied = Column(Numeric(12, 2), nullable=False)
+    applied_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'order_id': str(self.order_id),
+            'promotion_id': str(self.promotion_id),
+            'promotion_name': self.promotion_name,
+            'pricing_mode': self.pricing_mode,
+            'discount_applied': float(self.discount_applied) if self.discount_applied is not None else 0,
+            'applied_at': self.applied_at.isoformat() if self.applied_at else None,
+        }
+
+
+class ConversationDailyAnalysis(Base):
+    """Daily post-mortem of a single (business, whatsapp_id) conversation.
+
+    One row per (business_id, whatsapp_id, analysis_date) — the unique
+    constraint makes the cron idempotent. ``category`` is the deterministic
+    bucket derived from existing tables; ``summary`` / ``drop_off_reason``
+    are filled in by the LLM only for ambiguous cases.
+    """
+    __tablename__ = 'conversation_daily_analyses'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    business_id = Column(UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False, index=True)
+    whatsapp_id = Column(String(50), nullable=False)
+    analysis_date = Column(Date, nullable=False)
+
+    # One of: 'automatic_completed', 'automatic_no_order',
+    #         'automatic_dropped_off', 'human_intervention', 'delivery_handoff'
+    category = Column(String(40), nullable=False)
+
+    converted_to_order = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    order_id = Column(UUID(as_uuid=True), ForeignKey('orders.id', ondelete='SET NULL'), nullable=True)
+    had_human_intervention = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    handoff_reason = Column(Text, nullable=True)
+
+    message_count = Column(Integer, nullable=False, default=0, server_default=text('0'))
+    first_msg_at = Column(DateTime(timezone=True), nullable=True)
+    last_msg_at = Column(DateTime(timezone=True), nullable=True)
+
+    summary = Column(Text, nullable=True)
+    drop_off_reason = Column(Text, nullable=True)
+    has_issues = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    model = Column(String(50), nullable=True)
+    analyzed_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('business_id', 'whatsapp_id', 'analysis_date',
+                         name='uq_daily_analysis_per_convo_per_day'),
+        Index('idx_conversation_daily_analyses_business_date', 'business_id', 'analysis_date'),
+        Index('idx_conversation_daily_analyses_category', 'category'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'business_id': str(self.business_id),
+            'whatsapp_id': self.whatsapp_id,
+            'analysis_date': self.analysis_date.isoformat() if self.analysis_date else None,
+            'category': self.category,
+            'converted_to_order': self.converted_to_order,
+            'order_id': str(self.order_id) if self.order_id else None,
+            'had_human_intervention': self.had_human_intervention,
+            'handoff_reason': self.handoff_reason,
+            'message_count': self.message_count,
+            'first_msg_at': self.first_msg_at.isoformat() if self.first_msg_at else None,
+            'last_msg_at': self.last_msg_at.isoformat() if self.last_msg_at else None,
+            'summary': self.summary,
+            'drop_off_reason': self.drop_off_reason,
+            'has_issues': self.has_issues,
+            'model': self.model,
+            'analyzed_at': self.analyzed_at.isoformat() if self.analyzed_at else None,
         }
 
 
@@ -583,8 +948,8 @@ class StaffMember(Base):
     role = Column(String(100), nullable=False)  # e.g., 'barber', 'hairdresser', 'stylist'
     is_active = Column(Boolean, default=True, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 
     # Relationships
     business = relationship("Business", backref="staff_members")
@@ -613,15 +978,34 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Create engine with connection pooling for Supabase/PostgreSQL
+# Create engine with connection pooling for Supabase/PostgreSQL.
+#
+# When DATABASE_URL points at Supavisor's session-mode pooler, the upstream
+# Supavisor backend idle-kills sessions on the order of minutes — much
+# shorter than pool_recycle=3600. With pool_pre_ping=True, every silently
+# dropped connection forced a full reconnect (TCP + TLS + auth + Supavisor
+# lease ≈ 800ms) on the very next checkout, making every Customer lookup
+# pay that tax. Mitigations:
+#   - pool_recycle=180 — proactively recycle connections before Supavisor
+#     declares them idle.
+#   - TCP keepalives — OS-level heartbeats keep the session alive on the
+#     wire so Supavisor doesn't tear it down.
+# pool_pre_ping stays on as a safety net for the rare case where a
+# connection still slips through stale.
 engine = create_engine(
     DATABASE_URL,
     echo=False,
-    pool_size=5,  # Max 5 persistent connections
-    max_overflow=10,  # Allow 10 additional connections if pool is full
-    pool_timeout=30,  # Wait 30s for connection before failing
-    pool_recycle=3600,  # Recycle connections after 1 hour
-    pool_pre_ping=True  # Verify connections before using them
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=180,
+    pool_pre_ping=True,
+    connect_args={
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+    },
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
