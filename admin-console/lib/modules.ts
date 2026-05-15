@@ -1,4 +1,4 @@
-import { redirect } from "next/navigation"
+import { redirect } from "next/navigation";
 
 /**
  * Per-business module registry. Each entry corresponds to a sidebar
@@ -21,19 +21,19 @@ export type ModuleKey =
   | "customers"
   | "staff"
   | "team"
-  | "settings"
+  | "settings";
 
 export type Module = {
-  key: ModuleKey
+  key: ModuleKey;
   /** Display label in the sidebar / settings UI. */
-  label: string
+  label: string;
   /** Path segment appended to /businesses/[id]. Empty string for the overview page. */
-  hrefSegment: string
+  hrefSegment: string;
   /** Required modules always render and cannot be disabled. */
-  required: boolean
+  required: boolean;
   /** Short description shown on the super-admin toggle card. */
-  description?: string
-}
+  description?: string;
+};
 
 export const MODULES: readonly Module[] = [
   { key: "overview", label: "Resumen", hrefSegment: "", required: true },
@@ -110,18 +110,18 @@ export const MODULES: readonly Module[] = [
     hrefSegment: "/settings",
     required: true,
   },
-] as const
+] as const;
 
 export const OPTIONAL_MODULES: readonly Module[] = MODULES.filter(
-  (m) => !m.required
-)
+  (m) => !m.required,
+);
 
 const MODULES_BY_KEY = new Map<ModuleKey, Module>(
-  MODULES.map((m) => [m.key, m])
-)
+  MODULES.map((m) => [m.key, m]),
+);
 
 export function getModule(key: ModuleKey): Module | undefined {
-  return MODULES_BY_KEY.get(key)
+  return MODULES_BY_KEY.get(key);
 }
 
 /**
@@ -131,13 +131,13 @@ export function getModule(key: ModuleKey): Module | undefined {
  */
 export function isModuleEnabled(
   business: { enabled_modules: string[] } | null | undefined,
-  key: ModuleKey
+  key: ModuleKey,
 ): boolean {
-  const mod = MODULES_BY_KEY.get(key)
-  if (!mod) return false
-  if (mod.required) return true
-  if (!business) return false
-  return business.enabled_modules.includes(key)
+  const mod = MODULES_BY_KEY.get(key);
+  if (!mod) return false;
+  if (mod.required) return true;
+  if (!business) return false;
+  return business.enabled_modules.includes(key);
 }
 
 /**
@@ -145,9 +145,9 @@ export function isModuleEnabled(
  * surface in its sidebar.
  */
 export function getEnabledModules(business: {
-  enabled_modules: string[]
+  enabled_modules: string[];
 }): readonly Module[] {
-  return MODULES.filter((m) => isModuleEnabled(business, m.key))
+  return MODULES.filter((m) => isModuleEnabled(business, m.key));
 }
 
 /**
@@ -161,18 +161,18 @@ export function getEnabledModules(business: {
  */
 export async function redirectIfModuleDisabled(
   businessId: string,
-  key: ModuleKey
+  key: ModuleKey,
 ): Promise<void> {
-  const mod = MODULES_BY_KEY.get(key)
-  if (!mod || mod.required) return
+  const mod = MODULES_BY_KEY.get(key);
+  if (!mod || mod.required) return;
   // Lazy import to avoid pulling Prisma into client bundles that re-export
   // helpers from this module.
-  const { prisma } = await import("@/lib/prisma")
+  const { prisma } = await import("@/lib/prisma");
   const business = await prisma.businesses.findUnique({
     where: { id: businessId },
     select: { enabled_modules: true },
-  })
+  });
   if (!business || !isModuleEnabled(business, key)) {
-    redirect(`/businesses/${businessId}`)
+    redirect(`/businesses/${businessId}`);
   }
 }

@@ -1,36 +1,36 @@
-import { prisma } from "./prisma"
-import type { Prisma } from "@prisma/client"
+import { prisma } from "./prisma";
+import type { Prisma } from "@prisma/client";
 
-export type FulfillmentType = "delivery" | "pickup"
+export type FulfillmentType = "delivery" | "pickup";
 
 export type OrderRow = {
-  id: string
-  display_number: number
-  display_date: string
-  created_at: string | null
-  whatsapp_id: string | null
-  customer_id: number | null
-  customer_name: string | null
-  delivery_address: string | null
-  payment_method: string | null
-  total_amount: number
-  subtotal: number
-  delivery_fee: number
-  fulfillment_type: FulfillmentType
-  notes: string | null
-  status: string
+  id: string;
+  display_number: number;
+  display_date: string;
+  created_at: string | null;
+  whatsapp_id: string | null;
+  customer_id: number | null;
+  customer_name: string | null;
+  delivery_address: string | null;
+  payment_method: string | null;
+  total_amount: number;
+  subtotal: number;
+  delivery_fee: number;
+  fulfillment_type: FulfillmentType;
+  notes: string | null;
+  status: string;
   /** True when this order's conversation has been auto-handed off to
    * a human (e.g. customer asked for status >50min after placement). */
-  awaiting_handoff: boolean
+  awaiting_handoff: boolean;
   items: {
-    id: string
-    quantity: number
-    productName: string
-    notes: string | null
-    unitPrice: number
-    lineTotal: number
-  }[]
-}
+    id: string;
+    quantity: number;
+    productName: string;
+    notes: string | null;
+    unitPrice: number;
+    lineTotal: number;
+  }[];
+};
 
 /**
  * List orders for a business in newest-first order with their items.
@@ -42,11 +42,11 @@ export type OrderRow = {
  */
 export async function getOrdersForBusiness(
   businessId: string,
-  range?: { fromUtc: Date; toUtc: Date }
+  range?: { fromUtc: Date; toUtc: Date },
 ): Promise<OrderRow[]> {
-  const where: Prisma.ordersWhereInput = { business_id: businessId }
+  const where: Prisma.ordersWhereInput = { business_id: businessId };
   if (range) {
-    where.created_at = { gte: range.fromUtc, lte: range.toUtc }
+    where.created_at = { gte: range.fromUtc, lte: range.toUtc };
   }
   const orders = await prisma.orders.findMany({
     where,
@@ -57,7 +57,7 @@ export async function getOrdersForBusiness(
       },
       customers: true,
     },
-  })
+  });
 
   // One round-trip to fetch the set of whatsapp_ids currently in
   // handoff for this business. Avoids per-order N+1 queries — the
@@ -68,11 +68,11 @@ export async function getOrdersForBusiness(
         where: { business_id: businessId, handoff_reason: { not: null } },
         select: { whatsapp_id: true },
       })
-    ).map((r) => r.whatsapp_id)
-  )
+    ).map((r) => r.whatsapp_id),
+  );
 
   return orders.map((order) => {
-    const totalAmount = Number(order.total_amount.toString())
+    const totalAmount = Number(order.total_amount.toString());
     const items = order.order_items.map((oi) => ({
       id: oi.id,
       quantity: oi.quantity,
@@ -80,11 +80,11 @@ export async function getOrdersForBusiness(
       notes: oi.notes ?? null,
       unitPrice: Number(oi.unit_price.toString()),
       lineTotal: Number(oi.line_total.toString()),
-    }))
-    const subtotal = items.reduce((sum, it) => sum + it.lineTotal, 0)
+    }));
+    const subtotal = items.reduce((sum, it) => sum + it.lineTotal, 0);
     // Orders only persist total_amount = subtotal + delivery_fee. Reverse-
     // engineer the fee for display; clamp to 0 to defend against legacy rows.
-    const deliveryFee = Math.max(0, totalAmount - subtotal)
+    const deliveryFee = Math.max(0, totalAmount - subtotal);
     return {
       id: order.id,
       display_number: order.display_number,
@@ -93,31 +93,36 @@ export async function getOrdersForBusiness(
       whatsapp_id: order.whatsapp_id ?? null,
       customer_id: order.customer_id ?? null,
       customer_name: order.customers?.name ?? null,
-      delivery_address: order.delivery_address ?? order.customers?.address ?? null,
-      payment_method: order.payment_method ?? order.customers?.payment_method ?? null,
+      delivery_address:
+        order.delivery_address ?? order.customers?.address ?? null,
+      payment_method:
+        order.payment_method ?? order.customers?.payment_method ?? null,
       total_amount: totalAmount,
       subtotal,
       delivery_fee: deliveryFee,
-      fulfillment_type: order.fulfillment_type === "pickup" ? "pickup" : "delivery",
+      fulfillment_type:
+        order.fulfillment_type === "pickup" ? "pickup" : "delivery",
       notes: order.notes ?? null,
       status: order.status ?? "pending",
-      awaiting_handoff: order.whatsapp_id ? handoffWaIds.has(order.whatsapp_id) : false,
+      awaiting_handoff: order.whatsapp_id
+        ? handoffWaIds.has(order.whatsapp_id)
+        : false,
       items,
-    }
-  })
+    };
+  });
 }
 
 export type OrderBannerCounts = {
   /** Orders still awaiting merchant confirmation. */
-  pending: number
+  pending: number;
   /** Confirmed orders that haven't been delivered yet (confirmed + out_for_delivery). */
-  inFlight: number
+  inFlight: number;
   /** Conversations the bot auto-handed off to a human (e.g. delivery follow-up). */
-  awaitingHandoff: number
-}
+  awaitingHandoff: number;
+};
 
 export async function getOrderBannerCounts(
-  businessId: string
+  businessId: string,
 ): Promise<OrderBannerCounts> {
   const [pending, inFlight, awaitingHandoff] = await Promise.all([
     prisma.orders.count({
@@ -132,6 +137,6 @@ export async function getOrderBannerCounts(
     prisma.conversation_agent_settings.count({
       where: { business_id: businessId, handoff_reason: { not: null } },
     }),
-  ])
-  return { pending, inFlight, awaitingHandoff }
+  ]);
+  return { pending, inFlight, awaitingHandoff };
 }

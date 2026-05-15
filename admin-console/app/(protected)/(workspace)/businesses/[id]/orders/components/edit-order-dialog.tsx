@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react"
+import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,52 +8,49 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { Plus, Trash2 } from "lucide-react"
-import { toast } from "sonner"
-import { useRouter } from "next/navigation"
-import { updateOrder } from "@/lib/actions/orders-update"
-import { getOrderForEdit } from "@/lib/orders-edit-data"
-import { formatDisplayNumber } from "@/lib/utils"
-import type {
-  CustomerOption,
-  ProductOption,
-} from "@/lib/orders-create-data"
+} from "@/components/ui/select";
+import { Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { useRouter } from "next/navigation";
+import { updateOrder } from "@/lib/actions/orders-update";
+import { getOrderForEdit } from "@/lib/orders-edit-data";
+import { formatDisplayNumber } from "@/lib/utils";
+import type { CustomerOption, ProductOption } from "@/lib/orders-create-data";
 
-const NEW_CUSTOMER = "__new__"
-const NO_CUSTOMER = "__none__"
+const NEW_CUSTOMER = "__new__";
+const NO_CUSTOMER = "__none__";
 
 type ItemDraft = {
-  productId: string
-  quantity: number
-  unitPrice: number
-  notes: string
-}
+  productId: string;
+  quantity: number;
+  unitPrice: number;
+  notes: string;
+};
 
 const formatCOP = (n: number) =>
   new Intl.NumberFormat("es-CO", {
     style: "currency",
     currency: "COP",
     minimumFractionDigits: 0,
-  }).format(n)
+  }).format(n);
 
 const emptyItem = (): ItemDraft => ({
   productId: "",
   quantity: 1,
   unitPrice: 0,
   notes: "",
-})
+});
 
 export function EditOrderDialog({
   orderId,
@@ -62,60 +59,60 @@ export function EditOrderDialog({
   products,
   customers,
 }: {
-  orderId: string | null
-  open: boolean
-  onOpenChange: (next: boolean) => void
-  products: ProductOption[]
-  customers: CustomerOption[]
+  orderId: string | null;
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  products: ProductOption[];
+  customers: CustomerOption[];
 }) {
-  const router = useRouter()
-  const [isPending, startTransition] = useTransition()
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [hasPromos, setHasPromos] = useState(false)
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasPromos, setHasPromos] = useState(false);
 
-  const [customerChoice, setCustomerChoice] = useState<string>(NO_CUSTOMER)
-  const [newWhatsappId, setNewWhatsappId] = useState("")
-  const [newCustomerName, setNewCustomerName] = useState("")
-  const [items, setItems] = useState<ItemDraft[]>([emptyItem()])
-  const [displayNumber, setDisplayNumber] = useState<number | null>(null)
+  const [customerChoice, setCustomerChoice] = useState<string>(NO_CUSTOMER);
+  const [newWhatsappId, setNewWhatsappId] = useState("");
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [items, setItems] = useState<ItemDraft[]>([emptyItem()]);
+  const [displayNumber, setDisplayNumber] = useState<number | null>(null);
   const [fulfillmentType, setFulfillmentType] = useState<"delivery" | "pickup">(
-    "delivery"
-  )
-  const [deliveryAddress, setDeliveryAddress] = useState("")
-  const [contactPhone, setContactPhone] = useState("")
-  const [paymentMethod, setPaymentMethod] = useState("")
-  const [deliveryFee, setDeliveryFee] = useState(0)
-  const [notes, setNotes] = useState("")
-  const isPickup = fulfillmentType === "pickup"
+    "delivery",
+  );
+  const [deliveryAddress, setDeliveryAddress] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("");
+  const [deliveryFee, setDeliveryFee] = useState(0);
+  const [notes, setNotes] = useState("");
+  const isPickup = fulfillmentType === "pickup";
 
   // Fetch full order details when the dialog opens with a new orderId.
   // We fetch on open (not at mount of the table) so the dialog stays
   // closed-cheap and we always see fresh data after a status change.
   useEffect(() => {
-    if (!open || !orderId) return
-    let cancelled = false
+    if (!open || !orderId) return;
+    let cancelled = false;
     /* eslint-disable react-hooks/set-state-in-effect -- intentional reset
        on open before the async fetch resolves */
-    setLoading(true)
-    setError(null)
+    setLoading(true);
+    setError(null);
     /* eslint-enable react-hooks/set-state-in-effect */
     getOrderForEdit(orderId).then((result) => {
-      if (cancelled) return
-      setLoading(false)
+      if (cancelled) return;
+      setLoading(false);
       if (!result.success) {
-        setError(result.error)
-        return
+        setError(result.error);
+        return;
       }
-      const d = result.data
-      setHasPromos(d.hasPromotions)
+      const d = result.data;
+      setHasPromos(d.hasPromotions);
       if (d.customer.customerId !== null) {
-        setCustomerChoice(String(d.customer.customerId))
+        setCustomerChoice(String(d.customer.customerId));
       } else {
-        setCustomerChoice(NO_CUSTOMER)
+        setCustomerChoice(NO_CUSTOMER);
       }
-      setNewWhatsappId("")
-      setNewCustomerName("")
+      setNewWhatsappId("");
+      setNewCustomerName("");
       setItems(
         d.items.length
           ? d.items.map((i) => ({
@@ -124,45 +121,49 @@ export function EditOrderDialog({
               unitPrice: i.unitPrice,
               notes: i.notes ?? "",
             }))
-          : [emptyItem()]
-      )
-      setDisplayNumber(d.displayNumber)
-      setFulfillmentType(d.fulfillmentType)
-      setDeliveryAddress(d.deliveryAddress ?? "")
-      setContactPhone(d.contactPhone ?? "")
-      setPaymentMethod(d.paymentMethod ?? "")
-      setDeliveryFee(0)
-      setNotes(d.notes ?? "")
-    })
+          : [emptyItem()],
+      );
+      setDisplayNumber(d.displayNumber);
+      setFulfillmentType(d.fulfillmentType);
+      setDeliveryAddress(d.deliveryAddress ?? "");
+      setContactPhone(d.contactPhone ?? "");
+      setPaymentMethod(d.paymentMethod ?? "");
+      setDeliveryFee(0);
+      setNotes(d.notes ?? "");
+    });
     return () => {
-      cancelled = true
-    }
-  }, [open, orderId])
+      cancelled = true;
+    };
+  }, [open, orderId]);
 
   const productById = useMemo(
     () => new Map(products.map((p) => [p.id, p])),
-    [products]
-  )
+    [products],
+  );
 
   const subtotal = useMemo(
     () => items.reduce((acc, i) => acc + i.quantity * i.unitPrice, 0),
-    [items]
-  )
-  const effectiveFee = isPickup ? 0 : Number.isFinite(deliveryFee) ? deliveryFee : 0
-  const total = subtotal + effectiveFee
+    [items],
+  );
+  const effectiveFee = isPickup
+    ? 0
+    : Number.isFinite(deliveryFee)
+      ? deliveryFee
+      : 0;
+  const total = subtotal + effectiveFee;
 
   function updateItem(idx: number, patch: Partial<ItemDraft>) {
     setItems((prev) =>
-      prev.map((it, i) => (i === idx ? { ...it, ...patch } : it))
-    )
+      prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)),
+    );
   }
 
   function onSelectProduct(idx: number, productId: string) {
-    const p = productById.get(productId)
+    const p = productById.get(productId);
     updateItem(idx, {
       productId,
-      unitPrice: p ? p.price : items[idx]?.unitPrice ?? 0,
-    })
+      unitPrice: p ? p.price : (items[idx]?.unitPrice ?? 0),
+    });
   }
 
   const canSubmit =
@@ -171,18 +172,18 @@ export function EditOrderDialog({
     items.length > 0 &&
     items.every((i) => i.productId && i.quantity > 0 && i.unitPrice >= 0) &&
     (customerChoice !== NEW_CUSTOMER ||
-      (newWhatsappId.trim() && newCustomerName.trim()))
+      (newWhatsappId.trim() && newCustomerName.trim()));
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    if (!canSubmit || !orderId) return
+    e.preventDefault();
+    if (!canSubmit || !orderId) return;
 
     const customer =
       customerChoice === NO_CUSTOMER
         ? null
         : customerChoice === NEW_CUSTOMER
           ? { whatsappId: newWhatsappId.trim(), name: newCustomerName.trim() }
-          : { existingCustomerId: Number(customerChoice) }
+          : { existingCustomerId: Number(customerChoice) };
 
     startTransition(async () => {
       const result = await updateOrder({
@@ -200,15 +201,15 @@ export function EditOrderDialog({
         paymentMethod: isPickup ? null : paymentMethod,
         deliveryFee: isPickup ? 0 : deliveryFee,
         notes,
-      })
+      });
       if (!result.success) {
-        toast.error(result.error)
-        return
+        toast.error(result.error);
+        return;
       }
-      toast.success("Pedido actualizado")
-      onOpenChange(false)
-      router.refresh()
-    })
+      toast.success("Pedido actualizado");
+      onOpenChange(false);
+      router.refresh();
+    });
   }
 
   return (
@@ -224,8 +225,8 @@ export function EditOrderDialog({
             )}
           </DialogTitle>
           <DialogDescription>
-            Cambia ítems, cliente o datos de entrega. Los precios son los
-            que escribas — sin promociones automáticas.
+            Cambia ítems, cliente o datos de entrega. Los precios son los que
+            escribas — sin promociones automáticas.
           </DialogDescription>
         </DialogHeader>
 
@@ -246,8 +247,8 @@ export function EditOrderDialog({
             {hasPromos && (
               <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
                 Este pedido tiene promociones del bot. Al guardar se quitarán
-                las promociones — los productos y precios se mantienen tal
-                como están. Ajústalos si es necesario.
+                las promociones — los productos y precios se mantienen tal como
+                están. Ajústalos si es necesario.
               </div>
             )}
 
@@ -377,7 +378,7 @@ export function EditOrderDialog({
                           setItems((prev) =>
                             prev.length === 1
                               ? [emptyItem()]
-                              : prev.filter((_, i) => i !== idx)
+                              : prev.filter((_, i) => i !== idx),
                           )
                         }
                         aria-label="Eliminar ítem"
@@ -513,5 +514,5 @@ export function EditOrderDialog({
         )}
       </DialogContent>
     </Dialog>
-  )
+  );
 }

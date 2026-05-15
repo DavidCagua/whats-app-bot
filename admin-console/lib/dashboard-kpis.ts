@@ -1,103 +1,103 @@
-import { prisma } from "@/lib/prisma"
-import { Prisma } from "@prisma/client"
-import type { DateRange } from "@/lib/orders-date-range"
-import { rangeToUtc } from "@/lib/orders-date-range"
+import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
+import type { DateRange } from "@/lib/orders-date-range";
+import { rangeToUtc } from "@/lib/orders-date-range";
 
 // Constants the dashboard treats as fixed for every business today.
 // When we eventually persist them per business (orders.delivery_fee,
 // businesses.settings.sla_prep_minutes) the dashboard will read those
 // values instead — these are the single source of truth in the meantime.
-export const DELIVERY_FEE_COP = 7000
-export const DEMORA_THRESHOLD_MIN = 50
+export const DELIVERY_FEE_COP = 7000;
+export const DEMORA_THRESHOLD_MIN = 50;
 // Bot turns longer than this are almost certainly a human handoff or
 // an outage, not bot latency. Cap them so one bad day doesn't poison
 // the average.
-const BOT_RESPONSE_CAP_SEC = 300
+const BOT_RESPONSE_CAP_SEC = 300;
 
-const TOP_PRODUCTS_LIMIT = 5
+const TOP_PRODUCTS_LIMIT = 5;
 
 // Anything matching this regex on `payment_method` (case-insensitive)
 // counts as cash. Stored values are user-typed strings, so we accept a
 // few common variants.
-const CASH_PAYMENT_REGEX = "^(efectivo|cash|contado|plata)"
+const CASH_PAYMENT_REGEX = "^(efectivo|cash|contado|plata)";
 
 export type DashboardKpis = {
   summary: {
-    uniqueChats: number
-    chatsWithOrders: number
-    orders: number
-    conversionPct: number | null
-    ordersBot: number
-    ordersAdmin: number
-    incompletePct: number | null
-    cancelledByBusiness: number
-    cancelledByCustomer: number
-    cancelledOther: number
-    avgTicketNoDelivery: number | null
-    cashRevenue: number
-    promosCount: number
-    discountPctOfRevenue: number | null
-  }
+    uniqueChats: number;
+    chatsWithOrders: number;
+    orders: number;
+    conversionPct: number | null;
+    ordersBot: number;
+    ordersAdmin: number;
+    incompletePct: number | null;
+    cancelledByBusiness: number;
+    cancelledByCustomer: number;
+    cancelledOther: number;
+    avgTicketNoDelivery: number | null;
+    cashRevenue: number;
+    promosCount: number;
+    discountPctOfRevenue: number | null;
+  };
   performance: {
-    avgPrepMin: number | null
-    avgDispatchMin: number | null
-    avgTotalDeliveryMin: number | null
-    delayedCount: number
-    avgBotResponseSec: number | null
-    avgTimeToOrderMin: number | null
-  }
+    avgPrepMin: number | null;
+    avgDispatchMin: number | null;
+    avgTotalDeliveryMin: number | null;
+    delayedCount: number;
+    avgBotResponseSec: number | null;
+    avgTimeToOrderMin: number | null;
+  };
   catalog: {
-    topProducts: { name: string; qty: number }[]
-    recurringCustomers: number
-  }
+    topProducts: { name: string; qty: number }[];
+    recurringCustomers: number;
+  };
   constants: {
-    deliveryFeeCop: number
-    demoraThresholdMin: number
-  }
-}
+    deliveryFeeCop: number;
+    demoraThresholdMin: number;
+  };
+};
 
 type SummaryRow = {
-  unique_chats: bigint
-  chats_with_orders: bigint
-  orders: bigint
-  orders_bot: bigint
-  orders_admin: bigint
-  incomplete: bigint
-  cancelled_by_business: bigint
-  cancelled_by_customer: bigint
-  cancelled_other: bigint
-  avg_ticket_no_delivery: number | null
-  cash_revenue: number | null
-  promos_count: bigint
-  discount_total: number | null
-  revenue_total: number | null
-}
+  unique_chats: bigint;
+  chats_with_orders: bigint;
+  orders: bigint;
+  orders_bot: bigint;
+  orders_admin: bigint;
+  incomplete: bigint;
+  cancelled_by_business: bigint;
+  cancelled_by_customer: bigint;
+  cancelled_other: bigint;
+  avg_ticket_no_delivery: number | null;
+  cash_revenue: number | null;
+  promos_count: bigint;
+  discount_total: number | null;
+  revenue_total: number | null;
+};
 
 type PerformanceRow = {
-  avg_prep_sec: number | null
-  avg_dispatch_sec: number | null
-  avg_total_sec: number | null
-  delayed_count: bigint
-  avg_bot_response_sec: number | null
-  avg_time_to_order_sec: number | null
-}
+  avg_prep_sec: number | null;
+  avg_dispatch_sec: number | null;
+  avg_total_sec: number | null;
+  delayed_count: bigint;
+  avg_bot_response_sec: number | null;
+  avg_time_to_order_sec: number | null;
+};
 
-type TopProductRow = { name: string; qty: bigint }
-type RecurringRow = { count: bigint }
+type TopProductRow = { name: string; qty: bigint };
+type RecurringRow = { count: bigint };
 
 function toNumber(v: bigint | number | null | undefined): number {
-  if (v === null || v === undefined) return 0
-  return typeof v === "bigint" ? Number(v) : v
+  if (v === null || v === undefined) return 0;
+  return typeof v === "bigint" ? Number(v) : v;
 }
 
 function pct(numerator: number, denominator: number): number | null {
-  if (!denominator) return null
-  return (numerator / denominator) * 100
+  if (!denominator) return null;
+  return (numerator / denominator) * 100;
 }
 
 function secsToMin(s: number | null | undefined): number | null {
-  if (s === null || s === undefined) return null
-  return s / 60
+  if (s === null || s === undefined) return null;
+  return s / 60;
 }
 
 /**
@@ -124,11 +124,11 @@ function secsToMin(s: number | null | undefined): number | null {
  */
 export async function getDashboardKpis(
   businessId: string,
-  range: DateRange
+  range: DateRange,
 ): Promise<DashboardKpis> {
-  const { fromUtc, toUtc } = rangeToUtc(range)
-  const fromDate = range.from
-  const toDate = range.to
+  const { fromUtc, toUtc } = rangeToUtc(range);
+  const fromDate = range.from;
+  const toDate = range.to;
 
   const [summaryRows, performanceRows, topProductRows, recurringRows] =
     await Promise.all([
@@ -308,16 +308,16 @@ export async function getDashboardKpis(
           HAVING COUNT(*) > 1
         ) recurring
       `),
-    ])
+    ]);
 
-  const s = summaryRows[0] ?? ({} as SummaryRow)
-  const p = performanceRows[0] ?? ({} as PerformanceRow)
+  const s = summaryRows[0] ?? ({} as SummaryRow);
+  const p = performanceRows[0] ?? ({} as PerformanceRow);
 
-  const uniqueChats = toNumber(s.unique_chats)
-  const chatsWithOrders = toNumber(s.chats_with_orders)
-  const ordersInRange = toNumber(s.orders)
-  const revenueTotal = toNumber(s.revenue_total ?? 0)
-  const discountTotal = toNumber(s.discount_total ?? 0)
+  const uniqueChats = toNumber(s.unique_chats);
+  const chatsWithOrders = toNumber(s.chats_with_orders);
+  const ordersInRange = toNumber(s.orders);
+  const revenueTotal = toNumber(s.revenue_total ?? 0);
+  const discountTotal = toNumber(s.discount_total ?? 0);
 
   return {
     summary: {
@@ -355,5 +355,5 @@ export async function getDashboardKpis(
       deliveryFeeCop: DELIVERY_FEE_COP,
       demoraThresholdMin: DEMORA_THRESHOLD_MIN,
     },
-  }
+  };
 }

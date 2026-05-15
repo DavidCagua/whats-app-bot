@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useMemo, useState } from "react"
+import { useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,49 +8,49 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { Label } from "@/components/ui/label"
-import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { AlertTriangle } from "lucide-react"
+} from "@/components/ui/select";
+import { AlertTriangle } from "lucide-react";
 import {
   CANCEL_REASONS,
   type CancelReasonKey,
   buildCancelMessage,
-} from "@/lib/order-cancel-reasons"
-import { formatDisplayNumber } from "@/lib/utils"
+} from "@/lib/order-cancel-reasons";
+import { formatDisplayNumber } from "@/lib/utils";
 
 export type CancelDialogResult = {
-  reasonKey: CancelReasonKey
-  otherText: string
-  notes: string
-  sendCustomerMessage: boolean
-  previewMessage: string
-}
+  reasonKey: CancelReasonKey;
+  otherText: string;
+  notes: string;
+  sendCustomerMessage: boolean;
+  previewMessage: string;
+};
 
 type Props = {
-  open: boolean
-  onOpenChange: (open: boolean) => void
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   /** Order context for the preview. */
-  displayNumber: number | null | undefined
-  customerName: string | null | undefined
+  displayNumber: number | null | undefined;
+  customerName: string | null | undefined;
   /** Called when the operator confirms. Caller persists + sends. */
-  onConfirm: (result: CancelDialogResult) => Promise<void> | void
-}
+  onConfirm: (result: CancelDialogResult) => Promise<void> | void;
+};
 
 function firstName(name: string | null | undefined): string | null {
-  if (!name) return null
-  const trimmed = name.trim()
-  if (!trimmed) return null
-  return trimmed.split(/\s+/)[0]
+  if (!name) return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  return trimmed.split(/\s+/)[0];
 }
 
 export function CancelOrderDialog({
@@ -60,42 +60,42 @@ export function CancelOrderDialog({
   customerName,
   onConfirm,
 }: Props) {
-  const [reasonKey, setReasonKey] = useState<CancelReasonKey | "">("")
-  const [otherText, setOtherText] = useState("")
-  const [notes, setNotes] = useState("")
-  const [sendCustomerMessage, setSendCustomerMessage] = useState(true)
-  const [submitting, setSubmitting] = useState(false)
+  const [reasonKey, setReasonKey] = useState<CancelReasonKey | "">("");
+  const [otherText, setOtherText] = useState("");
+  const [notes, setNotes] = useState("");
+  const [sendCustomerMessage, setSendCustomerMessage] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
 
-  const isOtherInvalid = reasonKey === "other" && !otherText.trim()
-  const canConfirm = !!reasonKey && !isOtherInvalid && !submitting
+  const isOtherInvalid = reasonKey === "other" && !otherText.trim();
+  const canConfirm = !!reasonKey && !isOtherInvalid && !submitting;
 
   const previewMessage = useMemo(() => {
-    if (!reasonKey) return ""
+    if (!reasonKey) return "";
     return buildCancelMessage({
       displayNumber,
       customerFirstName: firstName(customerName),
       reasonKey,
       otherText,
-    })
-  }, [reasonKey, otherText, displayNumber, customerName])
+    });
+  }, [reasonKey, otherText, displayNumber, customerName]);
 
   const reset = () => {
-    setReasonKey("")
-    setOtherText("")
-    setNotes("")
-    setSendCustomerMessage(true)
-    setSubmitting(false)
-  }
+    setReasonKey("");
+    setOtherText("");
+    setNotes("");
+    setSendCustomerMessage(true);
+    setSubmitting(false);
+  };
 
   const handleOpenChange = (next: boolean) => {
-    if (submitting) return
-    if (!next) reset()
-    onOpenChange(next)
-  }
+    if (submitting) return;
+    if (!next) reset();
+    onOpenChange(next);
+  };
 
   const handleConfirm = async () => {
-    if (!canConfirm || !reasonKey) return
-    setSubmitting(true)
+    if (!canConfirm || !reasonKey) return;
+    setSubmitting(true);
     try {
       await onConfirm({
         reasonKey,
@@ -103,16 +103,18 @@ export function CancelOrderDialog({
         notes: notes.trim(),
         sendCustomerMessage,
         previewMessage,
-      })
-      reset()
-      onOpenChange(false)
+      });
+      reset();
+      onOpenChange(false);
     } catch {
       // Caller surfaces error via toast; keep dialog open so operator can retry.
-      setSubmitting(false)
+      setSubmitting(false);
     }
-  }
+  };
 
-  const orderLabel = displayNumber ? `#${formatDisplayNumber(displayNumber)}` : ""
+  const orderLabel = displayNumber
+    ? `#${formatDisplayNumber(displayNumber)}`
+    : "";
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -168,7 +170,8 @@ export function CancelOrderDialog({
 
           <div className="space-y-2">
             <Label htmlFor="cancel-notes">
-              Notas internas <span className="text-xs text-muted-foreground">(opcional)</span>
+              Notas internas{" "}
+              <span className="text-xs text-muted-foreground">(opcional)</span>
             </Label>
             <Textarea
               id="cancel-notes"
@@ -226,5 +229,5 @@ export function CancelOrderDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
+  );
 }

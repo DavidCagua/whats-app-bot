@@ -1,19 +1,31 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { useRouter } from "next/navigation"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import * as z from "zod"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Switch } from "@/components/ui/switch"
-import { User, Save, Trash2 } from "lucide-react"
-import { toast } from "sonner"
-import { updateUser, deleteUser } from "@/lib/actions/users"
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import * as z from "zod";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { User, Save, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { updateUser, deleteUser } from "@/lib/actions/users";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,7 +36,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
-} from "@/components/ui/alert-dialog"
+} from "@/components/ui/alert-dialog";
 
 const userEditSchema = z.object({
   email: z.string().email("Correo electrónico inválido"),
@@ -32,25 +44,25 @@ const userEditSchema = z.object({
   role: z.string(),
   is_active: z.boolean(),
   password: z.string().optional(),
-})
+});
 
-type UserEditFormData = z.infer<typeof userEditSchema>
+type UserEditFormData = z.infer<typeof userEditSchema>;
 
 interface UserEditFormProps {
   user: {
-    id: string
-    email: string
-    full_name: string
-    role: string | null
-    is_active: boolean
-  }
-  onRoleChange?: (role: string) => void
+    id: string;
+    email: string;
+    full_name: string;
+    role: string | null;
+    is_active: boolean;
+  };
+  onRoleChange?: (role: string) => void;
 }
 
 export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
-  const router = useRouter()
-  const [isLoading, setIsLoading] = useState(false)
-  const [isDeleting, setIsDeleting] = useState(false)
+  const router = useRouter();
+  const [isLoading, setIsLoading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const form = useForm<UserEditFormData>({
     resolver: zodResolver(userEditSchema),
@@ -61,10 +73,10 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
       is_active: user.is_active,
       password: "",
     },
-  })
+  });
 
   const onSubmit = async (data: UserEditFormData) => {
-    setIsLoading(true)
+    setIsLoading(true);
     try {
       const result = await updateUser(user.id, {
         email: data.email,
@@ -72,36 +84,36 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
         role: data.role === "super_admin" ? "super_admin" : null,
         is_active: data.is_active,
         password: data.password || undefined,
-      })
+      });
 
       if (result.success) {
-        toast.success("¡Usuario actualizado exitosamente!")
+        toast.success("¡Usuario actualizado exitosamente!");
       } else {
-        toast.error(result.error || "No se pudo actualizar el usuario")
+        toast.error(result.error || "No se pudo actualizar el usuario");
       }
     } catch {
-      toast.error("Ocurrió un error al actualizar el usuario")
+      toast.error("Ocurrió un error al actualizar el usuario");
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }
+  };
 
   const handleDelete = async () => {
-    setIsDeleting(true)
+    setIsDeleting(true);
     try {
-      const result = await deleteUser(user.id)
+      const result = await deleteUser(user.id);
       if (result.success) {
-        toast.success("Usuario eliminado exitosamente")
-        router.push("/users")
+        toast.success("Usuario eliminado exitosamente");
+        router.push("/users");
       } else {
-        toast.error(result.error || "No se pudo eliminar el usuario")
+        toast.error(result.error || "No se pudo eliminar el usuario");
       }
     } catch {
-      toast.error("Ocurrió un error al eliminar el usuario")
+      toast.error("Ocurrió un error al eliminar el usuario");
     } finally {
-      setIsDeleting(false)
+      setIsDeleting(false);
     }
-  }
+  };
 
   return (
     <Card>
@@ -118,29 +130,28 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="full_name">Nombre completo</Label>
-            <Input
-              id="full_name"
-              {...form.register("full_name")}
-            />
+            <Input id="full_name" {...form.register("full_name")} />
             {form.formState.errors.full_name && (
-              <p className="text-sm text-red-500">{form.formState.errors.full_name.message}</p>
+              <p className="text-sm text-red-500">
+                {form.formState.errors.full_name.message}
+              </p>
             )}
           </div>
 
           <div className="space-y-2">
             <Label htmlFor="email">Correo electrónico</Label>
-            <Input
-              id="email"
-              type="email"
-              {...form.register("email")}
-            />
+            <Input id="email" type="email" {...form.register("email")} />
             {form.formState.errors.email && (
-              <p className="text-sm text-red-500">{form.formState.errors.email.message}</p>
+              <p className="text-sm text-red-500">
+                {form.formState.errors.email.message}
+              </p>
             )}
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="password">Nueva contraseña (dejar en blanco para mantener la actual)</Label>
+            <Label htmlFor="password">
+              Nueva contraseña (dejar en blanco para mantener la actual)
+            </Label>
             <Input
               id="password"
               type="password"
@@ -154,16 +165,20 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
             <Select
               value={form.watch("role")}
               onValueChange={(value) => {
-                form.setValue("role", value)
-                onRoleChange?.(value)
+                form.setValue("role", value);
+                onRoleChange?.(value);
               }}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Selecciona el rol" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="business_user">Usuario de negocio</SelectItem>
-                <SelectItem value="super_admin">Súper Admin (Equipo OmnIA)</SelectItem>
+                <SelectItem value="business_user">
+                  Usuario de negocio
+                </SelectItem>
+                <SelectItem value="super_admin">
+                  Súper Admin (Equipo OmnIA)
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -194,8 +209,9 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
                 <AlertDialogHeader>
                   <AlertDialogTitle>¿Eliminar usuario?</AlertDialogTitle>
                   <AlertDialogDescription>
-                    Esto eliminará permanentemente a <strong>{user.full_name || user.email}</strong> y todas sus asignaciones de negocio.
-                    Esta acción no se puede deshacer.
+                    Esto eliminará permanentemente a{" "}
+                    <strong>{user.full_name || user.email}</strong> y todas sus
+                    asignaciones de negocio. Esta acción no se puede deshacer.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -219,5 +235,5 @@ export function UserEditForm({ user, onRoleChange }: UserEditFormProps) {
         </form>
       </CardContent>
     </Card>
-  )
+  );
 }

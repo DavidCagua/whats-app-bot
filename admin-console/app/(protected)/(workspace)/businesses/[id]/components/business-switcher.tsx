@@ -1,37 +1,37 @@
-"use client"
+"use client";
 
-import { usePathname, useRouter } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import type { SwitcherBusiness } from "@/lib/workspace-businesses"
+} from "@/components/ui/select";
+import type { SwitcherBusiness } from "@/lib/workspace-businesses";
 
 type BusinessSwitcherProps = {
-  currentBusinessId: string
-  businesses: SwitcherBusiness[]
-}
+  currentBusinessId: string;
+  businesses: SwitcherBusiness[];
+};
 
 export function BusinessSwitcher({
   currentBusinessId,
   businesses,
 }: BusinessSwitcherProps) {
-  const pathname = usePathname()
-  const router = useRouter()
+  const pathname = usePathname();
+  const router = useRouter();
 
   if (businesses.length <= 1) {
-    return null
+    return null;
   }
 
   function onChange(nextId: string) {
     const nextPath = pathname.replace(
       /^\/businesses\/[^/]+/,
-      `/businesses/${nextId}`
-    )
-    router.push(nextPath)
+      `/businesses/${nextId}`,
+    );
+    router.push(nextPath);
   }
 
   return (
@@ -52,5 +52,5 @@ export function BusinessSwitcher({
         </SelectContent>
       </Select>
     </div>
-  )
+  );
 }

@@ -1,17 +1,17 @@
-"use client"
+"use client";
 
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Building2, Plug, Bot, Layers } from "lucide-react"
-import { ReactNode } from "react"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Building2, Plug, Bot, Layers } from "lucide-react";
+import { ReactNode } from "react";
 
-export type SettingsTab = "general" | "integrations" | "agents" | "modules"
+export type SettingsTab = "general" | "integrations" | "agents" | "modules";
 
 interface SettingsTabsProps {
-  defaultTab?: SettingsTab
-  generalContent: ReactNode
-  integrationsContent: ReactNode
-  agentsContent: ReactNode
-  modulesContent?: ReactNode
+  defaultTab?: SettingsTab;
+  generalContent: ReactNode;
+  integrationsContent: ReactNode;
+  agentsContent: ReactNode;
+  modulesContent?: ReactNode;
 }
 
 export function SettingsTabs({
@@ -58,5 +58,5 @@ export function SettingsTabs({
         </TabsContent>
       )}
     </Tabs>
-  )
+  );
 }

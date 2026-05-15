@@ -1,20 +1,20 @@
-import { auth } from "@/lib/auth"
-import { isSuperAdmin } from "@/lib/permissions"
-import { redirect } from "next/navigation"
-import { getUsers } from "@/lib/actions/users"
-import { Button } from "@/components/ui/button"
-import { Plus } from "lucide-react"
-import Link from "next/link"
-import { UsersTable } from "./components/users-table"
+import { auth } from "@/lib/auth";
+import { isSuperAdmin } from "@/lib/permissions";
+import { redirect } from "next/navigation";
+import { getUsers } from "@/lib/actions/users";
+import { Button } from "@/components/ui/button";
+import { Plus } from "lucide-react";
+import Link from "next/link";
+import { UsersTable } from "./components/users-table";
 
 export default async function UsersPage() {
-  const session = await auth()
+  const session = await auth();
 
   if (!isSuperAdmin(session)) {
-    redirect("/")
+    redirect("/");
   }
 
-  const users = await getUsers()
+  const users = await getUsers();
 
   return (
     <div className="space-y-6">
@@ -35,5 +35,5 @@ export default async function UsersPage() {
 
       <UsersTable data={users} />
     </div>
-  )
+  );
 }

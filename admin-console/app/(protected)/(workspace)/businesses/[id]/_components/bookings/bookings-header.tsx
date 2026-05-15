@@ -1,17 +1,17 @@
-import { CalendarDays } from "lucide-react"
-import { Card, CardContent } from "@/components/ui/card"
-import { Booking } from "@/lib/bookings-queries"
+import { CalendarDays } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Booking } from "@/lib/bookings-queries";
 
 interface BookingsHeaderProps {
-  bookings: Booking[]
+  bookings: Booking[];
 }
 
 export function BookingsHeader({ bookings }: BookingsHeaderProps) {
-  const total = bookings.length
-  const confirmed = bookings.filter((b) => b.status === "confirmed").length
-  const pending = bookings.filter((b) => b.status === "pending").length
-  const cancelled = bookings.filter((b) => b.status === "cancelled").length
-  const completed = bookings.filter((b) => b.status === "completed").length
+  const total = bookings.length;
+  const confirmed = bookings.filter((b) => b.status === "confirmed").length;
+  const pending = bookings.filter((b) => b.status === "pending").length;
+  const cancelled = bookings.filter((b) => b.status === "cancelled").length;
+  const completed = bookings.filter((b) => b.status === "completed").length;
 
   const stats = [
     { label: "Total", value: total, color: "text-foreground" },
@@ -19,7 +19,7 @@ export function BookingsHeader({ bookings }: BookingsHeaderProps) {
     { label: "Pendientes", value: pending, color: "text-yellow-600" },
     { label: "Canceladas", value: cancelled, color: "text-gray-500" },
     { label: "Completadas", value: completed, color: "text-blue-600" },
-  ]
+  ];
 
   return (
     <div className="space-y-4">
@@ -44,5 +44,5 @@ export function BookingsHeader({ bookings }: BookingsHeaderProps) {
         ))}
       </div>
     </div>
-  )
+  );
 }

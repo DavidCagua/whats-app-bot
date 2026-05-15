@@ -1,132 +1,137 @@
-"use client"
+"use client";
 
-import { useMemo, useState } from "react"
-import { Plus, Pencil, Search } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
-import { Badge } from "@/components/ui/badge"
-import { Switch } from "@/components/ui/switch"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useMemo, useState } from "react";
+import { Plus, Pencil, Search } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog"
-import { toast } from "sonner"
-import { createProduct, setProductActive, updateProduct, type SerializedProduct } from "@/lib/actions/products"
+} from "@/components/ui/dialog";
+import { toast } from "sonner";
+import {
+  createProduct,
+  setProductActive,
+  updateProduct,
+  type SerializedProduct,
+} from "@/lib/actions/products";
 
-type ProductRow = SerializedProduct
+type ProductRow = SerializedProduct;
 
 type EditorState =
   | { mode: "closed" }
   | { mode: "create" }
-  | { mode: "edit"; product: ProductRow }
+  | { mode: "edit"; product: ProductRow };
 
 const formatPrice = (value: number) =>
   new Intl.NumberFormat("es-CO", {
     style: "currency",
     currency: "COP",
     minimumFractionDigits: 0,
-  }).format(value)
+  }).format(value);
 
 export function ProductsManager({
   businessId,
   initialProducts,
 }: {
-  businessId: string
-  initialProducts: ProductRow[]
+  businessId: string;
+  initialProducts: ProductRow[];
 }) {
-  const [products, setProducts] = useState<ProductRow[]>(initialProducts)
-  const [editor, setEditor] = useState<EditorState>({ mode: "closed" })
-  const [saving, setSaving] = useState(false)
-  const [name, setName] = useState("")
-  const [description, setDescription] = useState("")
-  const [sku, setSku] = useState("")
-  const [price, setPrice] = useState("")
-  const [category, setCategory] = useState("")
-  const [promoOnly, setPromoOnly] = useState(false)
-  const [statusTab, setStatusTab] = useState<"active" | "inactive">("active")
-  const [searchQuery, setSearchQuery] = useState("")
-  const [categoryFilter, setCategoryFilter] = useState<string>("all")
+  const [products, setProducts] = useState<ProductRow[]>(initialProducts);
+  const [editor, setEditor] = useState<EditorState>({ mode: "closed" });
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [sku, setSku] = useState("");
+  const [price, setPrice] = useState("");
+  const [category, setCategory] = useState("");
+  const [promoOnly, setPromoOnly] = useState(false);
+  const [statusTab, setStatusTab] = useState<"active" | "inactive">("active");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
 
   const categories = useMemo(() => {
-    const set = new Set<string>()
+    const set = new Set<string>();
     products.forEach((p) => {
-      const c = p.category?.trim()
-      if (c) set.add(c)
-    })
-    return Array.from(set).sort((a, b) => a.localeCompare(b))
-  }, [products])
+      const c = p.category?.trim();
+      if (c) set.add(c);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [products]);
 
   const counts = useMemo(
     () => ({
       active: products.filter((p) => p.is_active).length,
       inactive: products.filter((p) => !p.is_active).length,
     }),
-    [products]
-  )
+    [products],
+  );
 
   const filtered = useMemo(() => {
-    const wantActive = statusTab === "active"
-    const q = searchQuery.trim().toLowerCase()
+    const wantActive = statusTab === "active";
+    const q = searchQuery.trim().toLowerCase();
     return products
       .filter((p) => p.is_active === wantActive)
       .filter((p) =>
-        categoryFilter === "all" ? true : (p.category ?? "") === categoryFilter
+        categoryFilter === "all" ? true : (p.category ?? "") === categoryFilter,
       )
       .filter((p) => {
-        if (!q) return true
+        if (!q) return true;
         return (
           p.name.toLowerCase().includes(q) ||
           (p.category ?? "").toLowerCase().includes(q)
-        )
+        );
       })
-      .sort((a, b) => a.name.localeCompare(b.name))
-  }, [products, statusTab, searchQuery, categoryFilter])
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, statusTab, searchQuery, categoryFilter]);
 
   function openCreate() {
-    setEditor({ mode: "create" })
-    setName("")
-    setDescription("")
-    setSku("")
-    setPrice("")
-    setCategory("")
-    setPromoOnly(false)
+    setEditor({ mode: "create" });
+    setName("");
+    setDescription("");
+    setSku("");
+    setPrice("");
+    setCategory("");
+    setPromoOnly(false);
   }
 
   function openEdit(product: ProductRow) {
-    setEditor({ mode: "edit", product })
-    setName(product.name)
-    setDescription(product.description ?? "")
-    setSku(product.sku ?? "")
-    setPrice(String(product.price))
-    setCategory(product.category ?? "")
-    setPromoOnly(product.promo_only)
+    setEditor({ mode: "edit", product });
+    setName(product.name);
+    setDescription(product.description ?? "");
+    setSku(product.sku ?? "");
+    setPrice(String(product.price));
+    setCategory(product.category ?? "");
+    setPromoOnly(product.promo_only);
   }
 
   async function handleSave() {
-    const parsedPrice = Number(price)
+    const parsedPrice = Number(price);
     if (!name.trim()) {
-      toast.error("El nombre es requerido")
-      return
+      toast.error("El nombre es requerido");
+      return;
     }
     if (!Number.isFinite(parsedPrice) || parsedPrice < 0) {
-      toast.error("El precio debe ser un número válido")
-      return
+      toast.error("El precio debe ser un número válido");
+      return;
     }
 
-    setSaving(true)
+    setSaving(true);
     try {
       if (editor.mode === "create") {
         const result = await createProduct(businessId, {
@@ -136,10 +141,10 @@ export function ProductsManager({
           price: parsedPrice,
           category: category || null,
           promo_only: promoOnly,
-        })
-        if (!result.success) throw new Error(result.error)
-        setProducts((prev) => [...prev, result.product])
-        toast.success("Producto creado")
+        });
+        if (!result.success) throw new Error(result.error);
+        setProducts((prev) => [...prev, result.product]);
+        toast.success("Producto creado");
       } else if (editor.mode === "edit") {
         const result = await updateProduct(editor.product.id, {
           name,
@@ -148,34 +153,38 @@ export function ProductsManager({
           price: parsedPrice,
           category: category || null,
           promo_only: promoOnly,
-        })
-        if (!result.success) throw new Error(result.error)
-        const updated = result.product
+        });
+        if (!result.success) throw new Error(result.error);
+        const updated = result.product;
         setProducts((prev) =>
-          prev.map((item) => (item.id === updated.id ? updated : item))
-        )
-        toast.success("Producto actualizado")
+          prev.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        toast.success("Producto actualizado");
       }
-      setEditor({ mode: "closed" })
+      setEditor({ mode: "closed" });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "No se pudo guardar")
+      toast.error(err instanceof Error ? err.message : "No se pudo guardar");
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
   }
 
   async function handleToggle(product: ProductRow) {
-    const result = await setProductActive(product.id, !product.is_active)
+    const result = await setProductActive(product.id, !product.is_active);
     if (!result.success) {
-      toast.error(result.error || "No se pudo actualizar el estado")
-      return
+      toast.error(result.error || "No se pudo actualizar el estado");
+      return;
     }
     setProducts((prev) =>
       prev.map((item) =>
-        item.id === product.id ? { ...item, is_active: !product.is_active } : item
-      )
-    )
-    toast.success(!product.is_active ? "Producto activado" : "Producto desactivado")
+        item.id === product.id
+          ? { ...item, is_active: !product.is_active }
+          : item,
+      ),
+    );
+    toast.success(
+      !product.is_active ? "Producto activado" : "Producto desactivado",
+    );
   }
 
   return (
@@ -235,18 +244,31 @@ export function ProductsManager({
         <table className="w-full">
           <thead className="bg-muted">
             <tr>
-              <th className="px-4 py-3 text-left text-sm font-medium">Producto</th>
-              <th className="px-4 py-3 text-left text-sm font-medium">Categoría</th>
+              <th className="px-4 py-3 text-left text-sm font-medium">
+                Producto
+              </th>
+              <th className="px-4 py-3 text-left text-sm font-medium">
+                Categoría
+              </th>
               <th className="px-4 py-3 text-left text-sm font-medium">SKU</th>
-              <th className="px-4 py-3 text-left text-sm font-medium">Precio</th>
-              <th className="px-4 py-3 text-left text-sm font-medium">Activo</th>
-              <th className="px-4 py-3 text-right text-sm font-medium">Acciones</th>
+              <th className="px-4 py-3 text-left text-sm font-medium">
+                Precio
+              </th>
+              <th className="px-4 py-3 text-left text-sm font-medium">
+                Activo
+              </th>
+              <th className="px-4 py-3 text-right text-sm font-medium">
+                Acciones
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y">
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+                <td
+                  colSpan={6}
+                  className="px-4 py-8 text-center text-muted-foreground"
+                >
                   {products.length === 0
                     ? "Aún no hay productos. Crea el primero para tu catálogo."
                     : "No hay productos que coincidan con los filtros."}
@@ -259,7 +281,10 @@ export function ProductsManager({
                     <div className="flex items-center gap-2">
                       <span>{product.name}</span>
                       {product.promo_only ? (
-                        <Badge variant="outline" className="text-xs font-normal">
+                        <Badge
+                          variant="outline"
+                          className="text-xs font-normal"
+                        >
                           Solo en promos
                         </Badge>
                       ) : null}
@@ -271,7 +296,9 @@ export function ProductsManager({
                   <td className="px-4 py-3 text-sm text-muted-foreground">
                     {product.sku || "—"}
                   </td>
-                  <td className="px-4 py-3 text-sm">{formatPrice(product.price)}</td>
+                  <td className="px-4 py-3 text-sm">
+                    {formatPrice(product.price)}
+                  </td>
                   <td className="px-4 py-3">
                     <Switch
                       checked={product.is_active}
@@ -285,7 +312,11 @@ export function ProductsManager({
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex justify-end gap-2">
-                      <Button variant="ghost" size="sm" onClick={() => openEdit(product)}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => openEdit(product)}
+                      >
                         <Pencil className="h-4 w-4" />
                       </Button>
                     </div>
@@ -376,7 +407,10 @@ export function ProductsManager({
               encuentre el producto. Puede tardar unos segundos.
             </p>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setEditor({ mode: "closed" })}>
+              <Button
+                variant="outline"
+                onClick={() => setEditor({ mode: "closed" })}
+              >
                 Cancelar
               </Button>
               <Button onClick={() => void handleSave()} disabled={saving}>
@@ -387,5 +421,5 @@ export function ProductsManager({
         </DialogContent>
       </Dialog>
     </div>
-  )
+  );
 }

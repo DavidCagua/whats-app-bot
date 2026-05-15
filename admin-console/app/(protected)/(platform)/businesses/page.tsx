@@ -1,19 +1,19 @@
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { isSuperAdmin, getAccessibleBusinessIds } from "@/lib/permissions"
-import { BusinessesTable } from "./components/businesses-table"
-import { Button } from "@/components/ui/button"
-import { Plus } from "lucide-react"
-import Link from "next/link"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { isSuperAdmin, getAccessibleBusinessIds } from "@/lib/permissions";
+import { BusinessesTable } from "./components/businesses-table";
+import { Button } from "@/components/ui/button";
+import { Plus } from "lucide-react";
+import Link from "next/link";
 
 export default async function BusinessesPage() {
-  const session = await auth()
+  const session = await auth();
 
   // Build query filter based on user permissions
-  const businessIds = getAccessibleBusinessIds(session)
+  const businessIds = getAccessibleBusinessIds(session);
   const whereClause = isSuperAdmin(session)
     ? {} // Super admins see all businesses
-    : { id: { in: businessIds } } // Business users see only their businesses
+    : { id: { in: businessIds } }; // Business users see only their businesses
 
   const businesses = await prisma.businesses.findMany({
     where: whereClause,
@@ -23,9 +23,9 @@ export default async function BusinessesPage() {
     orderBy: {
       created_at: "desc",
     },
-  })
+  });
 
-  const canAddBusiness = isSuperAdmin(session)
+  const canAddBusiness = isSuperAdmin(session);
 
   return (
     <div className="space-y-6">
@@ -50,5 +50,5 @@ export default async function BusinessesPage() {
 
       <BusinessesTable data={businesses} />
     </div>
-  )
+  );
 }

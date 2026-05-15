@@ -1,13 +1,13 @@
-import type { Booking } from "@/lib/bookings-queries"
+import type { Booking } from "@/lib/bookings-queries";
 
 export type CalendarEvent = {
-  id: string
-  title: string
-  start: Date
-  end: Date
-  resourceId: string
-  booking: Booking
-}
+  id: string;
+  title: string;
+  start: Date;
+  end: Date;
+  resourceId: string;
+  booking: Booking;
+};
 
 /** Pastel backgrounds + dark text for contrast on event cards */
 const STAFF_EVENT_PALETTE: { hex: string; text: string }[] = [
@@ -21,36 +21,37 @@ const STAFF_EVENT_PALETTE: { hex: string; text: string }[] = [
   { hex: "#fecdd3", text: "text-rose-950" },
   { hex: "#ddd6fe", text: "text-violet-950" },
   { hex: "#99f6e4", text: "text-teal-950" },
-]
+];
 
-const UNASSIGNED_STAFF = { hex: "#e5e7eb", text: "text-gray-800" }
+const UNASSIGNED_STAFF = { hex: "#e5e7eb", text: "text-gray-800" };
 
 function hashStaffId(id: string): number {
-  let h = 0
+  let h = 0;
   for (let i = 0; i < id.length; i++) {
-    h = (Math.imul(31, h) + id.charCodeAt(i)) | 0
+    h = (Math.imul(31, h) + id.charCodeAt(i)) | 0;
   }
-  return Math.abs(h)
+  return Math.abs(h);
 }
 
-export function getStaffColorEntry(
-  staffMemberId: string | null | undefined
-): { hex: string; text: string } {
+export function getStaffColorEntry(staffMemberId: string | null | undefined): {
+  hex: string;
+  text: string;
+} {
   if (!staffMemberId || staffMemberId === "unassigned") {
-    return UNASSIGNED_STAFF
+    return UNASSIGNED_STAFF;
   }
-  const i = hashStaffId(staffMemberId) % STAFF_EVENT_PALETTE.length
-  return STAFF_EVENT_PALETTE[i]
+  const i = hashStaffId(staffMemberId) % STAFF_EVENT_PALETTE.length;
+  return STAFF_EVENT_PALETTE[i];
 }
 
 export function getStaffHex(staffMemberId: string | null | undefined): string {
-  return getStaffColorEntry(staffMemberId).hex
+  return getStaffColorEntry(staffMemberId).hex;
 }
 
 export function getStaffEventTextClass(
-  staffMemberId: string | null | undefined
+  staffMemberId: string | null | undefined,
 ): string {
-  return getStaffColorEntry(staffMemberId).text
+  return getStaffColorEntry(staffMemberId).text;
 }
 
 /**
@@ -61,8 +62,8 @@ export function getStaffEventTextClass(
  *   toDisplayDate adds 300 min → local time reads as 10:00 ✓
  */
 export function toDisplayDate(utcDate: Date): Date {
-  const offsetMs = new Date().getTimezoneOffset() * 60 * 1000
-  return new Date(utcDate.getTime() + offsetMs)
+  const offsetMs = new Date().getTimezoneOffset() * 60 * 1000;
+  return new Date(utcDate.getTime() + offsetMs);
 }
 
 /**
@@ -70,14 +71,15 @@ export function toDisplayDate(utcDate: Date): Date {
  * Use before sending dates to the API.
  */
 export function fromDisplayDate(displayDate: Date): Date {
-  const offsetMs = new Date().getTimezoneOffset() * 60 * 1000
-  return new Date(displayDate.getTime() - offsetMs)
+  const offsetMs = new Date().getTimezoneOffset() * 60 * 1000;
+  return new Date(displayDate.getTime() - offsetMs);
 }
 
 export function bookingToEvent(booking: Booking): CalendarEvent {
-  const label = [booking.service?.name, booking.customer?.name]
-    .filter(Boolean)
-    .join(" — ") || "Booking"
+  const label =
+    [booking.service?.name, booking.customer?.name]
+      .filter(Boolean)
+      .join(" — ") || "Booking";
 
   return {
     id: booking.id,
@@ -86,5 +88,5 @@ export function bookingToEvent(booking: Booking): CalendarEvent {
     end: toDisplayDate(new Date(booking.end_at)),
     resourceId: booking.staff_member_id ?? "unassigned",
     booking,
-  }
+  };
 }

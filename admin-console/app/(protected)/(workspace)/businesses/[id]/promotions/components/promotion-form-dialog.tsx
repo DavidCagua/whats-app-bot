@@ -1,12 +1,12 @@
-"use client"
+"use client";
 
-import { useEffect, useMemo, useState } from "react"
-import { Plus, Trash2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
-import { Switch } from "@/components/ui/switch"
+import { useEffect, useMemo, useState } from "react";
+import { Plus, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -14,24 +14,24 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
-} from "@/components/ui/dialog"
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { toast } from "sonner"
+} from "@/components/ui/select";
+import { toast } from "sonner";
 import {
   createPromotion,
   updatePromotion,
   type PricingMode,
   type PromotionInput,
   type SerializedPromotion,
-} from "@/lib/actions/promotions"
+} from "@/lib/actions/promotions";
 
-type ProductOption = { id: string; name: string; price: number }
+type ProductOption = { id: string; name: string; price: number };
 
 const DAYS = [
   { iso: 1, label: "L" },
@@ -41,9 +41,9 @@ const DAYS = [
   { iso: 5, label: "V" },
   { iso: 6, label: "S" },
   { iso: 7, label: "D" },
-] as const
+] as const;
 
-type ComponentRow = { product_id: string; quantity: number }
+type ComponentRow = { product_id: string; quantity: number };
 
 export function PromotionFormDialog({
   open,
@@ -53,114 +53,120 @@ export function PromotionFormDialog({
   onClose,
   onSaved,
 }: {
-  open: boolean
-  businessId: string
-  products: ProductOption[]
-  promotion: SerializedPromotion | null
-  onClose: () => void
-  onSaved: (promo: SerializedPromotion) => void
+  open: boolean;
+  businessId: string;
+  products: ProductOption[];
+  promotion: SerializedPromotion | null;
+  onClose: () => void;
+  onSaved: (promo: SerializedPromotion) => void;
 }) {
-  const isEdit = promotion !== null
+  const isEdit = promotion !== null;
 
-  const [name, setName] = useState("")
-  const [description, setDescription] = useState("")
-  const [isActive, setIsActive] = useState(true)
-  const [pricingMode, setPricingMode] = useState<PricingMode>("fixed_price")
-  const [priceValue, setPriceValue] = useState("") // shared input across modes
-  const [days, setDays] = useState<number[]>([])
-  const [startTime, setStartTime] = useState("")
-  const [endTime, setEndTime] = useState("")
-  const [startsOn, setStartsOn] = useState("")
-  const [endsOn, setEndsOn] = useState("")
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [isActive, setIsActive] = useState(true);
+  const [pricingMode, setPricingMode] = useState<PricingMode>("fixed_price");
+  const [priceValue, setPriceValue] = useState(""); // shared input across modes
+  const [days, setDays] = useState<number[]>([]);
+  const [startTime, setStartTime] = useState("");
+  const [endTime, setEndTime] = useState("");
+  const [startsOn, setStartsOn] = useState("");
+  const [endsOn, setEndsOn] = useState("");
   const [components, setComponents] = useState<ComponentRow[]>([
     { product_id: "", quantity: 1 },
-  ])
-  const [saving, setSaving] = useState(false)
+  ]);
+  const [saving, setSaving] = useState(false);
 
   // Hydrate / reset form when the dialog opens or the editing target changes.
   useEffect(() => {
-    if (!open) return
+    if (!open) return;
     if (promotion) {
-      setName(promotion.name)
-      setDescription(promotion.description ?? "")
-      setIsActive(promotion.is_active)
+      setName(promotion.name);
+      setDescription(promotion.description ?? "");
+      setIsActive(promotion.is_active);
       if (promotion.fixed_price != null) {
-        setPricingMode("fixed_price")
-        setPriceValue(String(promotion.fixed_price))
+        setPricingMode("fixed_price");
+        setPriceValue(String(promotion.fixed_price));
       } else if (promotion.discount_amount != null) {
-        setPricingMode("discount_amount")
-        setPriceValue(String(promotion.discount_amount))
+        setPricingMode("discount_amount");
+        setPriceValue(String(promotion.discount_amount));
       } else if (promotion.discount_pct != null) {
-        setPricingMode("discount_pct")
-        setPriceValue(String(promotion.discount_pct))
+        setPricingMode("discount_pct");
+        setPriceValue(String(promotion.discount_pct));
       } else {
-        setPricingMode("fixed_price")
-        setPriceValue("")
+        setPricingMode("fixed_price");
+        setPriceValue("");
       }
-      setDays(promotion.days_of_week ?? [])
-      setStartTime(promotion.start_time ?? "")
-      setEndTime(promotion.end_time ?? "")
-      setStartsOn(promotion.starts_on ?? "")
-      setEndsOn(promotion.ends_on ?? "")
+      setDays(promotion.days_of_week ?? []);
+      setStartTime(promotion.start_time ?? "");
+      setEndTime(promotion.end_time ?? "");
+      setStartsOn(promotion.starts_on ?? "");
+      setEndsOn(promotion.ends_on ?? "");
       setComponents(
         promotion.components.length > 0
           ? promotion.components.map((c) => ({
               product_id: c.product_id,
               quantity: c.quantity,
             }))
-          : [{ product_id: "", quantity: 1 }]
-      )
+          : [{ product_id: "", quantity: 1 }],
+      );
     } else {
-      setName("")
-      setDescription("")
-      setIsActive(true)
-      setPricingMode("fixed_price")
-      setPriceValue("")
-      setDays([])
-      setStartTime("")
-      setEndTime("")
-      setStartsOn("")
-      setEndsOn("")
-      setComponents([{ product_id: "", quantity: 1 }])
+      setName("");
+      setDescription("");
+      setIsActive(true);
+      setPricingMode("fixed_price");
+      setPriceValue("");
+      setDays([]);
+      setStartTime("");
+      setEndTime("");
+      setStartsOn("");
+      setEndsOn("");
+      setComponents([{ product_id: "", quantity: 1 }]);
     }
-  }, [open, promotion])
+  }, [open, promotion]);
 
   const productMap = useMemo(
     () => new Map(products.map((p) => [p.id, p])),
-    [products]
-  )
+    [products],
+  );
 
   function toggleDay(iso: number) {
     setDays((prev) =>
-      prev.includes(iso) ? prev.filter((d) => d !== iso) : [...prev, iso].sort()
-    )
+      prev.includes(iso)
+        ? prev.filter((d) => d !== iso)
+        : [...prev, iso].sort(),
+    );
   }
 
   function updateComponent(idx: number, patch: Partial<ComponentRow>) {
-    setComponents((prev) => prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)))
+    setComponents((prev) =>
+      prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)),
+    );
   }
 
   function addComponent() {
-    setComponents((prev) => [...prev, { product_id: "", quantity: 1 }])
+    setComponents((prev) => [...prev, { product_id: "", quantity: 1 }]);
   }
 
   function removeComponent(idx: number) {
-    setComponents((prev) => prev.filter((_, i) => i !== idx))
+    setComponents((prev) => prev.filter((_, i) => i !== idx));
   }
 
   async function handleSave() {
-    const numericPrice = Number(priceValue)
+    const numericPrice = Number(priceValue);
     if (Number.isNaN(numericPrice)) {
-      toast.error("El valor del precio no es válido.")
-      return
+      toast.error("El valor del precio no es válido.");
+      return;
     }
     if (components.some((c) => !c.product_id)) {
-      toast.error("Selecciona un producto en cada componente.")
-      return
+      toast.error("Selecciona un producto en cada componente.");
+      return;
     }
-    if (components.some((c) => c.quantity < 1 || !Number.isInteger(c.quantity))) {
-      toast.error("La cantidad debe ser un entero positivo.")
-      return
+    if (
+      components.some((c) => c.quantity < 1 || !Number.isInteger(c.quantity))
+    ) {
+      toast.error("La cantidad debe ser un entero positivo.");
+      return;
     }
 
     const input: PromotionInput = {
@@ -180,20 +186,20 @@ export function PromotionFormDialog({
         product_id: c.product_id,
         quantity: c.quantity,
       })),
-    }
+    };
 
-    setSaving(true)
+    setSaving(true);
     try {
       const result = isEdit
         ? await updatePromotion(promotion!.id, input)
-        : await createPromotion(businessId, input)
-      if (!result.success) throw new Error(result.error)
-      toast.success(isEdit ? "Promo actualizada" : "Promo creada")
-      onSaved(result.promotion)
+        : await createPromotion(businessId, input);
+      if (!result.success) throw new Error(result.error);
+      toast.success(isEdit ? "Promo actualizada" : "Promo creada");
+      onSaved(result.promotion);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error al guardar")
+      toast.error(err instanceof Error ? err.message : "Error al guardar");
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
   }
 
@@ -201,7 +207,7 @@ export function PromotionFormDialog({
     fixed_price: "Precio fijo (COP)",
     discount_amount: "Descuento (COP)",
     discount_pct: "Descuento (%)",
-  }
+  };
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -250,23 +256,23 @@ export function PromotionFormDialog({
           <div className="space-y-2">
             <Label>Tipo de precio</Label>
             <div className="grid grid-cols-3 gap-2">
-              {(["fixed_price", "discount_amount", "discount_pct"] as const).map(
-                (mode) => (
-                  <Button
-                    key={mode}
-                    type="button"
-                    variant={pricingMode === mode ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setPricingMode(mode)}
-                  >
-                    {mode === "fixed_price"
-                      ? "Precio fijo"
-                      : mode === "discount_amount"
+              {(
+                ["fixed_price", "discount_amount", "discount_pct"] as const
+              ).map((mode) => (
+                <Button
+                  key={mode}
+                  type="button"
+                  variant={pricingMode === mode ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setPricingMode(mode)}
+                >
+                  {mode === "fixed_price"
+                    ? "Precio fijo"
+                    : mode === "discount_amount"
                       ? "Descuento $"
                       : "Descuento %"}
-                  </Button>
-                )
-              )}
+                </Button>
+              ))}
             </div>
             <Input
               type="number"
@@ -286,7 +292,7 @@ export function PromotionFormDialog({
               <Label className="text-xs">Días de la semana</Label>
               <div className="flex flex-wrap gap-2">
                 {DAYS.map((d) => {
-                  const selected = days.includes(d.iso)
+                  const selected = days.includes(d.iso);
                   return (
                     <Button
                       key={d.iso}
@@ -298,7 +304,7 @@ export function PromotionFormDialog({
                     >
                       {d.label}
                     </Button>
-                  )
+                  );
                 })}
               </div>
               <p className="text-xs text-muted-foreground">
@@ -391,7 +397,9 @@ export function PromotionFormDialog({
                   />
                   <Select
                     value={c.product_id}
-                    onValueChange={(v) => updateComponent(idx, { product_id: v })}
+                    onValueChange={(v) =>
+                      updateComponent(idx, { product_id: v })
+                    }
                   >
                     <SelectTrigger className="flex-1">
                       <SelectValue placeholder="Selecciona un producto" />
@@ -425,10 +433,14 @@ export function PromotionFormDialog({
             Cancelar
           </Button>
           <Button onClick={() => void handleSave()} disabled={saving}>
-            {saving ? "Guardando..." : isEdit ? "Guardar cambios" : "Crear promo"}
+            {saving
+              ? "Guardando..."
+              : isEdit
+                ? "Guardar cambios"
+                : "Crear promo"}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
+  );
 }

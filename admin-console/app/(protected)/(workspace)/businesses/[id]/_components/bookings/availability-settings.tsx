@@ -1,45 +1,53 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { AvailabilityRule } from "@/lib/bookings-queries"
-import { saveAvailability } from "@/lib/actions/availability"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Switch } from "@/components/ui/switch"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Separator } from "@/components/ui/separator"
-import { Loader2, Save } from "lucide-react"
+import { useState } from "react";
+import { AvailabilityRule } from "@/lib/bookings-queries";
+import { saveAvailability } from "@/lib/actions/availability";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import { Loader2, Save } from "lucide-react";
 
-const DAY_NAMES = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"]
+const DAY_NAMES = [
+  "Domingo",
+  "Lunes",
+  "Martes",
+  "Miércoles",
+  "Jueves",
+  "Viernes",
+  "Sábado",
+];
 
 type DayRule = {
-  day_of_week: number
-  is_active: boolean
-  open_time: string
-  close_time: string
-  slot_duration_minutes: number
-}
+  day_of_week: number;
+  is_active: boolean;
+  open_time: string;
+  close_time: string;
+  slot_duration_minutes: number;
+};
 
 function buildDefaultRules(existing: AvailabilityRule[]): DayRule[] {
   return Array.from({ length: 7 }, (_, i) => {
-    const found = existing.find((r) => r.day_of_week === i)
+    const found = existing.find((r) => r.day_of_week === i);
     return {
       day_of_week: i,
       is_active: found?.is_active ?? (i !== 0 && i !== 6), // Mon-Fri active by default
       open_time: found?.open_time ?? "09:00",
       close_time: found?.close_time ?? "17:00",
       slot_duration_minutes: found?.slot_duration_minutes ?? 60,
-    }
-  })
+    };
+  });
 }
 
 interface AvailabilitySettingsProps {
-  businessId: string
-  initialRules: AvailabilityRule[]
-  onRulesUpdated: (rules: AvailabilityRule[]) => void
+  businessId: string;
+  initialRules: AvailabilityRule[];
+  onRulesUpdated: (rules: AvailabilityRule[]) => void;
   /** Panel / drawer layout: no outer Card, sticky save footer */
-  embedded?: boolean
+  embedded?: boolean;
 }
 
 export function AvailabilitySettings({
@@ -48,31 +56,33 @@ export function AvailabilitySettings({
   onRulesUpdated,
   embedded = false,
 }: AvailabilitySettingsProps) {
-  const [rules, setRules] = useState<DayRule[]>(() => buildDefaultRules(initialRules))
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [success, setSuccess] = useState(false)
+  const [rules, setRules] = useState<DayRule[]>(() =>
+    buildDefaultRules(initialRules),
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
 
   function updateRule(dayOfWeek: number, patch: Partial<DayRule>) {
     setRules((prev) =>
-      prev.map((r) => (r.day_of_week === dayOfWeek ? { ...r, ...patch } : r))
-    )
+      prev.map((r) => (r.day_of_week === dayOfWeek ? { ...r, ...patch } : r)),
+    );
   }
 
   async function handleSave() {
-    setSaving(true)
-    setError(null)
-    setSuccess(false)
+    setSaving(true);
+    setError(null);
+    setSuccess(false);
     try {
-      const result = await saveAvailability(businessId, rules)
-      if (!result.success) throw new Error(result.error)
-      onRulesUpdated(result.rules)
-      setSuccess(true)
-      setTimeout(() => setSuccess(false), 3000)
+      const result = await saveAvailability(businessId, rules);
+      if (!result.success) throw new Error(result.error);
+      onRulesUpdated(result.rules);
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Error desconocido")
+      setError(err instanceof Error ? err.message : "Error desconocido");
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
   }
 
@@ -112,29 +122,39 @@ export function AvailabilitySettings({
           </div>
 
           <div className="space-y-0.5 sm:space-y-0">
-            <Label className="text-xs sm:hidden text-muted-foreground">Abre</Label>
+            <Label className="text-xs sm:hidden text-muted-foreground">
+              Abre
+            </Label>
             <Input
               type="time"
               value={rule.open_time}
               disabled={!rule.is_active}
-              onChange={(e) => updateRule(rule.day_of_week, { open_time: e.target.value })}
+              onChange={(e) =>
+                updateRule(rule.day_of_week, { open_time: e.target.value })
+              }
               className="h-8 text-sm"
             />
           </div>
 
           <div className="space-y-0.5 sm:space-y-0">
-            <Label className="text-xs sm:hidden text-muted-foreground">Cierra</Label>
+            <Label className="text-xs sm:hidden text-muted-foreground">
+              Cierra
+            </Label>
             <Input
               type="time"
               value={rule.close_time}
               disabled={!rule.is_active}
-              onChange={(e) => updateRule(rule.day_of_week, { close_time: e.target.value })}
+              onChange={(e) =>
+                updateRule(rule.day_of_week, { close_time: e.target.value })
+              }
               className="h-8 text-sm"
             />
           </div>
 
           <div className="space-y-0.5 sm:space-y-0">
-            <Label className="text-xs sm:hidden text-muted-foreground">Duración del turno (min)</Label>
+            <Label className="text-xs sm:hidden text-muted-foreground">
+              Duración del turno (min)
+            </Label>
             <Input
               type="number"
               min={15}
@@ -153,7 +173,7 @@ export function AvailabilitySettings({
         </div>
       ))}
     </>
-  )
+  );
 
   const saveRow = (
     <div className="flex flex-wrap items-center gap-3">
@@ -174,11 +194,9 @@ export function AvailabilitySettings({
       {success && (
         <span className="text-sm text-green-600">✓ Guardado exitosamente</span>
       )}
-      {error && (
-        <span className="text-sm text-destructive">{error}</span>
-      )}
+      {error && <span className="text-sm text-destructive">{error}</span>}
     </div>
-  )
+  );
 
   if (embedded) {
     return (
@@ -186,17 +204,17 @@ export function AvailabilitySettings({
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 pb-2 pt-1">
           {rulesEditor}
         </div>
-        <div className="shrink-0 border-t bg-background p-4">
-          {saveRow}
-        </div>
+        <div className="shrink-0 border-t bg-background p-4">{saveRow}</div>
       </div>
-    )
+    );
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Horario de atención y disponibilidad</CardTitle>
+        <CardTitle className="text-base">
+          Horario de atención y disponibilidad
+        </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {rulesEditor}
@@ -204,5 +222,5 @@ export function AvailabilitySettings({
         {saveRow}
       </CardContent>
     </Card>
-  )
+  );
 }

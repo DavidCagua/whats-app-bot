@@ -1,18 +1,18 @@
-import { prisma } from "./prisma"
+import { prisma } from "./prisma";
 
 export type CustomerRow = {
-  id: number
-  whatsapp_id: string
-  name: string
-  phone: string | null
-  address: string | null
-  payment_method: string | null
-  notes: string | null
-  source: string
-  orders_count: number
-  last_seen_at: string | null
-  created_at: string
-}
+  id: number;
+  whatsapp_id: string;
+  name: string;
+  phone: string | null;
+  address: string | null;
+  payment_method: string | null;
+  notes: string | null;
+  source: string;
+  orders_count: number;
+  last_seen_at: string | null;
+  created_at: string;
+};
 
 /**
  * Returns customers linked to the given business via the
@@ -27,7 +27,7 @@ export type CustomerRow = {
  * it surfaced too).
  */
 export async function getCustomersForBusiness(
-  businessId: string
+  businessId: string,
 ): Promise<CustomerRow[]> {
   const links = await prisma.business_customers.findMany({
     where: { business_id: businessId },
@@ -47,11 +47,11 @@ export async function getCustomersForBusiness(
       },
     },
     orderBy: { updated_at: "desc" },
-  })
+  });
 
   const rows = links.map<CustomerRow>((link) => {
-    const c = link.customers
-    const lastOrder = c.orders[0]?.created_at ?? null
+    const c = link.customers;
+    const lastOrder = c.orders[0]?.created_at ?? null;
     return {
       id: c.id,
       whatsapp_id: c.whatsapp_id,
@@ -64,14 +64,14 @@ export async function getCustomersForBusiness(
       orders_count: c._count.orders,
       last_seen_at: lastOrder ? lastOrder.toISOString() : null,
       created_at: link.created_at.toISOString(),
-    }
-  })
+    };
+  });
 
   rows.sort((a, b) => {
-    const av = a.last_seen_at ?? a.created_at
-    const bv = b.last_seen_at ?? b.created_at
-    return bv.localeCompare(av)
-  })
+    const av = a.last_seen_at ?? a.created_at;
+    const bv = b.last_seen_at ?? b.created_at;
+    return bv.localeCompare(av);
+  });
 
-  return rows
+  return rows;
 }

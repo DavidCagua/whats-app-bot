@@ -1,33 +1,35 @@
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { canAccessBusiness, canEditBusiness } from "@/lib/permissions"
-import { notFound, redirect } from "next/navigation"
-import { getBusinessUsers } from "@/lib/actions/users"
-import { TeamTable } from "./components/team-table"
-import { InviteUserButton } from "./components/invite-user-button"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { canAccessBusiness, canEditBusiness } from "@/lib/permissions";
+import { notFound, redirect } from "next/navigation";
+import { getBusinessUsers } from "@/lib/actions/users";
+import { TeamTable } from "./components/team-table";
+import { InviteUserButton } from "./components/invite-user-button";
 
 interface BusinessTeamPageProps {
-  params: Promise<{ id: string }>
+  params: Promise<{ id: string }>;
 }
 
-export default async function BusinessTeamPage({ params }: BusinessTeamPageProps) {
-  const { id } = await params
-  const session = await auth()
+export default async function BusinessTeamPage({
+  params,
+}: BusinessTeamPageProps) {
+  const { id } = await params;
+  const session = await auth();
 
   if (!canAccessBusiness(session, id)) {
-    redirect("/businesses")
+    redirect("/businesses");
   }
 
   const business = await prisma.businesses.findUnique({
     where: { id },
-  })
+  });
 
   if (!business) {
-    notFound()
+    notFound();
   }
 
-  const users = await getBusinessUsers(id)
-  const canInvite = canEditBusiness(session, id)
+  const users = await getBusinessUsers(id);
+  const canInvite = canEditBusiness(session, id);
 
   return (
     <div className="space-y-6">
@@ -45,5 +47,5 @@ export default async function BusinessTeamPage({ params }: BusinessTeamPageProps
 
       <TeamTable data={users} businessId={id} canEdit={canInvite} />
     </div>
-  )
+  );
 }

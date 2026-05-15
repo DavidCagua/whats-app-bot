@@ -1,82 +1,87 @@
-import { auth } from "@/lib/auth"
-import { redirect } from "next/navigation"
-import { canAccessBusiness } from "@/lib/permissions"
-import { redirectIfModuleDisabled } from "@/lib/modules"
-import { getBookingsAccess, getBookings } from "@/lib/bookings-queries"
-import { prisma } from "@/lib/prisma"
-import { BookingsView } from "../_components/bookings/bookings-view"
+import { auth } from "@/lib/auth";
+import { redirect } from "next/navigation";
+import { canAccessBusiness } from "@/lib/permissions";
+import { redirectIfModuleDisabled } from "@/lib/modules";
+import { getBookingsAccess, getBookings } from "@/lib/bookings-queries";
+import { prisma } from "@/lib/prisma";
+import { BookingsView } from "../_components/bookings/bookings-view";
 
 type SearchParams = {
-  dateFrom?: string
-  dateTo?: string
-}
+  dateFrom?: string;
+  dateTo?: string;
+};
 
 export default async function BusinessBookingsPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ id: string }>
-  searchParams: Promise<SearchParams>
+  params: Promise<{ id: string }>;
+  searchParams: Promise<SearchParams>;
 }) {
-  const { id: businessId } = await params
-  const session = await auth()
+  const { id: businessId } = await params;
+  const session = await auth();
 
-  if (!session) redirect("/login")
-  if (!canAccessBusiness(session, businessId)) redirect("/businesses")
-  await redirectIfModuleDisabled(businessId, "bookings")
+  if (!session) redirect("/login");
+  if (!canAccessBusiness(session, businessId)) redirect("/businesses");
+  await redirectIfModuleDisabled(businessId, "bookings");
 
-  const access = await getBookingsAccess(session)
-  if (access.businessIds !== "all" && !access.businessIds.includes(businessId)) {
-    redirect("/businesses")
+  const access = await getBookingsAccess(session);
+  if (
+    access.businessIds !== "all" &&
+    !access.businessIds.includes(businessId)
+  ) {
+    redirect("/businesses");
   }
 
   if (access.businessIds !== "all" && access.businessIds.length === 0) {
     return (
       <div className="space-y-6">
         <p className="text-center text-muted-foreground py-12">
-          No hay acceso configurado para ningún negocio. Contacta a tu administrador.
+          No hay acceso configurado para ningún negocio. Contacta a tu
+          administrador.
         </p>
       </div>
-    )
+    );
   }
 
-  const paramsQ = await searchParams
+  const paramsQ = await searchParams;
 
-  const now = new Date()
-  const dayOfWeek = now.getDay()
-  const weekStart = new Date(now)
-  weekStart.setDate(now.getDate() - dayOfWeek)
-  weekStart.setHours(0, 0, 0, 0)
-  const weekEnd = new Date(weekStart)
-  weekEnd.setDate(weekStart.getDate() + 6)
-  weekEnd.setHours(23, 59, 59, 999)
+  const now = new Date();
+  const dayOfWeek = now.getDay();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - dayOfWeek);
+  weekStart.setHours(0, 0, 0, 0);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
 
-  const dateFrom = paramsQ.dateFrom ? new Date(paramsQ.dateFrom) : weekStart
-  const dateTo = paramsQ.dateTo ? new Date(paramsQ.dateTo) : weekEnd
+  const dateFrom = paramsQ.dateFrom ? new Date(paramsQ.dateFrom) : weekStart;
+  const dateTo = paramsQ.dateTo ? new Date(paramsQ.dateTo) : weekEnd;
 
-  const [bookings, initialStaff, businessRow, initialServices] = await Promise.all([
-    getBookings({
-      businessIds: access.businessIds,
-      businessFilter: businessId,
-      dateFrom,
-      dateTo,
-      limit: 500,
-    }),
-    prisma.staff_members.findMany({
-      where: { business_id: businessId, is_active: true },
-      select: { id: true, name: true, role: true },
-      orderBy: { name: "asc" },
-    }),
-    prisma.businesses.findUnique({
-      where: { id: businessId },
-      select: { id: true, name: true },
-    }),
-    prisma.services.findMany({
-      where: { business_id: businessId, is_active: true },
-      select: { id: true, name: true, duration_minutes: true },
-      orderBy: { name: "asc" },
-    }),
-  ])
+  const [bookings, initialStaff, businessRow, initialServices] =
+    await Promise.all([
+      getBookings({
+        businessIds: access.businessIds,
+        businessFilter: businessId,
+        dateFrom,
+        dateTo,
+        limit: 500,
+      }),
+      prisma.staff_members.findMany({
+        where: { business_id: businessId, is_active: true },
+        select: { id: true, name: true, role: true },
+        orderBy: { name: "asc" },
+      }),
+      prisma.businesses.findUnique({
+        where: { id: businessId },
+        select: { id: true, name: true },
+      }),
+      prisma.services.findMany({
+        where: { business_id: businessId, is_active: true },
+        select: { id: true, name: true, duration_minutes: true },
+        orderBy: { name: "asc" },
+      }),
+    ]);
 
   const singleBusinessAccess = {
     ...access,
@@ -84,7 +89,7 @@ export default async function BusinessBookingsPage({
     businesses: businessRow
       ? [{ id: businessRow.id, name: businessRow.name }]
       : access.businesses.filter((b) => b.id === businessId),
-  }
+  };
 
   return (
     <div className="space-y-4">
@@ -109,5 +114,5 @@ export default async function BusinessBookingsPage({
         initialServices={initialServices}
       />
     </div>
-  )
+  );
 }

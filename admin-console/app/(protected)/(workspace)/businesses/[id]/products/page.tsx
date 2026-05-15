@@ -1,30 +1,30 @@
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { canAccessBusiness } from "@/lib/permissions"
-import { redirectIfModuleDisabled } from "@/lib/modules"
-import { notFound, redirect } from "next/navigation"
-import { ProductsManager } from "./components/products-manager"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { canAccessBusiness } from "@/lib/permissions";
+import { redirectIfModuleDisabled } from "@/lib/modules";
+import { notFound, redirect } from "next/navigation";
+import { ProductsManager } from "./components/products-manager";
 
 interface ProductsPageProps {
-  params: Promise<{ id: string }>
+  params: Promise<{ id: string }>;
 }
 
 export default async function ProductsPage({ params }: ProductsPageProps) {
-  const { id } = await params
-  const session = await auth()
+  const { id } = await params;
+  const session = await auth();
 
   if (!canAccessBusiness(session, id)) {
-    redirect("/businesses")
+    redirect("/businesses");
   }
-  await redirectIfModuleDisabled(id, "products")
+  await redirectIfModuleDisabled(id, "products");
 
-  const business = await prisma.businesses.findUnique({ where: { id } })
-  if (!business) notFound()
+  const business = await prisma.businesses.findUnique({ where: { id } });
+  if (!business) notFound();
 
   const products = await prisma.products.findMany({
     where: { business_id: id },
     orderBy: [{ is_active: "desc" }, { name: "asc" }],
-  })
+  });
 
   const mappedProducts = products.map((p) => ({
     id: p.id,
@@ -36,7 +36,7 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
     price: Number(p.price.toString()),
     is_active: p.is_active ?? true,
     promo_only: p.promo_only ?? false,
-  }))
+  }));
 
   return (
     <div className="space-y-6">
@@ -49,5 +49,5 @@ export default async function ProductsPage({ params }: ProductsPageProps) {
 
       <ProductsManager businessId={id} initialProducts={mappedProducts} />
     </div>
-  )
+  );
 }

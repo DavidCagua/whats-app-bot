@@ -1,27 +1,27 @@
-"use server"
+"use server";
 
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { canEditBusiness } from "@/lib/permissions"
-import { revalidatePath } from "next/cache"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { canEditBusiness } from "@/lib/permissions";
+import { revalidatePath } from "next/cache";
 
 export async function createStaffMember(
   businessId: string,
   data: {
-    name: string
-    role: string
-    is_active: boolean
-    user_id: string | null
-  }
+    name: string;
+    role: string;
+    is_active: boolean;
+    user_id: string | null;
+  },
 ) {
   try {
-    const session = await auth()
+    const session = await auth();
     if (!session?.user) {
-      return { success: false, error: "Unauthorized" }
+      return { success: false, error: "Unauthorized" };
     }
 
     if (!canEditBusiness(session, businessId)) {
-      return { success: false, error: "Access denied" }
+      return { success: false, error: "Access denied" };
     }
 
     const staff = await prisma.staff_members.create({
@@ -41,41 +41,41 @@ export async function createStaffMember(
           },
         },
       },
-    })
+    });
 
-    revalidatePath(`/businesses/${businessId}/staff`)
-    return { success: true, staff }
+    revalidatePath(`/businesses/${businessId}/staff`);
+    return { success: true, staff };
   } catch (error) {
-    console.error("Error creating staff member:", error)
-    return { success: false, error: "Failed to create staff member" }
+    console.error("Error creating staff member:", error);
+    return { success: false, error: "Failed to create staff member" };
   }
 }
 
 export async function updateStaffMember(
   staffId: string,
   data: {
-    name?: string
-    role?: string
-    is_active?: boolean
-    user_id?: string | null
-  }
+    name?: string;
+    role?: string;
+    is_active?: boolean;
+    user_id?: string | null;
+  },
 ) {
   try {
-    const session = await auth()
+    const session = await auth();
     if (!session?.user) {
-      return { success: false, error: "Unauthorized" }
+      return { success: false, error: "Unauthorized" };
     }
 
     const staffMember = await prisma.staff_members.findUnique({
       where: { id: staffId },
-    })
+    });
 
     if (!staffMember) {
-      return { success: false, error: "Staff member not found" }
+      return { success: false, error: "Staff member not found" };
     }
 
     if (!canEditBusiness(session, staffMember.business_id)) {
-      return { success: false, error: "Access denied" }
+      return { success: false, error: "Access denied" };
     }
 
     const updated = await prisma.staff_members.update({
@@ -95,75 +95,75 @@ export async function updateStaffMember(
           },
         },
       },
-    })
+    });
 
-    revalidatePath(`/businesses/${staffMember.business_id}/staff`)
-    return { success: true, staff: updated }
+    revalidatePath(`/businesses/${staffMember.business_id}/staff`);
+    return { success: true, staff: updated };
   } catch (error) {
-    console.error("Error updating staff member:", error)
-    return { success: false, error: "Failed to update staff member" }
+    console.error("Error updating staff member:", error);
+    return { success: false, error: "Failed to update staff member" };
   }
 }
 
 export async function deleteStaffMember(staffId: string) {
   try {
-    const session = await auth()
+    const session = await auth();
     if (!session?.user) {
-      return { success: false, error: "Unauthorized" }
+      return { success: false, error: "Unauthorized" };
     }
 
     const staffMember = await prisma.staff_members.findUnique({
       where: { id: staffId },
-    })
+    });
 
     if (!staffMember) {
-      return { success: false, error: "Staff member not found" }
+      return { success: false, error: "Staff member not found" };
     }
 
     if (!canEditBusiness(session, staffMember.business_id)) {
-      return { success: false, error: "Access denied" }
+      return { success: false, error: "Access denied" };
     }
 
     await prisma.staff_members.delete({
       where: { id: staffId },
-    })
+    });
 
-    revalidatePath(`/businesses/${staffMember.business_id}/staff`)
-    return { success: true }
+    revalidatePath(`/businesses/${staffMember.business_id}/staff`);
+    return { success: true };
   } catch (error) {
-    console.error("Error deleting staff member:", error)
-    return { success: false, error: "Failed to delete staff member" }
+    console.error("Error deleting staff member:", error);
+    return { success: false, error: "Failed to delete staff member" };
   }
 }
 
 export async function toggleStaffActive(staffId: string, isActive: boolean) {
   try {
-    const session = await auth()
+    const session = await auth();
     if (!session?.user) {
-      return { success: false, error: "Unauthorized" }
+      return { success: false, error: "Unauthorized" };
     }
 
     const staffMember = await prisma.staff_members.findUnique({
       where: { id: staffId },
-    })
+    });
 
     if (!staffMember) {
-      return { success: false, error: "Staff member not found" }
+      return { success: false, error: "Staff member not found" };
     }
 
     if (!canEditBusiness(session, staffMember.business_id)) {
-      return { success: false, error: "Access denied" }
+      return { success: false, error: "Access denied" };
     }
 
     await prisma.staff_members.update({
       where: { id: staffId },
       data: { is_active: isActive },
-    })
+    });
 
-    revalidatePath(`/businesses/${staffMember.business_id}/staff`)
-    return { success: true }
+    revalidatePath(`/businesses/${staffMember.business_id}/staff`);
+    return { success: true };
   } catch (error) {
-    console.error("Error toggling staff active:", error)
-    return { success: false, error: "Failed to update" }
+    console.error("Error toggling staff active:", error);
+    return { success: false, error: "Failed to update" };
   }
 }

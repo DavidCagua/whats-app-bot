@@ -1,22 +1,22 @@
-import { prisma } from "./prisma"
+import { prisma } from "./prisma";
 
 export type ProductOption = {
-  id: string
-  name: string
-  price: number
-  category: string | null
-}
+  id: string;
+  name: string;
+  price: number;
+  category: string | null;
+};
 
 export type CustomerOption = {
-  id: number
-  name: string
-  whatsapp_id: string
-}
+  id: number;
+  name: string;
+  whatsapp_id: string;
+};
 
 export type CreateOrderData = {
-  products: ProductOption[]
-  customers: CustomerOption[]
-}
+  products: ProductOption[];
+  customers: CustomerOption[];
+};
 
 /**
  * Fetches the lookup data the "Crear pedido" dialog needs: active
@@ -28,7 +28,7 @@ export type CreateOrderData = {
  * or customer count grows past a few hundred.
  */
 export async function getCreateOrderData(
-  businessId: string
+  businessId: string,
 ): Promise<CreateOrderData> {
   const [products, links] = await Promise.all([
     prisma.products.findMany({
@@ -43,7 +43,7 @@ export async function getCreateOrderData(
       },
       orderBy: { updated_at: "desc" },
     }),
-  ])
+  ]);
 
   return {
     products: products.map((p) => ({
@@ -57,5 +57,5 @@ export async function getCreateOrderData(
       name: l.name ?? l.customers.name,
       whatsapp_id: l.customers.whatsapp_id,
     })),
-  }
+  };
 }

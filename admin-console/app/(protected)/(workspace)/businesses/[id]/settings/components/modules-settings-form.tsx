@@ -1,52 +1,58 @@
-"use client"
+"use client";
 
-import { useState, useTransition } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Switch } from "@/components/ui/switch"
-import { Badge } from "@/components/ui/badge"
-import { toast } from "sonner"
-import { OPTIONAL_MODULES, MODULES, type ModuleKey } from "@/lib/modules"
-import { updateEnabledModules } from "@/lib/actions/business-modules"
+import { useState, useTransition } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
+import { OPTIONAL_MODULES, MODULES, type ModuleKey } from "@/lib/modules";
+import { updateEnabledModules } from "@/lib/actions/business-modules";
 
-const REQUIRED_MODULES = MODULES.filter((m) => m.required)
+const REQUIRED_MODULES = MODULES.filter((m) => m.required);
 
 export function ModulesSettingsForm({
   businessId,
   initialEnabledModules,
 }: {
-  businessId: string
-  initialEnabledModules: string[]
+  businessId: string;
+  initialEnabledModules: string[];
 }) {
   const [enabled, setEnabled] = useState<Set<ModuleKey>>(
     () =>
       new Set(
         initialEnabledModules.filter((k): k is ModuleKey =>
-          OPTIONAL_MODULES.some((m) => m.key === k)
-        )
-      )
-  )
-  const [isPending, startTransition] = useTransition()
+          OPTIONAL_MODULES.some((m) => m.key === k),
+        ),
+      ),
+  );
+  const [isPending, startTransition] = useTransition();
 
   const onToggle = (key: ModuleKey, next: boolean) => {
-    const previous = new Set(enabled)
-    const optimistic = new Set(enabled)
-    if (next) optimistic.add(key)
-    else optimistic.delete(key)
-    setEnabled(optimistic)
+    const previous = new Set(enabled);
+    const optimistic = new Set(enabled);
+    if (next) optimistic.add(key);
+    else optimistic.delete(key);
+    setEnabled(optimistic);
 
     startTransition(async () => {
       const result = await updateEnabledModules(
         businessId,
-        Array.from(optimistic)
-      )
+        Array.from(optimistic),
+      );
       if (!result.success) {
-        setEnabled(previous)
-        toast.error(result.error)
-        return
+        setEnabled(previous);
+        toast.error(result.error);
+        return;
       }
-      toast.success(next ? "Módulo activado" : "Módulo desactivado")
-    })
-  }
+      toast.success(next ? "Módulo activado" : "Módulo desactivado");
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -61,7 +67,7 @@ export function ModulesSettingsForm({
         </CardHeader>
         <CardContent className="space-y-3">
           {OPTIONAL_MODULES.map((m) => {
-            const checked = enabled.has(m.key)
+            const checked = enabled.has(m.key);
             return (
               <div
                 key={m.key}
@@ -82,7 +88,7 @@ export function ModulesSettingsForm({
                   aria-label={`Activar ${m.label}`}
                 />
               </div>
-            )
+            );
           })}
         </CardContent>
       </Card>
@@ -105,5 +111,5 @@ export function ModulesSettingsForm({
         </CardContent>
       </Card>
     </div>
-  )
+  );
 }

@@ -1,23 +1,29 @@
-"use client"
+"use client";
 
-import { useState, useEffect } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Switch } from "@/components/ui/switch"
-import { Label } from "@/components/ui/label"
-import { Button } from "@/components/ui/button"
-import { Loader2, Bot, Save } from "lucide-react"
-import { toast } from "sonner"
+import { useState, useEffect } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { Loader2, Bot, Save } from "lucide-react";
+import { toast } from "sonner";
 import {
   getBusinessAgents,
   updateBusinessAgents,
   type BusinessAgentConfig,
   type AgentType,
-} from "@/lib/actions/business-agents"
+} from "@/lib/actions/business-agents";
 
 interface AgentsSettingsFormProps {
-  businessId: string
-  readOnly?: boolean
-  initialAgents?: BusinessAgentConfig[] | null
+  businessId: string;
+  readOnly?: boolean;
+  initialAgents?: BusinessAgentConfig[] | null;
 }
 
 export function AgentsSettingsForm({
@@ -25,44 +31,44 @@ export function AgentsSettingsForm({
   readOnly = false,
   initialAgents = null,
 }: AgentsSettingsFormProps) {
-  const [agents, setAgents] = useState<BusinessAgentConfig[]>([])
-  const [isLoading, setIsLoading] = useState(!initialAgents)
-  const [isSaving, setIsSaving] = useState(false)
+  const [agents, setAgents] = useState<BusinessAgentConfig[]>([]);
+  const [isLoading, setIsLoading] = useState(!initialAgents);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (initialAgents) {
-      setAgents(initialAgents)
-      setIsLoading(false)
-      return
+      setAgents(initialAgents);
+      setIsLoading(false);
+      return;
     }
     async function fetchAgents() {
       try {
-        const data = await getBusinessAgents(businessId)
-        if (data) setAgents(data)
+        const data = await getBusinessAgents(businessId);
+        if (data) setAgents(data);
       } catch (err) {
-        console.error("Error fetching agents:", err)
-        toast.error("No se pudieron cargar los agentes")
+        console.error("Error fetching agents:", err);
+        toast.error("No se pudieron cargar los agentes");
       } finally {
-        setIsLoading(false)
+        setIsLoading(false);
       }
     }
-    fetchAgents()
-  }, [businessId, initialAgents])
+    fetchAgents();
+  }, [businessId, initialAgents]);
 
   const handleToggle = (agentType: AgentType, enabled: boolean) => {
     setAgents((prev) =>
-      prev.map((a) => (a.agent_type === agentType ? { ...a, enabled } : a))
-    )
-  }
+      prev.map((a) => (a.agent_type === agentType ? { ...a, enabled } : a)),
+    );
+  };
 
   const handleSave = async () => {
-    const enabledCount = agents.filter((a) => a.enabled).length
+    const enabledCount = agents.filter((a) => a.enabled).length;
     if (enabledCount === 0) {
-      toast.error("Al menos un agente debe estar habilitado")
-      return
+      toast.error("Al menos un agente debe estar habilitado");
+      return;
     }
 
-    setIsSaving(true)
+    setIsSaving(true);
     try {
       const result = await updateBusinessAgents(
         businessId,
@@ -70,28 +76,28 @@ export function AgentsSettingsForm({
           agent_type: a.agent_type,
           enabled: a.enabled,
           priority: a.priority,
-        }))
-      )
+        })),
+      );
       if (result.success) {
-        toast.success("Agentes actualizados exitosamente")
+        toast.success("Agentes actualizados exitosamente");
       } else {
-        toast.error(result.error || "No se pudieron actualizar los agentes")
+        toast.error(result.error || "No se pudieron actualizar los agentes");
       }
     } catch {
-      toast.error("Ocurrió un error")
+      toast.error("Ocurrió un error");
     } finally {
-      setIsSaving(false)
+      setIsSaving(false);
     }
-  }
+  };
 
   const hasChanges = () => {
-    if (!initialAgents) return true
+    if (!initialAgents) return true;
     return agents.some(
       (a, i) =>
         initialAgents[i]?.enabled !== a.enabled ||
-        initialAgents[i]?.priority !== a.priority
-    )
-  }
+        initialAgents[i]?.priority !== a.priority,
+    );
+  };
 
   if (isLoading) {
     return (
@@ -106,7 +112,7 @@ export function AgentsSettingsForm({
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </CardContent>
       </Card>
-    )
+    );
   }
 
   return (
@@ -117,8 +123,9 @@ export function AgentsSettingsForm({
           Agentes IA
         </CardTitle>
         <CardDescription>
-          Habilita o deshabilita agentes. El que tenga el número de prioridad más bajo recibe los
-          mensajes por defecto; en Configuración general puedes fijar un agente principal que lo anula.
+          Habilita o deshabilita agentes. El que tenga el número de prioridad
+          más bajo recibe los mensajes por defecto; en Configuración general
+          puedes fijar un agente principal que lo anula.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -129,10 +136,15 @@ export function AgentsSettingsForm({
               className="flex items-start justify-between gap-4 rounded-lg border p-4"
             >
               <div className="flex-1 space-y-1">
-                <Label htmlFor={`agent-${agent.agent_type}`} className="text-base font-medium">
+                <Label
+                  htmlFor={`agent-${agent.agent_type}`}
+                  className="text-base font-medium"
+                >
                   {agent.name}
                 </Label>
-                <p className="text-sm text-muted-foreground">{agent.description}</p>
+                <p className="text-sm text-muted-foreground">
+                  {agent.description}
+                </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {readOnly ? (
@@ -145,7 +157,9 @@ export function AgentsSettingsForm({
                   <Switch
                     id={`agent-${agent.agent_type}`}
                     checked={agent.enabled}
-                    onCheckedChange={(checked) => handleToggle(agent.agent_type, checked)}
+                    onCheckedChange={(checked) =>
+                      handleToggle(agent.agent_type, checked)
+                    }
                   />
                 )}
               </div>
@@ -169,12 +183,21 @@ export function AgentsSettingsForm({
         <div className="text-sm text-muted-foreground pt-2 border-t">
           <p className="font-medium mb-1">¿Cómo funcionan los agentes?</p>
           <ul className="list-disc list-inside space-y-1">
-            <li>Por ahora un solo agente atiende cada mensaje: el principal (configuración) o el de menor prioridad</li>
-            <li>Si solo hay un agente habilitado, todos los mensajes van a ese agente</li>
-            <li>El estado de sesión evita la reclasificación en flujos de múltiples turnos</li>
+            <li>
+              Por ahora un solo agente atiende cada mensaje: el principal
+              (configuración) o el de menor prioridad
+            </li>
+            <li>
+              Si solo hay un agente habilitado, todos los mensajes van a ese
+              agente
+            </li>
+            <li>
+              El estado de sesión evita la reclasificación en flujos de
+              múltiples turnos
+            </li>
           </ul>
         </div>
       </CardContent>
     </Card>
-  )
+  );
 }

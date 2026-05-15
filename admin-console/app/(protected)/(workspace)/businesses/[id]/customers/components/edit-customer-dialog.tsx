@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useState, useTransition } from "react"
+import { useState, useTransition } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,15 +8,15 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
-import { toast } from "sonner"
-import { useRouter } from "next/navigation"
-import { updateCustomer } from "@/lib/actions/customers"
-import type { CustomerRow } from "@/lib/customers-queries"
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { toast } from "sonner";
+import { useRouter } from "next/navigation";
+import { updateCustomer } from "@/lib/actions/customers";
+import type { CustomerRow } from "@/lib/customers-queries";
 
 export function EditCustomerDialog({
   businessId,
@@ -24,37 +24,37 @@ export function EditCustomerDialog({
   open,
   onOpenChange,
 }: {
-  businessId: string
-  customer: CustomerRow | null
-  open: boolean
-  onOpenChange: (next: boolean) => void
+  businessId: string;
+  customer: CustomerRow | null;
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
 }) {
-  const router = useRouter()
-  const [isPending, startTransition] = useTransition()
-  const [whatsappId, setWhatsappId] = useState("")
-  const [name, setName] = useState("")
-  const [phone, setPhone] = useState("")
-  const [address, setAddress] = useState("")
-  const [paymentMethod, setPaymentMethod] = useState("")
-  const [notes, setNotes] = useState("")
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [whatsappId, setWhatsappId] = useState("");
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [address, setAddress] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("");
+  const [notes, setNotes] = useState("");
 
   // Reset local state when the dialog re-opens with a different customer.
   // useEffect would also work, but keying off the customer id during render
   // keeps the form in sync without a flash of stale values.
-  const [lastSeenId, setLastSeenId] = useState<number | null>(null)
+  const [lastSeenId, setLastSeenId] = useState<number | null>(null);
   if (customer && customer.id !== lastSeenId) {
-    setLastSeenId(customer.id)
-    setWhatsappId(customer.whatsapp_id)
-    setName(customer.name)
-    setPhone(customer.phone ?? "")
-    setAddress(customer.address ?? "")
-    setPaymentMethod(customer.payment_method ?? "")
-    setNotes(customer.notes ?? "")
+    setLastSeenId(customer.id);
+    setWhatsappId(customer.whatsapp_id);
+    setName(customer.name);
+    setPhone(customer.phone ?? "");
+    setAddress(customer.address ?? "");
+    setPaymentMethod(customer.payment_method ?? "");
+    setNotes(customer.notes ?? "");
   }
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    if (!customer) return
+    e.preventDefault();
+    if (!customer) return;
     startTransition(async () => {
       const result = await updateCustomer({
         businessId,
@@ -65,15 +65,15 @@ export function EditCustomerDialog({
         address,
         paymentMethod,
         notes,
-      })
+      });
       if (!result.success) {
-        toast.error(result.error)
-        return
+        toast.error(result.error);
+        return;
       }
-      toast.success("Cliente actualizado")
-      onOpenChange(false)
-      router.refresh()
-    })
+      toast.success("Cliente actualizado");
+      onOpenChange(false);
+      router.refresh();
+    });
   }
 
   return (
@@ -82,9 +82,9 @@ export function EditCustomerDialog({
         <DialogHeader>
           <DialogTitle>Editar cliente</DialogTitle>
           <DialogDescription>
-            Nombre, teléfono, dirección y notas son por negocio. El WhatsApp
-            es la identidad global del cliente — al cambiarlo se renombra
-            en todos los negocios donde aparece.
+            Nombre, teléfono, dirección y notas son por negocio. El WhatsApp es
+            la identidad global del cliente — al cambiarlo se renombra en todos
+            los negocios donde aparece.
           </DialogDescription>
         </DialogHeader>
 
@@ -173,5 +173,5 @@ export function EditCustomerDialog({
         </form>
       </DialogContent>
     </Dialog>
-  )
+  );
 }

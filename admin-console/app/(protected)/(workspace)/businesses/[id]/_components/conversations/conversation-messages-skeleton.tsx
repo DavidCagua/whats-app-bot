@@ -1,16 +1,16 @@
-"use client"
+"use client";
 
-import { Card, CardContent, CardHeader } from "@/components/ui/card"
-import { Skeleton } from "@/components/ui/skeleton"
-import { Button } from "@/components/ui/button"
-import { ArrowLeft } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { ArrowLeft } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 type ConversationMessagesSkeletonProps = {
-  onBack?: () => void
-}
+  onBack?: () => void;
+};
 
-const BUBBLE_WIDTHS = ["w-3/5", "w-2/5", "w-3/4", "w-1/2", "w-2/3", "w-1/3"]
+const BUBBLE_WIDTHS = ["w-3/5", "w-2/5", "w-3/4", "w-1/2", "w-2/3", "w-1/3"];
 
 export function ConversationMessagesSkeleton({
   onBack,
@@ -51,27 +51,29 @@ export function ConversationMessagesSkeleton({
       <CardContent className="p-3 sm:p-4 flex-1 overflow-hidden">
         <div className="space-y-3 sm:space-y-4">
           {BUBBLE_WIDTHS.map((width, i) => {
-            const isAssistant = i % 2 === 1
+            const isAssistant = i % 2 === 1;
             return (
               <div
                 key={i}
                 className={cn(
                   "flex gap-2 sm:gap-3",
-                  isAssistant && "flex-row-reverse"
+                  isAssistant && "flex-row-reverse",
                 )}
               >
                 <Skeleton className="h-7 w-7 sm:h-8 sm:w-8 rounded-full flex-shrink-0 mt-1" />
                 <div
                   className={cn(
                     "flex-1 space-y-1 max-w-[80%] sm:max-w-[75%]",
-                    isAssistant && "flex flex-col items-end"
+                    isAssistant && "flex flex-col items-end",
                   )}
                 >
                   <Skeleton className="h-3 w-24" />
-                  <Skeleton className={cn("h-10 rounded-2xl sm:rounded-lg", width)} />
+                  <Skeleton
+                    className={cn("h-10 rounded-2xl sm:rounded-lg", width)}
+                  />
                 </div>
               </div>
-            )
+            );
           })}
         </div>
       </CardContent>
@@ -85,5 +87,5 @@ export function ConversationMessagesSkeleton({
         </div>
       </div>
     </Card>
-  )
+  );
 }

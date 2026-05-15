@@ -1,27 +1,31 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { Booking } from "@/lib/bookings-queries"
-import { createBooking, updateBooking, cancelBooking } from "@/lib/actions/bookings"
+import { useState } from "react";
+import { Booking } from "@/lib/bookings-queries";
+import {
+  createBooking,
+  updateBooking,
+  cancelBooking,
+} from "@/lib/actions/bookings";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogFooter,
-} from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Separator } from "@/components/ui/separator"
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { Loader2, Trash2 } from "lucide-react"
+} from "@/components/ui/select";
+import { Loader2, Trash2 } from "lucide-react";
 
 const STATUS_OPTIONS = [
   { value: "confirmed", label: "Confirmado" },
@@ -29,24 +33,24 @@ const STATUS_OPTIONS = [
   { value: "completed", label: "Completado" },
   { value: "cancelled", label: "Cancelado" },
   { value: "no_show", label: "No se presentó" },
-]
+];
 
 function toDatetimeLocal(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0")
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 interface BookingModalProps {
-  mode: "create" | "edit"
-  booking?: Booking
-  initialDate?: Date
-  businesses: Array<{ id: string; name: string }>
-  defaultBusinessId: string
-  staffMembers: Array<{ id: string; name: string }>
-  services: Array<{ id: string; name: string; duration_minutes: number }>
-  onClose: () => void
-  onSaved: (booking: Booking) => void
-  onDeleted: (id: string) => void
+  mode: "create" | "edit";
+  booking?: Booking;
+  initialDate?: Date;
+  businesses: Array<{ id: string; name: string }>;
+  defaultBusinessId: string;
+  staffMembers: Array<{ id: string; name: string }>;
+  services: Array<{ id: string; name: string; duration_minutes: number }>;
+  onClose: () => void;
+  onSaved: (booking: Booking) => void;
+  onDeleted: (id: string) => void;
 }
 
 export function BookingModal({
@@ -61,34 +65,37 @@ export function BookingModal({
   onSaved,
   onDeleted,
 }: BookingModalProps) {
-  const defaultStart = initialDate || (booking ? new Date(booking.start_at) : new Date())
+  const defaultStart =
+    initialDate || (booking ? new Date(booking.start_at) : new Date());
   const defaultEnd = booking
     ? new Date(booking.end_at)
-    : new Date(defaultStart.getTime() + 60 * 60 * 1000)
+    : new Date(defaultStart.getTime() + 60 * 60 * 1000);
 
   const [businessId, setBusinessId] = useState(
-    booking?.business_id || defaultBusinessId
-  )
-  const [serviceId, setServiceId] = useState(booking?.service_id || "")
+    booking?.business_id || defaultBusinessId,
+  );
+  const [serviceId, setServiceId] = useState(booking?.service_id || "");
   const [customerWhatsappId, setCustomerWhatsappId] = useState(
-    booking?.customer?.whatsapp_id || ""
-  )
+    booking?.customer?.whatsapp_id || "",
+  );
   const [customerName, setCustomerName] = useState(
-    booking?.customer?.name || ""
-  )
-  const [startAt, setStartAt] = useState(toDatetimeLocal(defaultStart))
-  const [endAt, setEndAt] = useState(toDatetimeLocal(defaultEnd))
-  const [staffMemberId, setStaffMemberId] = useState(booking?.staff_member_id || "")
-  const [status, setStatus] = useState(booking?.status || "confirmed")
-  const [notes, setNotes] = useState(booking?.notes || "")
-  const [saving, setSaving] = useState(false)
-  const [deleting, setDeleting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState(false)
+    booking?.customer?.name || "",
+  );
+  const [startAt, setStartAt] = useState(toDatetimeLocal(defaultStart));
+  const [endAt, setEndAt] = useState(toDatetimeLocal(defaultEnd));
+  const [staffMemberId, setStaffMemberId] = useState(
+    booking?.staff_member_id || "",
+  );
+  const [status, setStatus] = useState(booking?.status || "confirmed");
+  const [notes, setNotes] = useState(booking?.notes || "");
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   async function handleSave() {
-    setSaving(true)
-    setError(null)
+    setSaving(true);
+    setError(null);
     try {
       const payload = {
         business_id: businessId,
@@ -100,37 +107,38 @@ export function BookingModal({
         staff_member_id: staffMemberId || null,
         customer_whatsapp_id: customerWhatsappId || undefined,
         customer_name: customerName || undefined,
-      }
+      };
 
-      const result = mode === "create"
-        ? await createBooking(payload)
-        : await updateBooking(booking!.id, payload)
+      const result =
+        mode === "create"
+          ? await createBooking(payload)
+          : await updateBooking(booking!.id, payload);
 
-      if (!result.success) throw new Error(result.error)
-      onSaved(result.booking)
+      if (!result.success) throw new Error(result.error);
+      onSaved(result.booking);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Error desconocido")
+      setError(err instanceof Error ? err.message : "Error desconocido");
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
   }
 
   async function handleDelete() {
-    if (!booking) return
+    if (!booking) return;
     if (!confirmDelete) {
-      setConfirmDelete(true)
-      return
+      setConfirmDelete(true);
+      return;
     }
-    setDeleting(true)
-    setError(null)
+    setDeleting(true);
+    setError(null);
     try {
-      const result = await cancelBooking(booking.id)
-      if (!result.success) throw new Error(result.error)
-      onDeleted(booking.id)
+      const result = await cancelBooking(booking.id);
+      if (!result.success) throw new Error(result.error);
+      onDeleted(booking.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Error desconocido")
+      setError(err instanceof Error ? err.message : "Error desconocido");
     } finally {
-      setDeleting(false)
+      setDeleting(false);
     }
   }
 
@@ -169,7 +177,9 @@ export function BookingModal({
               <Label>Servicio</Label>
               <Select
                 value={serviceId || "__none__"}
-                onValueChange={(value) => setServiceId(value === "__none__" ? "" : value)}
+                onValueChange={(value) =>
+                  setServiceId(value === "__none__" ? "" : value)
+                }
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Selecciona un servicio" />
@@ -189,7 +199,9 @@ export function BookingModal({
                 <Label>Personal</Label>
                 <Select
                   value={staffMemberId || "__none__"}
-                  onValueChange={(v) => setStaffMemberId(v === "__none__" ? "" : v)}
+                  onValueChange={(v) =>
+                    setStaffMemberId(v === "__none__" ? "" : v)
+                  }
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Sin asignar" />
@@ -278,9 +290,7 @@ export function BookingModal({
             />
           </div>
 
-          {error && (
-            <p className="text-sm text-destructive">{error}</p>
-          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
 
         <DialogFooter className="flex items-center gap-2">
@@ -301,7 +311,11 @@ export function BookingModal({
             </Button>
           )}
 
-          <Button variant="outline" onClick={onClose} disabled={saving || deleting}>
+          <Button
+            variant="outline"
+            onClick={onClose}
+            disabled={saving || deleting}
+          >
             Cerrar
           </Button>
           <Button onClick={handleSave} disabled={saving || deleting}>
@@ -317,5 +331,5 @@ export function BookingModal({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
+  );
 }

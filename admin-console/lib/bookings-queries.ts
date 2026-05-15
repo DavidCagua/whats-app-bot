@@ -1,54 +1,54 @@
-import { Session } from "next-auth"
-import { prisma } from "./prisma"
-import { isSuperAdmin } from "./permissions"
+import { Session } from "next-auth";
+import { prisma } from "./prisma";
+import { isSuperAdmin } from "./permissions";
 
 export type Booking = {
-  id: string
-  business_id: string
-  customer_id: number | null
-  service_id: string | null
+  id: string;
+  business_id: string;
+  customer_id: number | null;
+  service_id: string | null;
   service: {
-    id: string
-    name: string
-    price: number
-    duration_minutes: number
-  } | null
-  start_at: Date
-  end_at: Date
-  status: string
-  notes: string | null
-  created_via: string | null
-  created_at: Date | null
-  staff_member_id: string | null
-  staff_member: { id: string; name: string; role: string } | null
-  customer: { name: string; whatsapp_id: string } | null
-  business: { name: string }
-}
+    id: string;
+    name: string;
+    price: number;
+    duration_minutes: number;
+  } | null;
+  start_at: Date;
+  end_at: Date;
+  status: string;
+  notes: string | null;
+  created_via: string | null;
+  created_at: Date | null;
+  staff_member_id: string | null;
+  staff_member: { id: string; name: string; role: string } | null;
+  customer: { name: string; whatsapp_id: string } | null;
+  business: { name: string };
+};
 
 export type BookingsAccess = {
-  businessIds: string[] | "all"
-  businesses: Array<{ id: string; name: string }>
-  canFilterByBusiness: boolean
-  canManageAvailability: boolean
-}
+  businessIds: string[] | "all";
+  businesses: Array<{ id: string; name: string }>;
+  canFilterByBusiness: boolean;
+  canManageAvailability: boolean;
+};
 
 export type AvailabilityRule = {
-  id: string
-  business_id: string
-  day_of_week: number
-  open_time: string
-  close_time: string
-  slot_duration_minutes: number
-  is_active: boolean | null
-  created_at: Date | null
-  updated_at: Date | null
-}
+  id: string;
+  business_id: string;
+  day_of_week: number;
+  open_time: string;
+  close_time: string;
+  slot_duration_minutes: number;
+  is_active: boolean | null;
+  created_at: Date | null;
+  updated_at: Date | null;
+};
 
 /**
  * Get bookings access permissions for the current user
  */
 export async function getBookingsAccess(
-  session: Session | null
+  session: Session | null,
 ): Promise<BookingsAccess> {
   if (!session?.user) {
     return {
@@ -56,7 +56,7 @@ export async function getBookingsAccess(
       businesses: [],
       canFilterByBusiness: false,
       canManageAvailability: false,
-    }
+    };
   }
 
   // Super admins see everything
@@ -65,19 +65,19 @@ export async function getBookingsAccess(
       where: { is_active: true },
       select: { id: true, name: true },
       orderBy: { name: "asc" },
-    })
+    });
 
     return {
       businessIds: "all",
       businesses,
       canFilterByBusiness: true,
       canManageAvailability: true,
-    }
+    };
   }
 
   // Get user's business associations
-  const userBusinesses = session.user.businesses || []
-  const businessIds = userBusinesses.map((b) => b.businessId)
+  const userBusinesses = session.user.businesses || [];
+  const businessIds = userBusinesses.map((b) => b.businessId);
 
   if (businessIds.length === 0) {
     return {
@@ -85,7 +85,7 @@ export async function getBookingsAccess(
       businesses: [],
       canFilterByBusiness: false,
       canManageAvailability: false,
-    }
+    };
   }
 
   const businesses = await prisma.businesses.findMany({
@@ -95,16 +95,16 @@ export async function getBookingsAccess(
     },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
-  })
+  });
 
-  const isAdmin = userBusinesses.some((b) => b.role === "admin")
+  const isAdmin = userBusinesses.some((b) => b.role === "admin");
 
   return {
     businessIds,
     businesses,
     canFilterByBusiness: businessIds.length > 1,
     canManageAvailability: isAdmin,
-  }
+  };
 }
 
 /**
@@ -118,35 +118,35 @@ export async function getBookings({
   status,
   limit = 200,
 }: {
-  businessIds: string[] | "all"
-  businessFilter?: string
-  dateFrom?: Date
-  dateTo?: Date
-  status?: string
-  limit?: number
+  businessIds: string[] | "all";
+  businessFilter?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+  status?: string;
+  limit?: number;
 }): Promise<Booking[]> {
   const whereClause: {
-    business_id?: string | { in: string[] }
-    start_at?: { gte?: Date; lte?: Date }
-    status?: string
-  } = {}
+    business_id?: string | { in: string[] };
+    start_at?: { gte?: Date; lte?: Date };
+    status?: string;
+  } = {};
 
   if (businessIds !== "all") {
-    whereClause.business_id = { in: businessIds }
+    whereClause.business_id = { in: businessIds };
   }
 
   if (businessFilter) {
-    whereClause.business_id = businessFilter
+    whereClause.business_id = businessFilter;
   }
 
   if (dateFrom || dateTo) {
-    whereClause.start_at = {}
-    if (dateFrom) whereClause.start_at.gte = dateFrom
-    if (dateTo) whereClause.start_at.lte = dateTo
+    whereClause.start_at = {};
+    if (dateFrom) whereClause.start_at.gte = dateFrom;
+    if (dateTo) whereClause.start_at.lte = dateTo;
   }
 
   if (status) {
-    whereClause.status = status
+    whereClause.status = status;
   }
 
   const bookings = await prisma.bookings.findMany({
@@ -167,7 +167,7 @@ export async function getBookings({
     },
     orderBy: { start_at: "asc" },
     take: limit,
-  })
+  });
 
   return bookings.map((b) => ({
     id: b.id,
@@ -190,20 +190,24 @@ export async function getBookings({
     created_at: b.created_at,
     staff_member_id: b.staff_member_id,
     staff_member: b.staff_members
-      ? { id: b.staff_members.id, name: b.staff_members.name, role: b.staff_members.role }
+      ? {
+          id: b.staff_members.id,
+          name: b.staff_members.name,
+          role: b.staff_members.role,
+        }
       : null,
     customer: b.customers
       ? { name: b.customers.name, whatsapp_id: b.customers.whatsapp_id }
       : null,
     business: { name: b.businesses.name },
-  }))
+  }));
 }
 
 /**
  * Get availability rules for a business
  */
 export async function getAvailabilityRules(
-  businessId: string
+  businessId: string,
 ): Promise<AvailabilityRule[]> {
   const rules = await prisma.$queryRaw<AvailabilityRule[]>`
     SELECT id::text, business_id::text, day_of_week,
@@ -213,6 +217,6 @@ export async function getAvailabilityRules(
     FROM business_availability
     WHERE business_id = ${businessId}::uuid
     ORDER BY day_of_week ASC
-  `
-  return rules
+  `;
+  return rules;
 }

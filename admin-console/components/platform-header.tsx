@@ -1,14 +1,14 @@
-import Image from "next/image"
-import Link from "next/link"
-import type { Session } from "next-auth"
-import { Building2, Users } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { logoutAction } from "@/lib/actions/logout"
-import { LogoutButtonClient } from "@/components/logout-button-client"
-import logo from "@/app/logo.png"
+import Image from "next/image";
+import Link from "next/link";
+import type { Session } from "next-auth";
+import { Building2, Users } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { logoutAction } from "@/lib/actions/logout";
+import { LogoutButtonClient } from "@/components/logout-button-client";
+import logo from "@/app/logo.png";
 
 export async function PlatformHeader({ session }: { session: Session }) {
-  const isSuperAdmin = session.user?.role === "super_admin"
+  const isSuperAdmin = session.user?.role === "super_admin";
 
   return (
     <header className="flex h-14 items-center justify-between border-b px-4 md:px-6">
@@ -43,8 +43,8 @@ export async function PlatformHeader({ session }: { session: Session }) {
           <p className="font-medium leading-none">{session.user?.name}</p>
           <p className="text-xs text-muted-foreground">{session.user?.email}</p>
         </div>
-       <LogoutButtonClient action={logoutAction} />
+        <LogoutButtonClient action={logoutAction} />
       </div>
     </header>
-  )
+  );
 }

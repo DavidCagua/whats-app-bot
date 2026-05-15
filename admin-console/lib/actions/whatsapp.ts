@@ -1,46 +1,54 @@
-"use server"
+"use server";
 
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { isSuperAdmin } from "@/lib/permissions"
-import { revalidatePath } from "next/cache"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { isSuperAdmin } from "@/lib/permissions";
+import { revalidatePath } from "next/cache";
 
 export type WhatsAppNumber = {
-  id: string
-  business_id: string
-  phone_number_id: string | null
-  phone_number: string
-  display_name: string | null
-  is_active: boolean
-  created_at: Date
-  updated_at: Date
-}
+  id: string;
+  business_id: string;
+  phone_number_id: string | null;
+  phone_number: string;
+  display_name: string | null;
+  is_active: boolean;
+  created_at: Date;
+  updated_at: Date;
+};
 
 /**
  * Get all WhatsApp numbers for a business
  * Only super admins can view WhatsApp numbers
  */
 export async function getWhatsAppNumbers(businessId: string) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized", numbers: [] }
+    return { success: false, error: "Unauthorized", numbers: [] };
   }
 
   if (!isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can view WhatsApp numbers", numbers: [] }
+    return {
+      success: false,
+      error: "Only super admins can view WhatsApp numbers",
+      numbers: [],
+    };
   }
 
   try {
     const numbers = await prisma.whatsapp_numbers.findMany({
       where: { business_id: businessId },
       orderBy: { created_at: "desc" },
-    })
+    });
 
-    return { success: true, numbers }
+    return { success: true, numbers };
   } catch (error) {
-    console.error("Error fetching WhatsApp numbers:", error)
-    return { success: false, error: "Failed to fetch WhatsApp numbers", numbers: [] }
+    console.error("Error fetching WhatsApp numbers:", error);
+    return {
+      success: false,
+      error: "Failed to fetch WhatsApp numbers",
+      numbers: [],
+    };
   }
 }
 
@@ -49,27 +57,31 @@ export async function getWhatsAppNumbers(businessId: string) {
  * Only super admins can add WhatsApp numbers
  */
 export async function addWhatsAppNumber(data: {
-  businessId: string
-  phoneNumberId?: string
-  phoneNumber: string
-  displayName?: string
+  businessId: string;
+  phoneNumberId?: string;
+  phoneNumber: string;
+  displayName?: string;
 }) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized" }
+    return { success: false, error: "Unauthorized" };
   }
 
   if (!isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can add WhatsApp numbers" }
+    return {
+      success: false,
+      error: "Only super admins can add WhatsApp numbers",
+    };
   }
 
   // Validate phone_number_id format if provided (should be numeric, 15-20 digits typically)
   if (data.phoneNumberId && !/^\d{10,25}$/.test(data.phoneNumberId)) {
     return {
       success: false,
-      error: "Invalid Phone Number ID format. Should be 10-25 digits (e.g., 123456789012345)",
-    }
+      error:
+        "Invalid Phone Number ID format. Should be 10-25 digits (e.g., 123456789012345)",
+    };
   }
 
   // Validate phone number format
@@ -77,12 +89,12 @@ export async function addWhatsAppNumber(data: {
     return {
       success: false,
       error: "Invalid phone number format. Should be in format +573001234567",
-    }
+    };
   }
 
   try {
     // Normalize empty string to null - multiple NULLs allowed (partial unique index), empty string would violate
-    const phoneNumberId = data.phoneNumberId?.trim() || null
+    const phoneNumberId = data.phoneNumberId?.trim() || null;
 
     // Check if phone_number_id already exists (if provided).
     // Use findFirst because phone_number_id has a PARTIAL unique index
@@ -93,13 +105,14 @@ export async function addWhatsAppNumber(data: {
     if (phoneNumberId) {
       const existing = await prisma.whatsapp_numbers.findFirst({
         where: { phone_number_id: phoneNumberId },
-      })
+      });
 
       if (existing) {
         return {
           success: false,
-          error: "This Phone Number ID is already registered to another business",
-        }
+          error:
+            "This Phone Number ID is already registered to another business",
+        };
       }
     }
 
@@ -109,13 +122,13 @@ export async function addWhatsAppNumber(data: {
         business_id: data.businessId,
         phone_number: data.phoneNumber,
       },
-    })
+    });
 
     if (existingPhone) {
       return {
         success: false,
         error: "This phone number is already registered for this business",
-      }
+      };
     }
 
     // Create the WhatsApp number
@@ -127,14 +140,14 @@ export async function addWhatsAppNumber(data: {
         display_name: data.displayName ?? null,
         is_active: true,
       },
-    })
+    });
 
-    revalidatePath(`/businesses/${data.businessId}/settings`)
+    revalidatePath(`/businesses/${data.businessId}/settings`);
 
-    return { success: true, number: whatsappNumber }
+    return { success: true, number: whatsappNumber };
   } catch (error) {
-    console.error("Error adding WhatsApp number:", error)
-    return { success: false, error: "Failed to add WhatsApp number" }
+    console.error("Error adding WhatsApp number:", error);
+    return { success: false, error: "Failed to add WhatsApp number" };
   }
 }
 
@@ -145,61 +158,65 @@ export async function addWhatsAppNumber(data: {
 export async function updateWhatsAppNumber(
   id: string,
   data: {
-    phoneNumber?: string
-    displayName?: string
-    isActive?: boolean
-  }
+    phoneNumber?: string;
+    displayName?: string;
+    isActive?: boolean;
+  },
 ) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized" }
+    return { success: false, error: "Unauthorized" };
   }
 
   if (!isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can update WhatsApp numbers" }
+    return {
+      success: false,
+      error: "Only super admins can update WhatsApp numbers",
+    };
   }
 
   try {
     const updateData: {
-      phone_number?: string
-      display_name?: string | null
-      is_active?: boolean
-      updated_at: Date
+      phone_number?: string;
+      display_name?: string | null;
+      is_active?: boolean;
+      updated_at: Date;
     } = {
       updated_at: new Date(),
-    }
+    };
 
     if (data.phoneNumber !== undefined) {
       // Validate phone number format
       if (!/^\+?\d{10,15}$/.test(data.phoneNumber.replace(/[\s-]/g, ""))) {
         return {
           success: false,
-          error: "Invalid phone number format. Should be in format +573001234567",
-        }
+          error:
+            "Invalid phone number format. Should be in format +573001234567",
+        };
       }
-      updateData.phone_number = data.phoneNumber
+      updateData.phone_number = data.phoneNumber;
     }
 
     if (data.displayName !== undefined) {
-      updateData.display_name = data.displayName || null
+      updateData.display_name = data.displayName || null;
     }
 
     if (data.isActive !== undefined) {
-      updateData.is_active = data.isActive
+      updateData.is_active = data.isActive;
     }
 
     const whatsappNumber = await prisma.whatsapp_numbers.update({
       where: { id },
       data: updateData,
-    })
+    });
 
-    revalidatePath(`/businesses/${whatsappNumber.business_id}/settings`)
+    revalidatePath(`/businesses/${whatsappNumber.business_id}/settings`);
 
-    return { success: true, number: whatsappNumber }
+    return { success: true, number: whatsappNumber };
   } catch (error) {
-    console.error("Error updating WhatsApp number:", error)
-    return { success: false, error: "Failed to update WhatsApp number" }
+    console.error("Error updating WhatsApp number:", error);
+    return { success: false, error: "Failed to update WhatsApp number" };
   }
 }
 
@@ -208,36 +225,39 @@ export async function updateWhatsAppNumber(
  * Only super admins can delete WhatsApp numbers
  */
 export async function deleteWhatsAppNumber(id: string) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized" }
+    return { success: false, error: "Unauthorized" };
   }
 
   if (!isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can delete WhatsApp numbers" }
+    return {
+      success: false,
+      error: "Only super admins can delete WhatsApp numbers",
+    };
   }
 
   try {
     const whatsappNumber = await prisma.whatsapp_numbers.findUnique({
       where: { id },
       select: { business_id: true },
-    })
+    });
 
     if (!whatsappNumber) {
-      return { success: false, error: "WhatsApp number not found" }
+      return { success: false, error: "WhatsApp number not found" };
     }
 
     await prisma.whatsapp_numbers.delete({
       where: { id },
-    })
+    });
 
-    revalidatePath(`/businesses/${whatsappNumber.business_id}/settings`)
+    revalidatePath(`/businesses/${whatsappNumber.business_id}/settings`);
 
-    return { success: true }
+    return { success: true };
   } catch (error) {
-    console.error("Error deleting WhatsApp number:", error)
-    return { success: false, error: "Failed to delete WhatsApp number" }
+    console.error("Error deleting WhatsApp number:", error);
+    return { success: false, error: "Failed to delete WhatsApp number" };
   }
 }
 
@@ -246,23 +266,26 @@ export async function deleteWhatsAppNumber(id: string) {
  * Only super admins can toggle WhatsApp number status
  */
 export async function toggleWhatsAppNumberStatus(id: string) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized" }
+    return { success: false, error: "Unauthorized" };
   }
 
   if (!isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can modify WhatsApp numbers" }
+    return {
+      success: false,
+      error: "Only super admins can modify WhatsApp numbers",
+    };
   }
 
   try {
     const whatsappNumber = await prisma.whatsapp_numbers.findUnique({
       where: { id },
-    })
+    });
 
     if (!whatsappNumber) {
-      return { success: false, error: "WhatsApp number not found" }
+      return { success: false, error: "WhatsApp number not found" };
     }
 
     const updated = await prisma.whatsapp_numbers.update({
@@ -271,13 +294,13 @@ export async function toggleWhatsAppNumberStatus(id: string) {
         is_active: !whatsappNumber.is_active,
         updated_at: new Date(),
       },
-    })
+    });
 
-    revalidatePath(`/businesses/${updated.business_id}/settings`)
+    revalidatePath(`/businesses/${updated.business_id}/settings`);
 
-    return { success: true, number: updated }
+    return { success: true, number: updated };
   } catch (error) {
-    console.error("Error toggling WhatsApp number status:", error)
-    return { success: false, error: "Failed to toggle status" }
+    console.error("Error toggling WhatsApp number status:", error);
+    return { success: false, error: "Failed to toggle status" };
   }
 }

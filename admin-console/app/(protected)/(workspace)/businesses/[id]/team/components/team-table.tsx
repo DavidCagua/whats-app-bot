@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useState } from "react"
+import { useState } from "react";
 import {
   Table,
   TableBody,
@@ -8,12 +8,12 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { X } from "lucide-react"
-import { toast } from "sonner"
-import { removeUserFromBusiness } from "@/lib/actions/users"
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { X } from "lucide-react";
+import { toast } from "sonner";
+import { removeUserFromBusiness } from "@/lib/actions/users";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,41 +24,43 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
-} from "@/components/ui/alert-dialog"
+} from "@/components/ui/alert-dialog";
 
 interface TeamMember {
-  id: string
-  email: string
-  full_name: string | null
-  role: string | null
-  is_active: boolean | null
-  created_at: Date | null
+  id: string;
+  email: string;
+  full_name: string | null;
+  role: string | null;
+  is_active: boolean | null;
+  created_at: Date | null;
 }
 
 interface TeamTableProps {
-  data: TeamMember[]
-  businessId: string
-  canEdit: boolean
+  data: TeamMember[];
+  businessId: string;
+  canEdit: boolean;
 }
 
 export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
-  const [removingId, setRemovingId] = useState<string | null>(null)
+  const [removingId, setRemovingId] = useState<string | null>(null);
 
   const handleRemove = async (userId: string) => {
-    setRemovingId(userId)
+    setRemovingId(userId);
     try {
-      const result = await removeUserFromBusiness(userId, businessId)
+      const result = await removeUserFromBusiness(userId, businessId);
       if (result.success) {
-        toast.success("Miembro del equipo eliminado")
+        toast.success("Miembro del equipo eliminado");
       } else {
-        toast.error(result.error || "No se pudo eliminar al miembro del equipo")
+        toast.error(
+          result.error || "No se pudo eliminar al miembro del equipo",
+        );
       }
     } catch {
-      toast.error("Ocurrió un error")
+      toast.error("Ocurrió un error");
     } finally {
-      setRemovingId(null)
+      setRemovingId(null);
     }
-  }
+  };
 
   return (
     <div className="rounded-md border">
@@ -75,7 +77,10 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
         <TableBody>
           {data.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={canEdit ? 5 : 4} className="text-center text-muted-foreground">
+              <TableCell
+                colSpan={canEdit ? 5 : 4}
+                className="text-center text-muted-foreground"
+              >
                 Aún no hay miembros en el equipo
               </TableCell>
             </TableRow>
@@ -87,13 +92,17 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
                 </TableCell>
                 <TableCell>{member.email}</TableCell>
                 <TableCell>
-                  <Badge variant={member.role === "admin" ? "default" : "secondary"}>
+                  <Badge
+                    variant={member.role === "admin" ? "default" : "secondary"}
+                  >
                     {member.role || "member"}
                   </Badge>
                 </TableCell>
                 <TableCell>
                   {member.is_active ? (
-                    <Badge variant="default" className="bg-green-500">Activo</Badge>
+                    <Badge variant="default" className="bg-green-500">
+                      Activo
+                    </Badge>
                   ) : (
                     <Badge variant="secondary">Inactivo</Badge>
                   )}
@@ -112,10 +121,13 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
                       </AlertDialogTrigger>
                       <AlertDialogContent>
                         <AlertDialogHeader>
-                          <AlertDialogTitle>¿Eliminar miembro del equipo?</AlertDialogTitle>
+                          <AlertDialogTitle>
+                            ¿Eliminar miembro del equipo?
+                          </AlertDialogTitle>
                           <AlertDialogDescription>
-                            Esto eliminará a <strong>{member.full_name || member.email}</strong> de este negocio.
-                            Ya no tendrá acceso a este negocio.
+                            Esto eliminará a{" "}
+                            <strong>{member.full_name || member.email}</strong>{" "}
+                            de este negocio. Ya no tendrá acceso a este negocio.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
@@ -137,5 +149,5 @@ export function TeamTable({ data, businessId, canEdit }: TeamTableProps) {
         </TableBody>
       </Table>
     </div>
-  )
+  );
 }

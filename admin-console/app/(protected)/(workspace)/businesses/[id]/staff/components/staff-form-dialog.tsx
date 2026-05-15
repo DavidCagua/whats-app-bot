@@ -1,39 +1,39 @@
-"use client"
+"use client";
 
-import { useState, useEffect } from "react"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import * as z from "zod"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import { useState, useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import * as z from "zod";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { Switch } from "@/components/ui/switch"
-import { toast } from "sonner"
-import { createStaffMember, updateStaffMember } from "@/lib/actions/staff"
-import { getBusinessUsers } from "@/lib/actions/users"
-import { StaffMember } from "@/types/staff"
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { toast } from "sonner";
+import { createStaffMember, updateStaffMember } from "@/lib/actions/staff";
+import { getBusinessUsers } from "@/lib/actions/users";
+import { StaffMember } from "@/types/staff";
 
 const staffFormSchema = z.object({
   name: z.string().min(1, "El nombre es requerido"),
   role: z.string().min(1, "El rol es requerido"),
   is_active: z.boolean(),
   user_id: z.string().optional().nullable(),
-})
+});
 
-type StaffFormData = z.infer<typeof staffFormSchema>
+type StaffFormData = z.infer<typeof staffFormSchema>;
 
 interface StaffFormDialogProps {
-  businessId: string
-  staff?: StaffMember
-  onClose: () => void
-  onSave: (staff: StaffMember) => void
+  businessId: string;
+  staff?: StaffMember;
+  onClose: () => void;
+  onSave: (staff: StaffMember) => void;
 }
 
 export function StaffFormDialog({
@@ -42,9 +42,11 @@ export function StaffFormDialog({
   onClose,
   onSave,
 }: StaffFormDialogProps) {
-  const [isLoading, setIsLoading] = useState(false)
-  const [users, setUsers] = useState<Array<{ id: string; email: string; name: string | null }>>([])
-  const [usersLoading, setUsersLoading] = useState(false)
+  const [isLoading, setIsLoading] = useState(false);
+  const [users, setUsers] = useState<
+    Array<{ id: string; email: string; name: string | null }>
+  >([]);
+  const [usersLoading, setUsersLoading] = useState(false);
 
   const form = useForm<StaffFormData>({
     resolver: zodResolver(staffFormSchema),
@@ -54,25 +56,25 @@ export function StaffFormDialog({
       is_active: staff?.is_active ?? true,
       user_id: staff?.user_id || null,
     },
-  })
+  });
 
   useEffect(() => {
     const loadUsers = async () => {
-      setUsersLoading(true)
+      setUsersLoading(true);
       try {
-        const result = await getBusinessUsers(businessId)
-        setUsers(result)
+        const result = await getBusinessUsers(businessId);
+        setUsers(result);
       } catch (error) {
-        console.error("Failed to load users:", error)
+        console.error("Failed to load users:", error);
       } finally {
-        setUsersLoading(false)
+        setUsersLoading(false);
       }
-    }
-    loadUsers()
-  }, [businessId])
+    };
+    loadUsers();
+  }, [businessId]);
 
   const onSubmit = async (data: StaffFormData) => {
-    setIsLoading(true)
+    setIsLoading(true);
     try {
       const result = staff
         ? await updateStaffMember(staff.id, {
@@ -82,20 +84,24 @@ export function StaffFormDialog({
         : await createStaffMember(businessId, {
             ...data,
             user_id: data.user_id || null,
-          })
+          });
 
       if (result.success && result.staff) {
-        toast.success(staff ? "Miembro del personal actualizado" : "Miembro del personal creado")
-        onSave(result.staff)
+        toast.success(
+          staff
+            ? "Miembro del personal actualizado"
+            : "Miembro del personal creado",
+        );
+        onSave(result.staff);
       } else {
-        toast.error(result.error || "No se pudo guardar")
+        toast.error(result.error || "No se pudo guardar");
       }
     } catch (error) {
-      toast.error("Ocurrió un error")
+      toast.error("Ocurrió un error");
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }
+  };
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
@@ -131,7 +137,9 @@ export function StaffFormDialog({
         <Label htmlFor="user">Vincular a usuario (Opcional)</Label>
         <Select
           value={form.watch("user_id") || "none"}
-          onValueChange={(value) => form.setValue("user_id", value === "none" ? null : value)}
+          onValueChange={(value) =>
+            form.setValue("user_id", value === "none" ? null : value)
+          }
         >
           <SelectTrigger id="user">
             <SelectValue placeholder="Sin usuario vinculado" />
@@ -173,5 +181,5 @@ export function StaffFormDialog({
         </Button>
       </div>
     </form>
-  )
+  );
 }

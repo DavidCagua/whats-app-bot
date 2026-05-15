@@ -1,65 +1,69 @@
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { canAccessBusiness, canEditBusiness, isSuperAdmin } from "@/lib/permissions"
-import { notFound, redirect } from "next/navigation"
-import { BusinessSettingsForm } from "./components/business-settings-form"
-import { DeleteBusinessButton } from "./components/delete-business-button"
-import { WhatsAppSettings } from "./components/whatsapp-settings"
-import { AgentsSettingsForm } from "./components/agents-settings-form"
-import { ModulesSettingsForm } from "./components/modules-settings-form"
-import { SettingsTabs, type SettingsTab } from "./components/settings-tabs"
-import { getBusinessSettings } from "@/lib/actions/business-settings"
-import { getBusinessAgents } from "@/lib/actions/business-agents"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import {
+  canAccessBusiness,
+  canEditBusiness,
+  isSuperAdmin,
+} from "@/lib/permissions";
+import { notFound, redirect } from "next/navigation";
+import { BusinessSettingsForm } from "./components/business-settings-form";
+import { DeleteBusinessButton } from "./components/delete-business-button";
+import { WhatsAppSettings } from "./components/whatsapp-settings";
+import { AgentsSettingsForm } from "./components/agents-settings-form";
+import { ModulesSettingsForm } from "./components/modules-settings-form";
+import { SettingsTabs, type SettingsTab } from "./components/settings-tabs";
+import { getBusinessSettings } from "@/lib/actions/business-settings";
+import { getBusinessAgents } from "@/lib/actions/business-agents";
 
 interface BusinessSettingsPageProps {
   params: Promise<{
-    id: string
-  }>
+    id: string;
+  }>;
   searchParams: Promise<{
-    tab?: string
-  }>
+    tab?: string;
+  }>;
 }
 
 export default async function BusinessSettingsPage({
   params,
   searchParams,
 }: BusinessSettingsPageProps) {
-  const { id } = await params
-  const { tab } = await searchParams
-  const session = await auth()
+  const { id } = await params;
+  const { tab } = await searchParams;
+  const session = await auth();
 
   if (!canAccessBusiness(session, id)) {
-    redirect("/businesses")
+    redirect("/businesses");
   }
 
   const business = await prisma.businesses.findUnique({
     where: { id },
-  })
+  });
 
   if (!business) {
-    notFound()
+    notFound();
   }
 
   const [settings, agents] = await Promise.all([
     getBusinessSettings(id),
     getBusinessAgents(id),
-  ])
+  ]);
 
   if (!settings) {
-    notFound()
+    notFound();
   }
 
-  const canEdit = canEditBusiness(session, id)
-  const canDelete = isSuperAdmin(session)
+  const canEdit = canEditBusiness(session, id);
+  const canDelete = isSuperAdmin(session);
 
-  const isAdmin = isSuperAdmin(session)
+  const isAdmin = isSuperAdmin(session);
   const validTabs: SettingsTab[] = isAdmin
     ? ["general", "integrations", "agents", "modules"]
-    : ["general", "integrations", "agents"]
+    : ["general", "integrations", "agents"];
   const defaultTab: SettingsTab =
     (tab as SettingsTab) && validTabs.includes(tab as SettingsTab)
       ? (tab as SettingsTab)
-      : "general"
+      : "general";
 
   return (
     <div className="space-y-6">
@@ -87,9 +91,7 @@ export default async function BusinessSettingsPage({
           />
         }
         integrationsContent={
-          <>
-            {isSuperAdmin(session) && <WhatsAppSettings businessId={id} />}
-          </>
+          <>{isSuperAdmin(session) && <WhatsAppSettings businessId={id} />}</>
         }
         agentsContent={
           <AgentsSettingsForm
@@ -108,5 +110,5 @@ export default async function BusinessSettingsPage({
         }
       />
     </div>
-  )
+  );
 }

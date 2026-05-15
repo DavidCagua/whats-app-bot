@@ -1,76 +1,76 @@
-import { NextRequest, NextResponse } from "next/server"
-import { auth } from "@/lib/auth"
-import { canAccessConversations } from "@/lib/conversations-permissions"
+import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@/lib/auth";
+import { canAccessConversations } from "@/lib/conversations-permissions";
 
 type Body = {
-  whatsappId?: string
-  businessId?: string
-  text?: string
+  whatsappId?: string;
+  businessId?: string;
+  text?: string;
   /** Public URL of audio (e.g. from upload-media). When set, sends voice message; optional caption. */
-  mediaUrl?: string
+  mediaUrl?: string;
   /** Caption for media (e.g. voice note). */
-  caption?: string
+  caption?: string;
   /** Meta phone_number_id (or twilio:...) for the channel; must match the number used for this conversation. */
-  phoneNumberId?: string | null
+  phoneNumberId?: string | null;
   /** E.164 phone number for the channel when phone_number_id is null in DB; used for send lookup. */
-  phoneNumber?: string | null
-}
+  phoneNumber?: string | null;
+};
 
 export async function POST(request: NextRequest) {
-  const session = await auth()
+  const session = await auth();
   if (!session?.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let body: Body
+  let body: Body;
   try {
-    body = await request.json()
+    body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const whatsappId = body.whatsappId
-  const businessId = body.businessId
-  const text = (body.text ?? "").trim()
-  const mediaUrl = (body.mediaUrl ?? "").trim()
-  const caption = (body.caption ?? "").trim()
-  const phoneNumberId = body.phoneNumberId
-  const phoneNumber = body.phoneNumber
+  const whatsappId = body.whatsappId;
+  const businessId = body.businessId;
+  const text = (body.text ?? "").trim();
+  const mediaUrl = (body.mediaUrl ?? "").trim();
+  const caption = (body.caption ?? "").trim();
+  const phoneNumberId = body.phoneNumberId;
+  const phoneNumber = body.phoneNumber;
 
   if (!whatsappId || !businessId) {
     return NextResponse.json(
       { error: "whatsappId and businessId are required" },
-      { status: 400 }
-    )
+      { status: 400 },
+    );
   }
   if (!text && !mediaUrl) {
     return NextResponse.json(
       { error: "Either text or mediaUrl is required" },
-      { status: 400 }
-    )
+      { status: 400 },
+    );
   }
 
   if (!canAccessConversations(session, businessId)) {
-    return NextResponse.json({ error: "Access denied" }, { status: 403 })
+    return NextResponse.json({ error: "Access denied" }, { status: 403 });
   }
 
-  const baseUrl = process.env.FLASK_API_BASE_URL
+  const baseUrl = process.env.FLASK_API_BASE_URL;
   if (!baseUrl) {
     return NextResponse.json(
       { error: "FLASK_API_BASE_URL is not configured" },
-      { status: 500 }
-    )
+      { status: 500 },
+    );
   }
 
-  const apiKey = process.env.ADMIN_API_KEY
+  const apiKey = process.env.ADMIN_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
       { error: "ADMIN_API_KEY is not configured" },
-      { status: 500 }
-    )
+      { status: 500 },
+    );
   }
 
-  const url = `${baseUrl.replace(/\/$/, "")}/admin/send-message`
+  const url = `${baseUrl.replace(/\/$/, "")}/admin/send-message`;
 
   try {
     const res = await fetch(url, {
@@ -88,12 +88,12 @@ export async function POST(request: NextRequest) {
         ...(phoneNumberId ? { phone_number_id: phoneNumberId } : {}),
         ...(phoneNumber ? { phone_number: phoneNumber } : {}),
       }),
-    })
+    });
 
-    const contentType = res.headers.get("content-type") || ""
+    const contentType = res.headers.get("content-type") || "";
     const payload = contentType.includes("application/json")
       ? await res.json()
-      : await res.text()
+      : await res.text();
 
     if (!res.ok) {
       return NextResponse.json(
@@ -101,17 +101,16 @@ export async function POST(request: NextRequest) {
           error: "Failed to send message",
           details: payload,
         },
-        { status: res.status }
-      )
+        { status: res.status },
+      );
     }
 
-    return NextResponse.json({ ok: true, result: payload })
+    return NextResponse.json({ ok: true, result: payload });
   } catch (err) {
-    console.error("Error calling Flask send-message endpoint:", err)
+    console.error("Error calling Flask send-message endpoint:", err);
     return NextResponse.json(
       { error: "Failed to reach messaging service" },
-      { status: 502 }
-    )
+      { status: 502 },
+    );
   }
 }
-

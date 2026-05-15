@@ -1,8 +1,8 @@
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { canAccessBusiness } from "@/lib/permissions"
-import { redirect } from "next/navigation"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { canAccessBusiness } from "@/lib/permissions";
+import { redirect } from "next/navigation";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   AlertTriangle,
   Ban,
@@ -18,82 +18,82 @@ import {
   Users,
   Wallet,
   type LucideIcon,
-} from "lucide-react"
-import { getDashboardKpis } from "@/lib/dashboard-kpis"
+} from "lucide-react";
+import { getDashboardKpis } from "@/lib/dashboard-kpis";
 import {
   detectKind,
   formatRangeLabel,
   parseRange,
-} from "@/lib/orders-date-range"
-import { DashboardRangePicker } from "./components/dashboard-range-picker"
+} from "@/lib/orders-date-range";
+import { DashboardRangePicker } from "./components/dashboard-range-picker";
 
 interface BusinessOverviewPageProps {
-  params: Promise<{ id: string }>
-  searchParams: Promise<{ from?: string; to?: string }>
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ from?: string; to?: string }>;
 }
 
 const COP_FMT = new Intl.NumberFormat("es-CO", {
   style: "currency",
   currency: "COP",
   maximumFractionDigits: 0,
-})
+});
 
 function formatCop(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "—"
-  return COP_FMT.format(Math.round(n))
+  if (n === null || n === undefined) return "—";
+  return COP_FMT.format(Math.round(n));
 }
 
 function formatPct(p: number | null | undefined): string {
-  if (p === null || p === undefined) return "—"
-  return `${p.toFixed(1)}%`
+  if (p === null || p === undefined) return "—";
+  return `${p.toFixed(1)}%`;
 }
 
 function formatMinutes(m: number | null | undefined): string {
-  if (m === null || m === undefined) return "—"
-  if (m < 1) return `${(m * 60).toFixed(0)} s`
-  return `${m.toFixed(1)} min`
+  if (m === null || m === undefined) return "—";
+  if (m < 1) return `${(m * 60).toFixed(0)} s`;
+  return `${m.toFixed(1)} min`;
 }
 
 function formatSeconds(s: number | null | undefined): string {
-  if (s === null || s === undefined) return "—"
-  if (s < 60) return `${s.toFixed(1)} s`
-  return `${(s / 60).toFixed(1)} min`
+  if (s === null || s === undefined) return "—";
+  if (s < 60) return `${s.toFixed(1)} s`;
+  return `${(s / 60).toFixed(1)} min`;
 }
 
 function formatNumber(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "—"
-  return n.toLocaleString("es-CO")
+  if (n === null || n === undefined) return "—";
+  return n.toLocaleString("es-CO");
 }
 
 type Kpi = {
-  title: string
-  value: string
-  description?: string
-  icon: LucideIcon
-}
+  title: string;
+  value: string;
+  description?: string;
+  icon: LucideIcon;
+};
 
 export default async function BusinessOverviewPage({
   params,
   searchParams,
 }: BusinessOverviewPageProps) {
-  const { id } = await params
-  const sp = await searchParams
-  const session = await auth()
+  const { id } = await params;
+  const sp = await searchParams;
+  const session = await auth();
 
   if (!canAccessBusiness(session, id)) {
-    redirect("/businesses")
+    redirect("/businesses");
   }
 
-  const range = parseRange({ from: sp.from, to: sp.to })
-  const rangeKind = detectKind(range)
-  const rangeLabel = formatRangeLabel(range, rangeKind)
+  const range = parseRange({ from: sp.from, to: sp.to });
+  const rangeKind = detectKind(range);
+  const rangeLabel = formatRangeLabel(range, rangeKind);
 
   const [business, kpis] = await Promise.all([
     prisma.businesses.findUniqueOrThrow({ where: { id } }),
     getDashboardKpis(id, range),
-  ])
+  ]);
 
-  const { summary, performance, catalog, constants } = kpis
+  const { summary, performance, catalog, constants } = kpis;
 
   const summaryKpis: Kpi[] = [
     {
@@ -122,7 +122,7 @@ export default async function BusinessOverviewPage({
       value: formatNumber(
         summary.cancelledByBusiness +
           summary.cancelledByCustomer +
-          summary.cancelledOther
+          summary.cancelledOther,
       ),
       description: `Negocio ${summary.cancelledByBusiness} · Cliente ${summary.cancelledByCustomer} · Otro ${summary.cancelledOther}`,
       icon: Ban,
@@ -145,7 +145,7 @@ export default async function BusinessOverviewPage({
       description: `${formatPct(summary.discountPctOfRevenue)} de la facturación en descuentos`,
       icon: Tag,
     },
-  ]
+  ];
 
   const perfKpis: Kpi[] = [
     {
@@ -184,14 +184,14 @@ export default async function BusinessOverviewPage({
       description: "Primer mensaje del cliente → pedido confirmado",
       icon: Percent,
     },
-  ]
+  ];
 
   const recurringKpi: Kpi = {
     title: "Clientes recurrentes",
     value: formatNumber(catalog.recurringCustomers),
     description: `Clientes con más de 1 pedido en el rango`,
     icon: Users,
-  }
+  };
 
   return (
     <div className="space-y-6">
@@ -273,20 +273,20 @@ export default async function BusinessOverviewPage({
 
       <p className="text-xs text-muted-foreground">
         Domicilio asumido en {formatCop(constants.deliveryFeeCop)} y demora a
-        partir de {constants.demoraThresholdMin} min. Algunos KPIs solo
-        muestran datos a partir de la fecha de despliegue, cuando se empezaron
-        a registrar los nuevos campos del pedido.
+        partir de {constants.demoraThresholdMin} min. Algunos KPIs solo muestran
+        datos a partir de la fecha de despliegue, cuando se empezaron a
+        registrar los nuevos campos del pedido.
       </p>
     </div>
-  )
+  );
 }
 
 function Section({
   title,
   children,
 }: {
-  title: string
-  children: React.ReactNode
+  title: string;
+  children: React.ReactNode;
 }) {
   return (
     <section className="space-y-3">
@@ -295,7 +295,7 @@ function Section({
       </h2>
       {children}
     </section>
-  )
+  );
 }
 
 function KpiGrid({ kpis }: { kpis: Kpi[] }) {
@@ -316,5 +316,5 @@ function KpiGrid({ kpis }: { kpis: Kpi[] }) {
         </Card>
       ))}
     </div>
-  )
+  );
 }

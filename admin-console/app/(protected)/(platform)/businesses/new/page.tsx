@@ -1,30 +1,42 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { useRouter } from "next/navigation"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import * as z from "zod"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ArrowLeft, Building2 } from "lucide-react"
-import { toast } from "sonner"
-import Link from "next/link"
-import { createBusiness } from "@/lib/actions/business"
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import * as z from "zod";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ArrowLeft, Building2 } from "lucide-react";
+import { toast } from "sonner";
+import Link from "next/link";
+import { createBusiness } from "@/lib/actions/business";
 
 const createBusinessSchema = z.object({
   name: z.string().min(1, "El nombre del negocio es requerido"),
   business_type: z.string().min(1, "El tipo de negocio es requerido"),
-})
+});
 
-type CreateBusinessFormData = z.infer<typeof createBusinessSchema>
+type CreateBusinessFormData = z.infer<typeof createBusinessSchema>;
 
 export default function NewBusinessPage() {
-  const router = useRouter()
-  const [isLoading, setIsLoading] = useState(false)
+  const router = useRouter();
+  const [isLoading, setIsLoading] = useState(false);
 
   const form = useForm<CreateBusinessFormData>({
     resolver: zodResolver(createBusinessSchema),
@@ -32,24 +44,24 @@ export default function NewBusinessPage() {
       name: "",
       business_type: "barberia",
     },
-  })
+  });
 
   const onSubmit = async (data: CreateBusinessFormData) => {
-    setIsLoading(true)
+    setIsLoading(true);
     try {
-      const result = await createBusiness(data)
+      const result = await createBusiness(data);
       if (result.success && result.businessId) {
-        toast.success("¡Negocio creado exitosamente!")
-        router.push(`/businesses/${result.businessId}/settings`)
+        toast.success("¡Negocio creado exitosamente!");
+        router.push(`/businesses/${result.businessId}/settings`);
       } else {
-        toast.error(result.error || "No se pudo crear el negocio")
+        toast.error(result.error || "No se pudo crear el negocio");
       }
     } catch {
-      toast.error("Ocurrió un error al crear el negocio")
+      toast.error("Ocurrió un error al crear el negocio");
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }
+  };
 
   return (
     <div className="space-y-6">
@@ -87,7 +99,9 @@ export default function NewBusinessPage() {
                 placeholder="Ingresa el nombre del negocio"
               />
               {form.formState.errors.name && (
-                <p className="text-sm text-red-500">{form.formState.errors.name.message}</p>
+                <p className="text-sm text-red-500">
+                  {form.formState.errors.name.message}
+                </p>
               )}
             </div>
 
@@ -110,7 +124,9 @@ export default function NewBusinessPage() {
                 </SelectContent>
               </Select>
               {form.formState.errors.business_type && (
-                <p className="text-sm text-red-500">{form.formState.errors.business_type.message}</p>
+                <p className="text-sm text-red-500">
+                  {form.formState.errors.business_type.message}
+                </p>
               )}
             </div>
 
@@ -126,5 +142,5 @@ export default function NewBusinessPage() {
         </CardContent>
       </Card>
     </div>
-  )
+  );
 }

@@ -1,49 +1,63 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { useRouter } from "next/navigation"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import * as z from "zod"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, UserPlus, Building2, Plus, X } from "lucide-react"
-import { toast } from "sonner"
-import Link from "next/link"
-import { createUser, assignUserToBusiness } from "@/lib/actions/users"
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import * as z from "zod";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { ArrowLeft, UserPlus, Building2, Plus, X } from "lucide-react";
+import { toast } from "sonner";
+import Link from "next/link";
+import { createUser, assignUserToBusiness } from "@/lib/actions/users";
 
 const createUserSchema = z.object({
   email: z.string().email("Correo electrónico inválido"),
   password: z.string().min(8, "La contraseña debe tener al menos 8 caracteres"),
   full_name: z.string().min(1, "El nombre completo es requerido"),
   role: z.string(),
-})
+});
 
-type CreateUserFormData = z.infer<typeof createUserSchema>
+type CreateUserFormData = z.infer<typeof createUserSchema>;
 
 interface BusinessAssignment {
-  businessId: string
-  businessName: string
-  role: string
+  businessId: string;
+  businessName: string;
+  role: string;
 }
 
 interface CreateUserFormProps {
   availableBusinesses: Array<{
-    id: string
-    name: string
-  }>
+    id: string;
+    name: string;
+  }>;
 }
 
 export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
-  const router = useRouter()
-  const [isLoading, setIsLoading] = useState(false)
-  const [businessAssignments, setBusinessAssignments] = useState<BusinessAssignment[]>([])
-  const [selectedBusiness, setSelectedBusiness] = useState("")
-  const [selectedBusinessRole, setSelectedBusinessRole] = useState("member")
+  const router = useRouter();
+  const [isLoading, setIsLoading] = useState(false);
+  const [businessAssignments, setBusinessAssignments] = useState<
+    BusinessAssignment[]
+  >([]);
+  const [selectedBusiness, setSelectedBusiness] = useState("");
+  const [selectedBusinessRole, setSelectedBusinessRole] = useState("member");
 
   const form = useForm<CreateUserFormData>({
     resolver: zodResolver(createUserSchema),
@@ -53,21 +67,21 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
       full_name: "",
       role: "business_user",
     },
-  })
+  });
 
-  const watchRole = form.watch("role")
-  const isBusinessUser = watchRole !== "super_admin"
+  const watchRole = form.watch("role");
+  const isBusinessUser = watchRole !== "super_admin";
 
   // Filter out already assigned businesses
   const unassignedBusinesses = availableBusinesses.filter(
-    (b) => !businessAssignments.some((ba) => ba.businessId === b.id)
-  )
+    (b) => !businessAssignments.some((ba) => ba.businessId === b.id),
+  );
 
   const addBusinessAssignment = () => {
-    if (!selectedBusiness) return
+    if (!selectedBusiness) return;
 
-    const business = availableBusinesses.find((b) => b.id === selectedBusiness)
-    if (!business) return
+    const business = availableBusinesses.find((b) => b.id === selectedBusiness);
+    if (!business) return;
 
     setBusinessAssignments([
       ...businessAssignments,
@@ -76,50 +90,58 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
         businessName: business.name,
         role: selectedBusinessRole,
       },
-    ])
-    setSelectedBusiness("")
-    setSelectedBusinessRole("member")
-  }
+    ]);
+    setSelectedBusiness("");
+    setSelectedBusinessRole("member");
+  };
 
   const removeBusinessAssignment = (businessId: string) => {
-    setBusinessAssignments(businessAssignments.filter((ba) => ba.businessId !== businessId))
-  }
+    setBusinessAssignments(
+      businessAssignments.filter((ba) => ba.businessId !== businessId),
+    );
+  };
 
   const onSubmit = async (data: CreateUserFormData) => {
     // Validate business assignments for business users
     if (isBusinessUser && businessAssignments.length === 0) {
-      toast.error("Los usuarios de negocio deben estar asignados a al menos un negocio")
-      return
+      toast.error(
+        "Los usuarios de negocio deben estar asignados a al menos un negocio",
+      );
+      return;
     }
 
-    setIsLoading(true)
+    setIsLoading(true);
     try {
       const result = await createUser({
         email: data.email,
         password: data.password,
         full_name: data.full_name,
         role: data.role === "super_admin" ? "super_admin" : null,
-      })
+      });
 
       if (result.success && result.userId) {
         // Assign businesses for non-super-admin users
         if (isBusinessUser && businessAssignments.length > 0) {
           for (const assignment of businessAssignments) {
-            await assignUserToBusiness(result.userId, assignment.businessId, assignment.role)
+            await assignUserToBusiness(
+              result.userId,
+              assignment.businessId,
+              assignment.role,
+            );
           }
         }
 
-        toast.success("¡Usuario creado exitosamente!")
-        router.push("/users")
+        toast.success("¡Usuario creado exitosamente!");
+        router.push("/users");
       } else {
-        toast.error(result.error || "No se pudo crear el usuario")
+        toast.error(result.error || "No se pudo crear el usuario");
       }
     } catch {
-      toast.error("Ocurrió un error al crear el usuario")
+      toast.error("Ocurrió un error al crear el usuario");
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }
+  };
 
   return (
     <div className="space-y-6">
@@ -131,7 +153,9 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
         </Button>
         <div>
           <h1 className="text-3xl font-bold">Crear usuario</h1>
-          <p className="text-muted-foreground">Agrega un nuevo usuario al sistema</p>
+          <p className="text-muted-foreground">
+            Agrega un nuevo usuario al sistema
+          </p>
         </div>
       </div>
 
@@ -144,7 +168,9 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                 <UserPlus className="h-5 w-5" />
                 Datos del usuario
               </CardTitle>
-              <CardDescription>Ingresa la información del nuevo usuario</CardDescription>
+              <CardDescription>
+                Ingresa la información del nuevo usuario
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
@@ -155,7 +181,9 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                   placeholder="Ingresa el nombre completo"
                 />
                 {form.formState.errors.full_name && (
-                  <p className="text-sm text-red-500">{form.formState.errors.full_name.message}</p>
+                  <p className="text-sm text-red-500">
+                    {form.formState.errors.full_name.message}
+                  </p>
                 )}
               </div>
 
@@ -168,7 +196,9 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                   placeholder="usuario@ejemplo.com"
                 />
                 {form.formState.errors.email && (
-                  <p className="text-sm text-red-500">{form.formState.errors.email.message}</p>
+                  <p className="text-sm text-red-500">
+                    {form.formState.errors.email.message}
+                  </p>
                 )}
               </div>
 
@@ -181,7 +211,9 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                   placeholder="Mínimo 8 caracteres"
                 />
                 {form.formState.errors.password && (
-                  <p className="text-sm text-red-500">{form.formState.errors.password.message}</p>
+                  <p className="text-sm text-red-500">
+                    {form.formState.errors.password.message}
+                  </p>
                 )}
               </div>
 
@@ -190,10 +222,10 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                 <Select
                   value={form.watch("role")}
                   onValueChange={(value) => {
-                    form.setValue("role", value)
+                    form.setValue("role", value);
                     // Clear business assignments when switching to super admin
                     if (value === "super_admin") {
-                      setBusinessAssignments([])
+                      setBusinessAssignments([]);
                     }
                   }}
                 >
@@ -201,8 +233,12 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                     <SelectValue placeholder="Selecciona el rol" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="business_user">Usuario de negocio</SelectItem>
-                    <SelectItem value="super_admin">Súper Admin (Equipo OmnIA)</SelectItem>
+                    <SelectItem value="business_user">
+                      Usuario de negocio
+                    </SelectItem>
+                    <SelectItem value="super_admin">
+                      Súper Admin (Equipo OmnIA)
+                    </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-sm text-muted-foreground">
@@ -240,8 +276,16 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                         className="flex items-center justify-between rounded-lg border p-3"
                       >
                         <div className="flex items-center gap-3">
-                          <span className="font-medium">{assignment.businessName}</span>
-                          <Badge variant={assignment.role === "admin" ? "default" : "secondary"}>
+                          <span className="font-medium">
+                            {assignment.businessName}
+                          </span>
+                          <Badge
+                            variant={
+                              assignment.role === "admin"
+                                ? "default"
+                                : "secondary"
+                            }
+                          >
                             {assignment.role}
                           </Badge>
                         </div>
@@ -249,7 +293,9 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                           type="button"
                           variant="ghost"
                           size="icon"
-                          onClick={() => removeBusinessAssignment(assignment.businessId)}
+                          onClick={() =>
+                            removeBusinessAssignment(assignment.businessId)
+                          }
                         >
                           <X className="h-4 w-4" />
                         </Button>
@@ -263,7 +309,10 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                   <div className="border-t pt-4 space-y-3">
                     <p className="text-sm font-medium">Agregar negocio</p>
                     <div className="flex gap-2">
-                      <Select value={selectedBusiness} onValueChange={setSelectedBusiness}>
+                      <Select
+                        value={selectedBusiness}
+                        onValueChange={setSelectedBusiness}
+                      >
                         <SelectTrigger className="flex-1">
                           <SelectValue placeholder="Selecciona el negocio" />
                         </SelectTrigger>
@@ -276,7 +325,10 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
                         </SelectContent>
                       </Select>
 
-                      <Select value={selectedBusinessRole} onValueChange={setSelectedBusinessRole}>
+                      <Select
+                        value={selectedBusinessRole}
+                        onValueChange={setSelectedBusinessRole}
+                      >
                         <SelectTrigger className="w-32">
                           <SelectValue placeholder="Rol" />
                         </SelectTrigger>
@@ -312,5 +364,5 @@ export function CreateUserForm({ availableBusinesses }: CreateUserFormProps) {
         </div>
       </form>
     </div>
-  )
+  );
 }

@@ -1,25 +1,40 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Badge } from "@/components/ui/badge"
-import { Building2, Plus, X } from "lucide-react"
-import { toast } from "sonner"
-import { assignUserToBusiness, removeUserFromBusiness } from "@/lib/actions/users"
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { Building2, Plus, X } from "lucide-react";
+import { toast } from "sonner";
+import {
+  assignUserToBusiness,
+  removeUserFromBusiness,
+} from "@/lib/actions/users";
 
 interface UserBusinessAssignmentsProps {
-  userId: string
+  userId: string;
   userBusinesses: Array<{
-    id: string
-    name: string
-    role: string
-  }>
+    id: string;
+    name: string;
+    role: string;
+  }>;
   availableBusinesses: Array<{
-    id: string
-    name: string
-  }>
+    id: string;
+    name: string;
+  }>;
 }
 
 export function UserBusinessAssignments({
@@ -27,54 +42,58 @@ export function UserBusinessAssignments({
   userBusinesses,
   availableBusinesses,
 }: UserBusinessAssignmentsProps) {
-  const [isAdding, setIsAdding] = useState(false)
-  const [selectedBusiness, setSelectedBusiness] = useState("")
-  const [selectedRole, setSelectedRole] = useState("member")
-  const [removingId, setRemovingId] = useState<string | null>(null)
+  const [isAdding, setIsAdding] = useState(false);
+  const [selectedBusiness, setSelectedBusiness] = useState("");
+  const [selectedRole, setSelectedRole] = useState("member");
+  const [removingId, setRemovingId] = useState<string | null>(null);
 
   // Filter out businesses already assigned
   const unassignedBusinesses = availableBusinesses.filter(
-    (b) => !userBusinesses.some((ub) => ub.id === b.id)
-  )
+    (b) => !userBusinesses.some((ub) => ub.id === b.id),
+  );
 
   const handleAdd = async () => {
     if (!selectedBusiness) {
-      toast.error("Por favor selecciona un negocio")
-      return
+      toast.error("Por favor selecciona un negocio");
+      return;
     }
 
-    setIsAdding(true)
+    setIsAdding(true);
     try {
-      const result = await assignUserToBusiness(userId, selectedBusiness, selectedRole)
+      const result = await assignUserToBusiness(
+        userId,
+        selectedBusiness,
+        selectedRole,
+      );
       if (result.success) {
-        toast.success("Negocio asignado exitosamente")
-        setSelectedBusiness("")
-        setSelectedRole("member")
+        toast.success("Negocio asignado exitosamente");
+        setSelectedBusiness("");
+        setSelectedRole("member");
       } else {
-        toast.error(result.error || "No se pudo asignar el negocio")
+        toast.error(result.error || "No se pudo asignar el negocio");
       }
     } catch {
-      toast.error("Ocurrió un error")
+      toast.error("Ocurrió un error");
     } finally {
-      setIsAdding(false)
+      setIsAdding(false);
     }
-  }
+  };
 
   const handleRemove = async (businessId: string) => {
-    setRemovingId(businessId)
+    setRemovingId(businessId);
     try {
-      const result = await removeUserFromBusiness(userId, businessId)
+      const result = await removeUserFromBusiness(userId, businessId);
       if (result.success) {
-        toast.success("Asignación de negocio eliminada")
+        toast.success("Asignación de negocio eliminada");
       } else {
-        toast.error(result.error || "No se pudo eliminar la asignación")
+        toast.error(result.error || "No se pudo eliminar la asignación");
       }
     } catch {
-      toast.error("Ocurrió un error")
+      toast.error("Ocurrió un error");
     } finally {
-      setRemovingId(null)
+      setRemovingId(null);
     }
-  }
+  };
 
   return (
     <Card>
@@ -102,7 +121,11 @@ export function UserBusinessAssignments({
               >
                 <div className="flex items-center gap-3">
                   <span className="font-medium">{business.name}</span>
-                  <Badge variant={business.role === "admin" ? "default" : "secondary"}>
+                  <Badge
+                    variant={
+                      business.role === "admin" ? "default" : "secondary"
+                    }
+                  >
                     {business.role}
                   </Badge>
                 </div>
@@ -124,7 +147,10 @@ export function UserBusinessAssignments({
           <div className="border-t pt-4 space-y-3">
             <p className="text-sm font-medium">Agregar asignación de negocio</p>
             <div className="flex gap-2">
-              <Select value={selectedBusiness} onValueChange={setSelectedBusiness}>
+              <Select
+                value={selectedBusiness}
+                onValueChange={setSelectedBusiness}
+              >
                 <SelectTrigger className="flex-1">
                   <SelectValue placeholder="Selecciona el negocio" />
                 </SelectTrigger>
@@ -147,7 +173,10 @@ export function UserBusinessAssignments({
                 </SelectContent>
               </Select>
 
-              <Button onClick={handleAdd} disabled={isAdding || !selectedBusiness}>
+              <Button
+                onClick={handleAdd}
+                disabled={isAdding || !selectedBusiness}
+              >
                 <Plus className="h-4 w-4" />
               </Button>
             </div>
@@ -155,5 +184,5 @@ export function UserBusinessAssignments({
         )}
       </CardContent>
     </Card>
-  )
+  );
 }

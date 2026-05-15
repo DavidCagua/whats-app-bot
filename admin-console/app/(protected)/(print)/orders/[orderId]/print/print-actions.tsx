@@ -1,11 +1,11 @@
-"use client"
+"use client";
 
-import { useEffect } from "react"
-import { Button } from "@/components/ui/button"
-import { Printer, X } from "lucide-react"
+import { useEffect } from "react";
+import { Button } from "@/components/ui/button";
+import { Printer, X } from "lucide-react";
 
-const PX_PER_MM = 3.7795 // 96dpi CSS px → mm
-const STYLE_ID = "dynamic-page-size"
+const PX_PER_MM = 3.7795; // 96dpi CSS px → mm
+const STYLE_ID = "dynamic-page-size";
 
 /**
  * Measures the receipt and injects a @page rule sized to its content.
@@ -14,22 +14,22 @@ const STYLE_ID = "dynamic-page-size"
  * still gets a tight page.
  */
 function setPageSizeToReceipt() {
-  const el = document.querySelector<HTMLElement>("[data-receipt]")
-  if (!el) return
-  const heightMm = Math.ceil(el.offsetHeight / PX_PER_MM) + 4 // small buffer for the cutter
-  const css = `@page { size: 80mm ${heightMm}mm; margin: 0; }`
-  let tag = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+  const el = document.querySelector<HTMLElement>("[data-receipt]");
+  if (!el) return;
+  const heightMm = Math.ceil(el.offsetHeight / PX_PER_MM) + 4; // small buffer for the cutter
+  const css = `@page { size: 80mm ${heightMm}mm; margin: 0; }`;
+  let tag = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
   if (!tag) {
-    tag = document.createElement("style")
-    tag.id = STYLE_ID
-    document.head.appendChild(tag)
+    tag = document.createElement("style");
+    tag.id = STYLE_ID;
+    document.head.appendChild(tag);
   }
-  tag.textContent = css
+  tag.textContent = css;
 }
 
 function printReceipt() {
-  setPageSizeToReceipt()
-  window.print()
+  setPageSizeToReceipt();
+  window.print();
 }
 
 export function PrintActions() {
@@ -38,8 +38,8 @@ export function PrintActions() {
   // Save/Print without an intermediate click. The on-screen buttons
   // below are a fallback for re-print without reloading.
   useEffect(() => {
-    printReceipt()
-  }, [])
+    printReceipt();
+  }, []);
 
   return (
     <>
@@ -63,5 +63,5 @@ export function PrintActions() {
         Cerrar
       </Button>
     </>
-  )
+  );
 }

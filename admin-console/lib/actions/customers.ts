@@ -1,66 +1,66 @@
-"use server"
+"use server";
 
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { canEditBusiness } from "@/lib/permissions"
-import { revalidatePath } from "next/cache"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { canEditBusiness } from "@/lib/permissions";
+import { revalidatePath } from "next/cache";
 
 type CreateCustomerInput = {
-  businessId: string
-  whatsappId: string
-  name: string
-  phone?: string | null
-  address?: string | null
-  paymentMethod?: string | null
-}
+  businessId: string;
+  whatsappId: string;
+  name: string;
+  phone?: string | null;
+  address?: string | null;
+  paymentMethod?: string | null;
+};
 
 type UpdateCustomerInput = {
-  businessId: string
-  customerId: number
+  businessId: string;
+  customerId: number;
   /** Optional. Renames the global customers.whatsapp_id (canonical identity). */
-  whatsappId?: string | null
-  name: string
-  phone?: string | null
-  address?: string | null
-  paymentMethod?: string | null
-  notes?: string | null
-}
+  whatsappId?: string | null;
+  name: string;
+  phone?: string | null;
+  address?: string | null;
+  paymentMethod?: string | null;
+  notes?: string | null;
+};
 
 type ActionResult =
   | { success: true; customerId: number }
-  | { success: false; error: string }
+  | { success: false; error: string };
 
-const WHATSAPP_ID_RE = /^[0-9+]{7,30}$/
+const WHATSAPP_ID_RE = /^[0-9+]{7,30}$/;
 
 export async function createCustomer(
-  input: CreateCustomerInput
+  input: CreateCustomerInput,
 ): Promise<ActionResult> {
-  const session = await auth()
-  if (!session?.user) return { success: false, error: "Unauthorized" }
+  const session = await auth();
+  if (!session?.user) return { success: false, error: "Unauthorized" };
   if (!canEditBusiness(session, input.businessId)) {
-    return { success: false, error: "Forbidden" }
+    return { success: false, error: "Forbidden" };
   }
 
-  const whatsappId = input.whatsappId.trim()
-  const name = input.name.trim()
-  const phone = input.phone?.trim() || null
-  const address = input.address?.trim() || null
-  const paymentMethod = input.paymentMethod?.trim() || null
+  const whatsappId = input.whatsappId.trim();
+  const name = input.name.trim();
+  const phone = input.phone?.trim() || null;
+  const address = input.address?.trim() || null;
+  const paymentMethod = input.paymentMethod?.trim() || null;
 
-  if (!whatsappId) return { success: false, error: "WhatsApp ID requerido" }
+  if (!whatsappId) return { success: false, error: "WhatsApp ID requerido" };
   if (!WHATSAPP_ID_RE.test(whatsappId)) {
     return {
       success: false,
       error: "WhatsApp ID inválido — usa solo dígitos (con + opcional)",
-    }
+    };
   }
-  if (!name) return { success: false, error: "Nombre requerido" }
+  if (!name) return { success: false, error: "Nombre requerido" };
 
   const business = await prisma.businesses.findUnique({
     where: { id: input.businessId },
     select: { id: true },
-  })
-  if (!business) return { success: false, error: "Negocio no encontrado" }
+  });
+  if (!business) return { success: false, error: "Negocio no encontrado" };
 
   // Two writes: upsert the global customer (canonical identity by
   // whatsapp_id) then upsert the per-business join row. Done in a
@@ -77,7 +77,7 @@ export async function createCustomer(
         payment_method: paymentMethod,
       },
       update: {},
-    })
+    });
 
     await tx.business_customers.upsert({
       where: {
@@ -102,66 +102,63 @@ export async function createCustomer(
         payment_method: paymentMethod,
         updated_at: new Date(),
       },
-    })
+    });
 
-    return c
-  })
+    return c;
+  });
 
-  revalidatePath(`/businesses/${input.businessId}/customers`)
-  return { success: true, customerId: customer.id }
+  revalidatePath(`/businesses/${input.businessId}/customers`);
+  return { success: true, customerId: customer.id };
 }
 
 export async function updateCustomer(
-  input: UpdateCustomerInput
+  input: UpdateCustomerInput,
 ): Promise<ActionResult> {
-  const session = await auth()
-  if (!session?.user) return { success: false, error: "Unauthorized" }
+  const session = await auth();
+  if (!session?.user) return { success: false, error: "Unauthorized" };
   if (!canEditBusiness(session, input.businessId)) {
-    return { success: false, error: "Forbidden" }
+    return { success: false, error: "Forbidden" };
   }
 
-  const name = input.name.trim()
-  if (!name) return { success: false, error: "Nombre requerido" }
+  const name = input.name.trim();
+  if (!name) return { success: false, error: "Nombre requerido" };
 
-  const phone = input.phone?.trim() || null
-  const address = input.address?.trim() || null
-  const paymentMethod = input.paymentMethod?.trim() || null
-  const notes = input.notes?.trim() || null
+  const phone = input.phone?.trim() || null;
+  const address = input.address?.trim() || null;
+  const paymentMethod = input.paymentMethod?.trim() || null;
+  const notes = input.notes?.trim() || null;
 
   // The global customers row owns whatsapp_id (UNIQUE). The per-business
   // business_customers join row owns the override fields. We may need
   // to touch both, so do it in a transaction.
-  const newWhatsappId = input.whatsappId?.trim()
+  const newWhatsappId = input.whatsappId?.trim();
   if (newWhatsappId !== undefined && newWhatsappId !== "") {
     if (!WHATSAPP_ID_RE.test(newWhatsappId)) {
       return {
         success: false,
         error: "WhatsApp ID inválido — usa solo dígitos (con + opcional)",
-      }
+      };
     }
   }
 
   const existing = await prisma.customers.findUnique({
     where: { id: input.customerId },
     select: { id: true, whatsapp_id: true },
-  })
-  if (!existing) return { success: false, error: "Cliente no encontrado" }
+  });
+  if (!existing) return { success: false, error: "Cliente no encontrado" };
 
   // Pre-check the uniqueness collision so we can return a friendly message
   // instead of letting Postgres throw a P2002 from the unique index.
-  if (
-    newWhatsappId &&
-    newWhatsappId !== existing.whatsapp_id
-  ) {
+  if (newWhatsappId && newWhatsappId !== existing.whatsapp_id) {
     const collision = await prisma.customers.findUnique({
       where: { whatsapp_id: newWhatsappId },
       select: { id: true },
-    })
+    });
     if (collision && collision.id !== existing.id) {
       return {
         success: false,
         error: "Ya existe otro cliente con ese WhatsApp",
-      }
+      };
     }
   }
 
@@ -171,7 +168,7 @@ export async function updateCustomer(
         await tx.customers.update({
           where: { id: existing.id },
           data: { whatsapp_id: newWhatsappId, updated_at: new Date() },
-        })
+        });
       }
 
       await tx.business_customers.update({
@@ -189,12 +186,12 @@ export async function updateCustomer(
           notes,
           updated_at: new Date(),
         },
-      })
-    })
+      });
+    });
   } catch {
-    return { success: false, error: "No se pudo actualizar el cliente" }
+    return { success: false, error: "No se pudo actualizar el cliente" };
   }
 
-  revalidatePath(`/businesses/${input.businessId}/customers`)
-  return { success: true, customerId: input.customerId }
+  revalidatePath(`/businesses/${input.businessId}/customers`);
+  return { success: true, customerId: input.customerId };
 }

@@ -1,8 +1,8 @@
-"use client"
+"use client";
 
-import { useRouter } from "next/navigation"
-import { DateRangePicker } from "@/components/date-range-picker"
-import type { DateRange } from "@/lib/orders-date-range"
+import { useRouter } from "next/navigation";
+import { DateRangePicker } from "@/components/date-range-picker";
+import type { DateRange } from "@/lib/orders-date-range";
 
 /**
  * Thin client wrapper around <DateRangePicker> for the dashboard page.
@@ -13,12 +13,12 @@ import type { DateRange } from "@/lib/orders-date-range"
  * which is how the KPIs re-query.
  */
 export function DashboardRangePicker({ range }: { range: DateRange }) {
-  const router = useRouter()
+  const router = useRouter();
 
   const handleChange = (next: DateRange) => {
-    const params = new URLSearchParams({ from: next.from, to: next.to })
-    router.replace(`?${params.toString()}`, { scroll: false })
-  }
+    const params = new URLSearchParams({ from: next.from, to: next.to });
+    router.replace(`?${params.toString()}`, { scroll: false });
+  };
 
-  return <DateRangePicker range={range} onChange={handleChange} />
+  return <DateRangePicker range={range} onChange={handleChange} />;
 }

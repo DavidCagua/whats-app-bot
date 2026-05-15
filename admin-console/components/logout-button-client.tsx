@@ -1,11 +1,11 @@
-"use client"
+"use client";
 
-import { Button } from "@/components/ui/button"
-import { Loader2, LogOut } from "lucide-react"
-import { useActionState } from "react"
+import { Button } from "@/components/ui/button";
+import { Loader2, LogOut } from "lucide-react";
+import { useActionState } from "react";
 
 export function LogoutButtonClient({ action }: any) {
-  const [state, formAction, pending] = useActionState(action, { error: null })
+  const [state, formAction, pending] = useActionState(action, { error: null });
 
   return (
     <form action={formAction} className="flex flex-col gap-1">
@@ -29,10 +29,8 @@ export function LogoutButtonClient({ action }: any) {
       </Button>
 
       {state?.error && (
-        <span className="text-xs text-red-500">
-          {state.error}
-        </span>
+        <span className="text-xs text-red-500">{state.error}</span>
       )}
     </form>
-  )
+  );
 }

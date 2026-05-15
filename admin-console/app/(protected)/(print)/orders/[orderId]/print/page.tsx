@@ -1,14 +1,14 @@
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { canAccessBusiness } from "@/lib/permissions"
-import { notFound, redirect } from "next/navigation"
-import { format } from "date-fns"
-import { PrintActions } from "./print-actions"
-import { formatDisplayNumber } from "@/lib/utils"
-import styles from "./print.module.css"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { canAccessBusiness } from "@/lib/permissions";
+import { notFound, redirect } from "next/navigation";
+import { format } from "date-fns";
+import { PrintActions } from "./print-actions";
+import { formatDisplayNumber } from "@/lib/utils";
+import styles from "./print.module.css";
 
 interface PrintOrderPageProps {
-  params: Promise<{ orderId: string }>
+  params: Promise<{ orderId: string }>;
 }
 
 const formatCOP = (n: number) =>
@@ -16,19 +16,19 @@ const formatCOP = (n: number) =>
     style: "currency",
     currency: "COP",
     minimumFractionDigits: 0,
-  }).format(n)
+  }).format(n);
 
 const capitalize = (value: string | null | undefined): string => {
-  if (!value) return ""
-  const trimmed = value.trim()
-  if (!trimmed) return ""
-  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
-}
+  if (!value) return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+};
 
 export default async function PrintOrderPage({ params }: PrintOrderPageProps) {
-  const { orderId } = await params
-  const session = await auth()
-  if (!session) redirect("/login")
+  const { orderId } = await params;
+  const session = await auth();
+  if (!session) redirect("/login");
 
   const order = await prisma.orders.findUnique({
     where: { id: orderId },
@@ -45,16 +45,15 @@ export default async function PrintOrderPage({ params }: PrintOrderPageProps) {
       customers: true,
       order_items: { include: { products: true } },
     },
-  })
+  });
 
-  if (!order) notFound()
+  if (!order) notFound();
   if (!canAccessBusiness(session, order.business_id)) {
-    redirect("/businesses")
+    redirect("/businesses");
   }
 
-  const business = order.businesses
-  const businessPhone =
-    business.whatsapp_numbers[0]?.phone_number ?? null
+  const business = order.businesses;
+  const businessPhone = business.whatsapp_numbers[0]?.phone_number ?? null;
 
   const items = order.order_items.map((oi) => ({
     id: oi.id,
@@ -62,18 +61,18 @@ export default async function PrintOrderPage({ params }: PrintOrderPageProps) {
     name: oi.products.name,
     notes: oi.notes,
     lineTotal: Number(oi.line_total.toString()),
-  }))
-  const subtotal = items.reduce((s, i) => s + i.lineTotal, 0)
+  }));
+  const subtotal = items.reduce((s, i) => s + i.lineTotal, 0);
 
-  const customerName = capitalize(order.customers?.name)
-  const customerWa = order.whatsapp_id ?? order.customers?.whatsapp_id ?? null
-  const customerPhone = order.contact_phone ?? order.customers?.phone ?? null
+  const customerName = capitalize(order.customers?.name);
+  const customerWa = order.whatsapp_id ?? order.customers?.whatsapp_id ?? null;
+  const customerPhone = order.contact_phone ?? order.customers?.phone ?? null;
   const deliveryAddress =
-    order.delivery_address ?? order.customers?.address ?? null
+    order.delivery_address ?? order.customers?.address ?? null;
 
   const created = order.created_at
     ? format(new Date(order.created_at), "dd/MM/yyyy HH:mm")
-    : ""
+    : "";
 
   return (
     <div className={styles.screen}>
@@ -204,5 +203,5 @@ export default async function PrintOrderPage({ params }: PrintOrderPageProps) {
         </div>
       </div>
     </div>
-  )
+  );
 }

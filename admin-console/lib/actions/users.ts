@@ -1,16 +1,16 @@
-"use server"
+"use server";
 
-import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
-import { isSuperAdmin, canEditBusiness } from "@/lib/permissions"
-import { revalidatePath } from "next/cache"
-import { hash } from "bcryptjs"
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { isSuperAdmin, canEditBusiness } from "@/lib/permissions";
+import { revalidatePath } from "next/cache";
+import { hash } from "bcryptjs";
 
 export async function getUsers() {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user || !isSuperAdmin(session)) {
-    return []
+    return [];
   }
 
   const users = await prisma.users.findMany({
@@ -22,7 +22,7 @@ export async function getUsers() {
       },
     },
     orderBy: { created_at: "desc" },
-  })
+  });
 
   return users.map((user) => ({
     id: user.id,
@@ -36,32 +36,32 @@ export async function getUsers() {
       name: ub.businesses.name,
       role: ub.role,
     })),
-  }))
+  }));
 }
 
 export async function createUser(data: {
-  email: string
-  password: string
-  full_name: string
-  role: string | null
+  email: string;
+  password: string;
+  full_name: string;
+  role: string | null;
 }) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user || !isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can create users" }
+    return { success: false, error: "Only super admins can create users" };
   }
 
   try {
     // Check if email already exists
     const existingUser = await prisma.users.findUnique({
       where: { email: data.email },
-    })
+    });
 
     if (existingUser) {
-      return { success: false, error: "A user with this email already exists" }
+      return { success: false, error: "A user with this email already exists" };
     }
 
-    const password_hash = await hash(data.password, 12)
+    const password_hash = await hash(data.password, 12);
 
     const user = await prisma.users.create({
       data: {
@@ -71,116 +71,120 @@ export async function createUser(data: {
         role: data.role || null,
         is_active: true,
       },
-    })
+    });
 
-    revalidatePath("/users")
+    revalidatePath("/users");
 
-    return { success: true, userId: user.id }
+    return { success: true, userId: user.id };
   } catch (error) {
-    console.error("Error creating user:", error)
-    return { success: false, error: "Failed to create user" }
+    console.error("Error creating user:", error);
+    return { success: false, error: "Failed to create user" };
   }
 }
 
 export async function updateUser(
   userId: string,
   data: {
-    email?: string
-    full_name?: string
-    role?: string | null
-    is_active?: boolean
-    password?: string
-  }
+    email?: string;
+    full_name?: string;
+    role?: string | null;
+    is_active?: boolean;
+    password?: string;
+  },
 ) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user || !isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can update users" }
+    return { success: false, error: "Only super admins can update users" };
   }
 
   try {
     const updateData: {
-      email?: string
-      full_name?: string
-      role?: string | null
-      is_active?: boolean
-      password_hash?: string
-      updated_at: Date
+      email?: string;
+      full_name?: string;
+      role?: string | null;
+      is_active?: boolean;
+      password_hash?: string;
+      updated_at: Date;
     } = {
       updated_at: new Date(),
-    }
+    };
 
-    if (data.email !== undefined) updateData.email = data.email
-    if (data.full_name !== undefined) updateData.full_name = data.full_name
-    if (data.role !== undefined) updateData.role = data.role
-    if (data.is_active !== undefined) updateData.is_active = data.is_active
+    if (data.email !== undefined) updateData.email = data.email;
+    if (data.full_name !== undefined) updateData.full_name = data.full_name;
+    if (data.role !== undefined) updateData.role = data.role;
+    if (data.is_active !== undefined) updateData.is_active = data.is_active;
     if (data.password) {
-      updateData.password_hash = await hash(data.password, 12)
+      updateData.password_hash = await hash(data.password, 12);
     }
 
     await prisma.users.update({
       where: { id: userId },
       data: updateData,
-    })
+    });
 
-    revalidatePath("/users")
-    revalidatePath(`/users/${userId}`)
+    revalidatePath("/users");
+    revalidatePath(`/users/${userId}`);
 
-    return { success: true }
+    return { success: true };
   } catch (error) {
-    console.error("Error updating user:", error)
-    return { success: false, error: "Failed to update user" }
+    console.error("Error updating user:", error);
+    return { success: false, error: "Failed to update user" };
   }
 }
 
 export async function deleteUser(userId: string) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user || !isSuperAdmin(session)) {
-    return { success: false, error: "Only super admins can delete users" }
+    return { success: false, error: "Only super admins can delete users" };
   }
 
   // Prevent deleting yourself
   if (session.user.id === userId) {
-    return { success: false, error: "You cannot delete your own account" }
+    return { success: false, error: "You cannot delete your own account" };
   }
 
   try {
     await prisma.users.delete({
       where: { id: userId },
-    })
+    });
 
-    revalidatePath("/users")
+    revalidatePath("/users");
 
-    return { success: true }
+    return { success: true };
   } catch (error) {
-    console.error("Error deleting user:", error)
-    return { success: false, error: "Failed to delete user" }
+    console.error("Error deleting user:", error);
+    return { success: false, error: "Failed to delete user" };
   }
 }
 
 export async function assignUserToBusiness(
   userId: string,
   businessId: string,
-  role: string
+  role: string,
 ) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized" }
+    return { success: false, error: "Unauthorized" };
   }
 
   // Super admins can assign anyone, business admins can only assign to their business
-  const canAssign = isSuperAdmin(session) || canEditBusiness(session, businessId)
+  const canAssign =
+    isSuperAdmin(session) || canEditBusiness(session, businessId);
 
   if (!canAssign) {
-    return { success: false, error: "You don't have permission to assign users to this business" }
+    return {
+      success: false,
+      error: "You don't have permission to assign users to this business",
+    };
   }
 
   // Business admins cannot assign super_admin role
   if (!isSuperAdmin(session) && role === "admin") {
     // Business admins can only assign member role
-    role = "member"
+    role = "member";
   }
 
   try {
@@ -190,14 +194,14 @@ export async function assignUserToBusiness(
         user_id: userId,
         business_id: businessId,
       },
-    })
+    });
 
     if (existing) {
       // Update existing assignment
       await prisma.user_businesses.update({
         where: { id: existing.id },
         data: { role },
-      })
+      });
     } else {
       // Create new assignment
       await prisma.user_businesses.create({
@@ -206,32 +210,39 @@ export async function assignUserToBusiness(
           business_id: businessId,
           role,
         },
-      })
+      });
     }
 
-    revalidatePath("/users")
-    revalidatePath(`/users/${userId}`)
-    revalidatePath(`/businesses/${businessId}/team`)
+    revalidatePath("/users");
+    revalidatePath(`/users/${userId}`);
+    revalidatePath(`/businesses/${businessId}/team`);
 
-    return { success: true }
+    return { success: true };
   } catch (error) {
-    console.error("Error assigning user to business:", error)
-    return { success: false, error: "Failed to assign user to business" }
+    console.error("Error assigning user to business:", error);
+    return { success: false, error: "Failed to assign user to business" };
   }
 }
 
-export async function removeUserFromBusiness(userId: string, businessId: string) {
-  const session = await auth()
+export async function removeUserFromBusiness(
+  userId: string,
+  businessId: string,
+) {
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized" }
+    return { success: false, error: "Unauthorized" };
   }
 
   // Super admins can remove anyone, business admins can only remove from their business
-  const canRemove = isSuperAdmin(session) || canEditBusiness(session, businessId)
+  const canRemove =
+    isSuperAdmin(session) || canEditBusiness(session, businessId);
 
   if (!canRemove) {
-    return { success: false, error: "You don't have permission to remove users from this business" }
+    return {
+      success: false,
+      error: "You don't have permission to remove users from this business",
+    };
   }
 
   try {
@@ -240,46 +251,50 @@ export async function removeUserFromBusiness(userId: string, businessId: string)
         user_id: userId,
         business_id: businessId,
       },
-    })
+    });
 
-    revalidatePath("/users")
-    revalidatePath(`/users/${userId}`)
-    revalidatePath(`/businesses/${businessId}/team`)
+    revalidatePath("/users");
+    revalidatePath(`/users/${userId}`);
+    revalidatePath(`/businesses/${businessId}/team`);
 
-    return { success: true }
+    return { success: true };
   } catch (error) {
-    console.error("Error removing user from business:", error)
-    return { success: false, error: "Failed to remove user from business" }
+    console.error("Error removing user from business:", error);
+    return { success: false, error: "Failed to remove user from business" };
   }
 }
 
 export async function inviteUserToBusiness(
   businessId: string,
   data: {
-    email: string
-    full_name: string
-    password: string
-    role: string
-  }
+    email: string;
+    full_name: string;
+    password: string;
+    role: string;
+  },
 ) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return { success: false, error: "Unauthorized" }
+    return { success: false, error: "Unauthorized" };
   }
 
   // Check if user can invite to this business
-  const canInvite = isSuperAdmin(session) || canEditBusiness(session, businessId)
+  const canInvite =
+    isSuperAdmin(session) || canEditBusiness(session, businessId);
 
   if (!canInvite) {
-    return { success: false, error: "You don't have permission to invite users to this business" }
+    return {
+      success: false,
+      error: "You don't have permission to invite users to this business",
+    };
   }
 
   try {
     // Check if user already exists
     let user = await prisma.users.findUnique({
       where: { email: data.email },
-    })
+    });
 
     if (user) {
       // User exists, just assign to business
@@ -288,10 +303,13 @@ export async function inviteUserToBusiness(
           user_id: user.id,
           business_id: businessId,
         },
-      })
+      });
 
       if (existing) {
-        return { success: false, error: "User is already assigned to this business" }
+        return {
+          success: false,
+          error: "User is already assigned to this business",
+        };
       }
 
       await prisma.user_businesses.create({
@@ -300,10 +318,10 @@ export async function inviteUserToBusiness(
           business_id: businessId,
           role: data.role,
         },
-      })
+      });
     } else {
       // Create new user and assign to business
-      const password_hash = await hash(data.password, 12)
+      const password_hash = await hash(data.password, 12);
 
       user = await prisma.users.create({
         data: {
@@ -313,7 +331,7 @@ export async function inviteUserToBusiness(
           role: null, // Not a super admin
           is_active: true,
         },
-      })
+      });
 
       await prisma.user_businesses.create({
         data: {
@@ -321,33 +339,33 @@ export async function inviteUserToBusiness(
           business_id: businessId,
           role: data.role,
         },
-      })
+      });
     }
 
-    revalidatePath(`/businesses/${businessId}/team`)
-    revalidatePath("/users")
+    revalidatePath(`/businesses/${businessId}/team`);
+    revalidatePath("/users");
 
-    return { success: true, userId: user.id }
+    return { success: true, userId: user.id };
   } catch (error) {
-    console.error("Error inviting user to business:", error)
-    return { success: false, error: "Failed to invite user" }
+    console.error("Error inviting user to business:", error);
+    return { success: false, error: "Failed to invite user" };
   }
 }
 
 export async function getBusinessUsers(businessId: string) {
-  const session = await auth()
+  const session = await auth();
 
   if (!session?.user) {
-    return []
+    return [];
   }
 
   // Check access
   const hasAccess =
     isSuperAdmin(session) ||
-    session.user.businesses?.some((b) => b.businessId === businessId)
+    session.user.businesses?.some((b) => b.businessId === businessId);
 
   if (!hasAccess) {
-    return []
+    return [];
   }
 
   try {
@@ -356,7 +374,7 @@ export async function getBusinessUsers(businessId: string) {
       include: {
         users: true,
       },
-    })
+    });
 
     return userBusinesses.map((ub) => ({
       id: ub.users.id,
@@ -366,9 +384,9 @@ export async function getBusinessUsers(businessId: string) {
       role: ub.role,
       is_active: ub.users.is_active,
       created_at: ub.created_at,
-    }))
+    }));
   } catch (error) {
-    console.error("Error getting business users:", error)
-    return []
+    console.error("Error getting business users:", error);
+    return [];
   }
 }

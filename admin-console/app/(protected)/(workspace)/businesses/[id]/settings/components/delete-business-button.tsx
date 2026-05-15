@@ -1,8 +1,8 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { useRouter } from "next/navigation"
-import { Button } from "@/components/ui/button"
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,38 +13,41 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
-} from "@/components/ui/alert-dialog"
-import { Trash2 } from "lucide-react"
-import { toast } from "sonner"
-import { deleteBusiness } from "@/lib/actions/business"
+} from "@/components/ui/alert-dialog";
+import { Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { deleteBusiness } from "@/lib/actions/business";
 
 interface DeleteBusinessButtonProps {
-  businessId: string
-  businessName: string
+  businessId: string;
+  businessName: string;
 }
 
-export function DeleteBusinessButton({ businessId, businessName }: DeleteBusinessButtonProps) {
-  const router = useRouter()
-  const [isDeleting, setIsDeleting] = useState(false)
-  const [open, setOpen] = useState(false)
+export function DeleteBusinessButton({
+  businessId,
+  businessName,
+}: DeleteBusinessButtonProps) {
+  const router = useRouter();
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [open, setOpen] = useState(false);
 
   const handleDelete = async () => {
-    setIsDeleting(true)
+    setIsDeleting(true);
     try {
-      const result = await deleteBusiness(businessId)
+      const result = await deleteBusiness(businessId);
       if (result.success) {
-        toast.success("Negocio eliminado exitosamente")
-        router.push("/businesses")
+        toast.success("Negocio eliminado exitosamente");
+        router.push("/businesses");
       } else {
-        toast.error(result.error || "No se pudo eliminar el negocio")
+        toast.error(result.error || "No se pudo eliminar el negocio");
       }
     } catch {
-      toast.error("Ocurrió un error al eliminar el negocio")
+      toast.error("Ocurrió un error al eliminar el negocio");
     } finally {
-      setIsDeleting(false)
-      setOpen(false)
+      setIsDeleting(false);
+      setOpen(false);
     }
-  }
+  };
 
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
@@ -58,13 +61,16 @@ export function DeleteBusinessButton({ businessId, businessName }: DeleteBusines
         <AlertDialogHeader>
           <AlertDialogTitle>¿Estás seguro?</AlertDialogTitle>
           <AlertDialogDescription>
-            Esto eliminará permanentemente <strong>{businessName}</strong> y todos los datos asociados, incluyendo:
+            Esto eliminará permanentemente <strong>{businessName}</strong> y
+            todos los datos asociados, incluyendo:
             <ul className="list-disc list-inside mt-2 space-y-1">
               <li>Configuraciones de números de WhatsApp</li>
               <li>Historial de conversaciones</li>
               <li>Asignaciones de usuarios</li>
             </ul>
-            <p className="mt-2 text-red-600 font-medium">Esta acción no se puede deshacer.</p>
+            <p className="mt-2 text-red-600 font-medium">
+              Esta acción no se puede deshacer.
+            </p>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -79,5 +85,5 @@ export function DeleteBusinessButton({ businessId, businessName }: DeleteBusines
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-  )
+  );
 }

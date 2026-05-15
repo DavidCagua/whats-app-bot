@@ -1,12 +1,18 @@
-"use client"
+"use client";
 
-import { useState, useEffect, useCallback } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Badge } from "@/components/ui/badge"
-import { Switch } from "@/components/ui/switch"
+import { useState, useEffect, useCallback } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,54 +22,54 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
-import { Phone, Plus, Trash2, ExternalLink } from "lucide-react"
-import { toast } from "sonner"
+} from "@/components/ui/alert-dialog";
+import { Phone, Plus, Trash2, ExternalLink } from "lucide-react";
+import { toast } from "sonner";
 import {
   getWhatsAppNumbers,
   addWhatsAppNumber,
   deleteWhatsAppNumber,
   toggleWhatsAppNumberStatus,
   type WhatsAppNumber,
-} from "@/lib/actions/whatsapp"
+} from "@/lib/actions/whatsapp";
 
 interface WhatsAppSettingsProps {
-  businessId: string
+  businessId: string;
 }
 
 export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
-  const [numbers, setNumbers] = useState<WhatsAppNumber[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [showAddForm, setShowAddForm] = useState(false)
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
-  const [numberToDelete, setNumberToDelete] = useState<string | null>(null)
+  const [numbers, setNumbers] = useState<WhatsAppNumber[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [numberToDelete, setNumberToDelete] = useState<string | null>(null);
 
   // Form state
   const [formData, setFormData] = useState({
     phoneNumberId: "",
     phoneNumber: "",
     displayName: "",
-  })
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const loadNumbers = useCallback(async () => {
-    setIsLoading(true)
-    const result = await getWhatsAppNumbers(businessId)
+    setIsLoading(true);
+    const result = await getWhatsAppNumbers(businessId);
     if (result.success) {
-      setNumbers(result.numbers as WhatsAppNumber[])
+      setNumbers(result.numbers as WhatsAppNumber[]);
     } else if (result.error) {
-      toast.error(result.error)
+      toast.error(result.error);
     }
-    setIsLoading(false)
-  }, [businessId])
+    setIsLoading(false);
+  }, [businessId]);
 
   useEffect(() => {
-    loadNumbers()
-  }, [loadNumbers])
+    loadNumbers();
+  }, [loadNumbers]);
 
   async function handleAddNumber(e: React.FormEvent) {
-    e.preventDefault()
-    setIsSubmitting(true)
+    e.preventDefault();
+    setIsSubmitting(true);
 
     try {
       const result = await addWhatsAppNumber({
@@ -71,56 +77,58 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
         phoneNumberId: formData.phoneNumberId.trim(),
         phoneNumber: formData.phoneNumber.trim(),
         displayName: formData.displayName.trim() || undefined,
-      })
+      });
 
       if (result.success) {
-        toast.success("¡Número de WhatsApp agregado exitosamente!")
-        setFormData({ phoneNumberId: "", phoneNumber: "", displayName: "" })
-        setShowAddForm(false)
-        await loadNumbers()
+        toast.success("¡Número de WhatsApp agregado exitosamente!");
+        setFormData({ phoneNumberId: "", phoneNumber: "", displayName: "" });
+        setShowAddForm(false);
+        await loadNumbers();
       } else {
-        toast.error(result.error || "No se pudo agregar el número de WhatsApp")
+        toast.error(result.error || "No se pudo agregar el número de WhatsApp");
       }
     } catch (error) {
-      toast.error("Ocurrió un error al agregar el número")
-      console.error(error)
+      toast.error("Ocurrió un error al agregar el número");
+      console.error(error);
     } finally {
-      setIsSubmitting(false)
+      setIsSubmitting(false);
     }
   }
 
   async function handleDeleteNumber() {
-    if (!numberToDelete) return
+    if (!numberToDelete) return;
 
     try {
-      const result = await deleteWhatsAppNumber(numberToDelete)
+      const result = await deleteWhatsAppNumber(numberToDelete);
       if (result.success) {
-        toast.success("¡Número de WhatsApp eliminado exitosamente!")
-        await loadNumbers()
+        toast.success("¡Número de WhatsApp eliminado exitosamente!");
+        await loadNumbers();
       } else {
-        toast.error(result.error || "No se pudo eliminar el número de WhatsApp")
+        toast.error(
+          result.error || "No se pudo eliminar el número de WhatsApp",
+        );
       }
     } catch (error) {
-      toast.error("Ocurrió un error al eliminar el número")
-      console.error(error)
+      toast.error("Ocurrió un error al eliminar el número");
+      console.error(error);
     } finally {
-      setDeleteDialogOpen(false)
-      setNumberToDelete(null)
+      setDeleteDialogOpen(false);
+      setNumberToDelete(null);
     }
   }
 
   async function handleToggleStatus(id: string) {
     try {
-      const result = await toggleWhatsAppNumberStatus(id)
+      const result = await toggleWhatsAppNumberStatus(id);
       if (result.success) {
-        toast.success("¡Estado actualizado exitosamente!")
-        await loadNumbers()
+        toast.success("¡Estado actualizado exitosamente!");
+        await loadNumbers();
       } else {
-        toast.error(result.error || "No se pudo actualizar el estado")
+        toast.error(result.error || "No se pudo actualizar el estado");
       }
     } catch (error) {
-      toast.error("Ocurrió un error al actualizar el estado")
-      console.error(error)
+      toast.error("Ocurrió un error al actualizar el estado");
+      console.error(error);
     }
   }
 
@@ -137,7 +145,7 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
           <p className="text-sm text-muted-foreground">Cargando...</p>
         </CardContent>
       </Card>
-    )
+    );
   }
 
   return (
@@ -159,10 +167,18 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
               Instrucciones para Super Admin:
             </p>
             <ol className="list-decimal pl-4 space-y-1 text-blue-800 dark:text-blue-200">
-              <li>El dueño del negocio proporciona su número de WhatsApp Business</li>
-              <li>Ingresa el número de teléfono abajo (con código de país, ej., +573001234567)</li>
               <li>
-                <strong>Opcional:</strong> Si usas la API de WhatsApp Business de Meta, también puedes agregar el ID del número desde el Administrador de Meta Business para un enrutamiento más confiable
+                El dueño del negocio proporciona su número de WhatsApp Business
+              </li>
+              <li>
+                Ingresa el número de teléfono abajo (con código de país, ej.,
+                +573001234567)
+              </li>
+              <li>
+                <strong>Opcional:</strong> Si usas la API de WhatsApp Business
+                de Meta, también puedes agregar el ID del número desde el
+                Administrador de Meta Business para un enrutamiento más
+                confiable
               </li>
             </ol>
             <a
@@ -211,7 +227,10 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="flex items-center gap-2">
-                      <Label htmlFor={`active-${number.id}`} className="text-sm">
+                      <Label
+                        htmlFor={`active-${number.id}`}
+                        className="text-sm"
+                      >
                         Activo
                       </Label>
                       <Switch
@@ -224,8 +243,8 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                       variant="ghost"
                       size="icon"
                       onClick={() => {
-                        setNumberToDelete(number.id)
-                        setDeleteDialogOpen(true)
+                        setNumberToDelete(number.id);
+                        setDeleteDialogOpen(true);
                       }}
                     >
                       <Trash2 className="h-4 w-4 text-destructive" />
@@ -238,7 +257,10 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
 
           {/* Add Number Form */}
           {showAddForm ? (
-            <form onSubmit={handleAddNumber} className="space-y-4 border p-4 rounded-lg">
+            <form
+              onSubmit={handleAddNumber}
+              className="space-y-4 border p-4 rounded-lg"
+            >
               <div className="space-y-2">
                 <Label htmlFor="phoneNumber">
                   Número de teléfono <span className="text-destructive">*</span>
@@ -247,7 +269,9 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                   id="phoneNumber"
                   placeholder="ej., +573001234567"
                   value={formData.phoneNumber}
-                  onChange={(e) => setFormData({ ...formData, phoneNumber: e.target.value })}
+                  onChange={(e) =>
+                    setFormData({ ...formData, phoneNumber: e.target.value })
+                  }
                   required
                 />
                 <p className="text-xs text-muted-foreground">
@@ -256,12 +280,16 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="displayName">Nombre de visualización (Opcional)</Label>
+                <Label htmlFor="displayName">
+                  Nombre de visualización (Opcional)
+                </Label>
                 <Input
                   id="displayName"
                   placeholder="ej., Línea principal"
                   value={formData.displayName}
-                  onChange={(e) => setFormData({ ...formData, displayName: e.target.value })}
+                  onChange={(e) =>
+                    setFormData({ ...formData, displayName: e.target.value })
+                  }
                 />
                 <p className="text-xs text-muted-foreground">
                   Un nombre amigable para identificar este número
@@ -281,7 +309,9 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                   }
                 />
                 <p className="text-xs text-muted-foreground">
-                  El ID único del Administrador de Meta Business (15-20 dígitos). Solo necesario si usas la API de WhatsApp Business de Meta.
+                  El ID único del Administrador de Meta Business (15-20
+                  dígitos). Solo necesario si usas la API de WhatsApp Business
+                  de Meta.
                 </p>
               </div>
 
@@ -293,8 +323,12 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
                   type="button"
                   variant="outline"
                   onClick={() => {
-                    setShowAddForm(false)
-                    setFormData({ phoneNumberId: "", phoneNumber: "", displayName: "" })
+                    setShowAddForm(false);
+                    setFormData({
+                      phoneNumberId: "",
+                      phoneNumber: "",
+                      displayName: "",
+                    });
                   }}
                 >
                   Cancelar
@@ -311,8 +345,13 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
           {numbers.length === 0 && !showAddForm && (
             <div className="text-center py-8 text-muted-foreground">
               <Phone className="h-12 w-12 mx-auto mb-2 opacity-50" />
-              <p className="text-sm">Aún no hay números de WhatsApp configurados</p>
-              <p className="text-xs mt-1">Agrega un número para habilitar el bot de WhatsApp en este negocio</p>
+              <p className="text-sm">
+                Aún no hay números de WhatsApp configurados
+              </p>
+              <p className="text-xs mt-1">
+                Agrega un número para habilitar el bot de WhatsApp en este
+                negocio
+              </p>
             </div>
           )}
         </CardContent>
@@ -324,20 +363,24 @@ export function WhatsAppSettings({ businessId }: WhatsAppSettingsProps) {
           <AlertDialogHeader>
             <AlertDialogTitle>¿Eliminar número de WhatsApp?</AlertDialogTitle>
             <AlertDialogDescription>
-              Esto eliminará el número de WhatsApp de este negocio. El bot dejará de
-              responder mensajes enviados a este número. Esta acción no se puede deshacer.
+              Esto eliminará el número de WhatsApp de este negocio. El bot
+              dejará de responder mensajes enviados a este número. Esta acción
+              no se puede deshacer.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => setNumberToDelete(null)}>
               Cancelar
             </AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteNumber} className="bg-destructive">
+            <AlertDialogAction
+              onClick={handleDeleteNumber}
+              className="bg-destructive"
+            >
               Eliminar
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </>
-  )
+  );
 }

@@ -1,43 +1,43 @@
-import { redirect } from "next/navigation"
-import { auth } from "@/lib/auth"
-import { canAccessBusiness } from "@/lib/permissions"
-import { redirectIfModuleDisabled } from "@/lib/modules"
-import { prisma } from "@/lib/prisma"
-import { StaffList } from "./components/staff-list"
-import { Button } from "@/components/ui/button"
-import { Plus } from "lucide-react"
-import { StaffForm } from "./components/staff-form"
+import { redirect } from "next/navigation";
+import { auth } from "@/lib/auth";
+import { canAccessBusiness } from "@/lib/permissions";
+import { redirectIfModuleDisabled } from "@/lib/modules";
+import { prisma } from "@/lib/prisma";
+import { StaffList } from "./components/staff-list";
+import { Button } from "@/components/ui/button";
+import { Plus } from "lucide-react";
+import { StaffForm } from "./components/staff-form";
 
 interface StaffPageProps {
   params: Promise<{
-    id: string
-  }>
+    id: string;
+  }>;
 }
 
 export const metadata = {
   title: "Personal",
-}
+};
 
 export default async function StaffPage({ params }: StaffPageProps) {
-  const { id } = await params
-  const session = await auth()
+  const { id } = await params;
+  const session = await auth();
 
   if (!session?.user) {
-    redirect("/login")
+    redirect("/login");
   }
 
   if (!canAccessBusiness(session, id)) {
-    redirect("/")
+    redirect("/");
   }
-  await redirectIfModuleDisabled(id, "staff")
+  await redirectIfModuleDisabled(id, "staff");
 
   // Verify business exists
   const business = await prisma.businesses.findUnique({
     where: { id },
-  })
+  });
 
   if (!business) {
-    redirect("/")
+    redirect("/");
   }
 
   // Get all staff members
@@ -53,10 +53,10 @@ export default async function StaffPage({ params }: StaffPageProps) {
       },
     },
     orderBy: { created_at: "desc" },
-  })
+  });
 
-  const activeStaff = staffMembers.filter((s) => s.is_active)
-  const inactiveStaff = staffMembers.filter((s) => !s.is_active)
+  const activeStaff = staffMembers.filter((s) => s.is_active);
+  const inactiveStaff = staffMembers.filter((s) => !s.is_active);
 
   return (
     <div className="space-y-6">
@@ -77,5 +77,5 @@ export default async function StaffPage({ params }: StaffPageProps) {
         inactiveCount={inactiveStaff.length}
       />
     </div>
-  )
+  );
 }

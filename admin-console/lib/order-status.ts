@@ -8,9 +8,9 @@ export const ORDER_STATUSES = [
   "ready_for_pickup",
   "completed",
   "cancelled",
-] as const
+] as const;
 
-export type OrderStatus = (typeof ORDER_STATUSES)[number]
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 const ALLOWED_NEXT: Record<OrderStatus, ReadonlySet<OrderStatus>> = {
   pending: new Set<OrderStatus>(["confirmed", "cancelled"]),
@@ -24,22 +24,24 @@ const ALLOWED_NEXT: Record<OrderStatus, ReadonlySet<OrderStatus>> = {
   ready_for_pickup: new Set<OrderStatus>(["completed", "cancelled"]),
   completed: new Set<OrderStatus>(),
   cancelled: new Set<OrderStatus>(),
-}
+};
 
 export function isValidStatus(s: string): s is OrderStatus {
-  return (ORDER_STATUSES as readonly string[]).includes(s)
+  return (ORDER_STATUSES as readonly string[]).includes(s);
 }
 
-export function allowedNext(from: OrderStatus | string | null | undefined): ReadonlySet<OrderStatus> {
-  if (!from || !isValidStatus(from)) return new Set()
-  return ALLOWED_NEXT[from]
+export function allowedNext(
+  from: OrderStatus | string | null | undefined,
+): ReadonlySet<OrderStatus> {
+  if (!from || !isValidStatus(from)) return new Set();
+  return ALLOWED_NEXT[from];
 }
 
 export function canTransition(
   from: OrderStatus | string | null | undefined,
-  to: OrderStatus
+  to: OrderStatus,
 ): boolean {
-  return allowedNext(from).has(to)
+  return allowedNext(from).has(to);
 }
 
 /**
@@ -52,17 +54,17 @@ export function canTransition(
  * the bot's safety net.
  */
 export function adminAllowedNext(
-  from: OrderStatus | string | null | undefined
+  from: OrderStatus | string | null | undefined,
 ): ReadonlySet<OrderStatus> {
-  if (!from || !isValidStatus(from)) return new Set(ORDER_STATUSES)
-  return new Set(ORDER_STATUSES.filter((s) => s !== from))
+  if (!from || !isValidStatus(from)) return new Set(ORDER_STATUSES);
+  return new Set(ORDER_STATUSES.filter((s) => s !== from));
 }
 
 export function adminCanTransition(
   from: OrderStatus | string | null | undefined,
-  to: OrderStatus
+  to: OrderStatus,
 ): boolean {
-  return adminAllowedNext(from).has(to)
+  return adminAllowedNext(from).has(to);
 }
 
 /**
@@ -76,15 +78,17 @@ export function filterStatusesByFulfillment<T extends Iterable<OrderStatus>>(
   statuses: T,
   fulfillmentType: string | null | undefined,
 ): OrderStatus[] {
-  const isPickup = (fulfillmentType ?? "").toLowerCase() === "pickup"
-  const excluded: OrderStatus = isPickup ? "out_for_delivery" : "ready_for_pickup"
-  return Array.from(statuses).filter((s) => s !== excluded)
+  const isPickup = (fulfillmentType ?? "").toLowerCase() === "pickup";
+  const excluded: OrderStatus = isPickup
+    ? "out_for_delivery"
+    : "ready_for_pickup";
+  return Array.from(statuses).filter((s) => s !== excluded);
 }
 
 // Returns the column on `orders` that should be set to NOW() when
 // entering this status. null = no dedicated timestamp.
 export function timestampFieldFor(
-  status: OrderStatus
+  status: OrderStatus,
 ):
   | "confirmed_at"
   | "ready_at"
@@ -94,17 +98,17 @@ export function timestampFieldFor(
   | null {
   switch (status) {
     case "confirmed":
-      return "confirmed_at"
+      return "confirmed_at";
     case "ready_for_pickup":
-      return "ready_at"
+      return "ready_at";
     case "out_for_delivery":
-      return "out_for_delivery_at"
+      return "out_for_delivery_at";
     case "completed":
-      return "completed_at"
+      return "completed_at";
     case "cancelled":
-      return "cancelled_at"
+      return "cancelled_at";
     default:
-      return null
+      return null;
   }
 }
 
@@ -115,4 +119,4 @@ export const STATUS_LABELS: Record<OrderStatus, string> = {
   ready_for_pickup: "Listo para recoger",
   completed: "Completado",
   cancelled: "Cancelado",
-}
+};

@@ -1,21 +1,27 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Pencil, Trash2, ToggleLeft, ToggleRight } from "lucide-react"
-import { toast } from "sonner"
-import { deleteStaffMember, toggleStaffActive } from "@/lib/actions/staff"
-import { StaffFormDialog } from "./staff-form-dialog"
-import { StaffMember } from "@/types/staff"
+import { useState } from "react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Pencil, Trash2, ToggleLeft, ToggleRight } from "lucide-react";
+import { toast } from "sonner";
+import { deleteStaffMember, toggleStaffActive } from "@/lib/actions/staff";
+import { StaffFormDialog } from "./staff-form-dialog";
+import { StaffMember } from "@/types/staff";
 
 interface StaffListProps {
-  businessId: string
-  staffMembers: StaffMember[]
-  activeCount: number
-  inactiveCount: number
+  businessId: string;
+  staffMembers: StaffMember[];
+  activeCount: number;
+  inactiveCount: number;
 }
 
 export function StaffList({
@@ -24,47 +30,47 @@ export function StaffList({
   activeCount,
   inactiveCount,
 }: StaffListProps) {
-  const [members, setMembers] = useState<StaffMember[]>(staffMembers)
-  const [editingMember, setEditingMember] = useState<StaffMember | null>(null)
-  const [isDeleting, setIsDeleting] = useState<string | null>(null)
+  const [members, setMembers] = useState<StaffMember[]>(staffMembers);
+  const [editingMember, setEditingMember] = useState<StaffMember | null>(null);
+  const [isDeleting, setIsDeleting] = useState<string | null>(null);
 
   const handleDelete = async (memberId: string) => {
-    setIsDeleting(memberId)
+    setIsDeleting(memberId);
     try {
-      const result = await deleteStaffMember(memberId)
+      const result = await deleteStaffMember(memberId);
       if (result.success) {
-        setMembers((prev) => prev.filter((m) => m.id !== memberId))
-        toast.success("Miembro del personal eliminado")
+        setMembers((prev) => prev.filter((m) => m.id !== memberId));
+        toast.success("Miembro del personal eliminado");
       } else {
-        toast.error(result.error || "No se pudo eliminar")
+        toast.error(result.error || "No se pudo eliminar");
       }
     } finally {
-      setIsDeleting(null)
+      setIsDeleting(null);
     }
-  }
+  };
 
   const handleToggle = async (memberId: string, currentState: boolean) => {
     try {
-      const result = await toggleStaffActive(memberId, !currentState)
+      const result = await toggleStaffActive(memberId, !currentState);
       if (result.success) {
         setMembers((prev) =>
           prev.map((m) =>
-            m.id === memberId ? { ...m, is_active: !currentState } : m
-          )
-        )
+            m.id === memberId ? { ...m, is_active: !currentState } : m,
+          ),
+        );
         toast.success(
-          `Miembro del personal ${!currentState ? "activado" : "desactivado"}`
-        )
+          `Miembro del personal ${!currentState ? "activado" : "desactivado"}`,
+        );
       } else {
-        toast.error(result.error || "No se pudo actualizar")
+        toast.error(result.error || "No se pudo actualizar");
       }
     } catch (error) {
-      toast.error("Ocurrió un error")
+      toast.error("Ocurrió un error");
     }
-  }
+  };
 
-  const activeStaff = members.filter((s) => s.is_active)
-  const inactiveStaff = members.filter((s) => !s.is_active)
+  const activeStaff = members.filter((s) => s.is_active);
+  const inactiveStaff = members.filter((s) => !s.is_active);
 
   const StaffTable = ({ staff }: { staff: StaffMember[] }) => (
     <div className="rounded-lg border overflow-hidden">
@@ -84,7 +90,10 @@ export function StaffList({
         <tbody className="divide-y">
           {staff.length === 0 ? (
             <tr>
-              <td colSpan={4} className="px-6 py-8 text-center text-muted-foreground">
+              <td
+                colSpan={4}
+                className="px-6 py-8 text-center text-muted-foreground"
+              >
                 Sin miembros del personal
               </td>
             </tr>
@@ -123,7 +132,9 @@ export function StaffList({
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => handleToggle(member.id, member.is_active ?? true)}
+                      onClick={() =>
+                        handleToggle(member.id, member.is_active ?? true)
+                      }
                     >
                       {member.is_active ? (
                         <ToggleRight className="h-4 w-4" />
@@ -147,17 +158,17 @@ export function StaffList({
         </tbody>
       </table>
     </div>
-  )
+  );
 
   return (
     <>
       <Tabs defaultValue="all" className="space-y-4">
         <TabsList>
-          <TabsTrigger value="all">
-            Todos ({members.length})
-          </TabsTrigger>
+          <TabsTrigger value="all">Todos ({members.length})</TabsTrigger>
           <TabsTrigger value="active">Activos ({activeCount})</TabsTrigger>
-          <TabsTrigger value="inactive">Inactivos ({inactiveCount})</TabsTrigger>
+          <TabsTrigger value="inactive">
+            Inactivos ({inactiveCount})
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="all" className="space-y-4">
@@ -180,12 +191,12 @@ export function StaffList({
           onClose={() => setEditingMember(null)}
           onSave={(updated) => {
             setMembers((prev) =>
-              prev.map((m) => (m.id === updated.id ? updated : m))
-            )
-            setEditingMember(null)
+              prev.map((m) => (m.id === updated.id ? updated : m)),
+            );
+            setEditingMember(null);
           }}
         />
       )}
     </>
-  )
+  );
 }

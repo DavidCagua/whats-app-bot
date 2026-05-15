@@ -18,7 +18,13 @@ export const metadata: Metadata = {
   title: "WhatsApp Bot Admin Console",
   description: "Super Admin Console for Multi-Tenant WhatsApp Bot Management",
   icons: {
-    icon: [{ url: favicon.src, type: "image/png", sizes: `${favicon.width}x${favicon.height}` }],
+    icon: [
+      {
+        url: favicon.src,
+        type: "image/png",
+        sizes: `${favicon.width}x${favicon.height}`,
+      },
+    ],
     apple: favicon.src,
   },
 };

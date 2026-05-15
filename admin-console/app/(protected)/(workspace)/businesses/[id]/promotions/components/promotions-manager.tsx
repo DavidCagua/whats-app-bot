@@ -1,10 +1,10 @@
-"use client"
+"use client";
 
-import { useMemo, useState } from "react"
-import { Plus, Pencil, Trash2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Switch } from "@/components/ui/switch"
+import { useMemo, useState } from "react";
+import { Plus, Pencil, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -12,7 +12,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
+} from "@/components/ui/table";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,16 +22,16 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
-import { toast } from "sonner"
+} from "@/components/ui/alert-dialog";
+import { toast } from "sonner";
 import {
   deletePromotion,
   setPromotionActive,
   type SerializedPromotion,
-} from "@/lib/actions/promotions"
-import { PromotionFormDialog } from "./promotion-form-dialog"
+} from "@/lib/actions/promotions";
+import { PromotionFormDialog } from "./promotion-form-dialog";
 
-type ProductOption = { id: string; name: string; price: number }
+type ProductOption = { id: string; name: string; price: number };
 
 const DAY_LABELS: Record<number, string> = {
   1: "L",
@@ -41,114 +41,112 @@ const DAY_LABELS: Record<number, string> = {
   5: "V",
   6: "S",
   7: "D",
-}
+};
 
 const formatMoney = (value: number) =>
   new Intl.NumberFormat("es-CO", {
     style: "currency",
     currency: "COP",
     minimumFractionDigits: 0,
-  }).format(value)
+  }).format(value);
 
 function pricingLabel(p: SerializedPromotion): string {
-  if (p.fixed_price != null) return `Precio fijo ${formatMoney(p.fixed_price)}`
+  if (p.fixed_price != null) return `Precio fijo ${formatMoney(p.fixed_price)}`;
   if (p.discount_amount != null)
-    return `Descuento ${formatMoney(p.discount_amount)}`
-  if (p.discount_pct != null) return `${p.discount_pct}% off`
-  return "—"
+    return `Descuento ${formatMoney(p.discount_amount)}`;
+  if (p.discount_pct != null) return `${p.discount_pct}% off`;
+  return "—";
 }
 
 function scheduleLabel(p: SerializedPromotion): string {
-  const parts: string[] = []
+  const parts: string[] = [];
   if (p.days_of_week && p.days_of_week.length > 0) {
-    const sorted = [...p.days_of_week].sort()
-    parts.push(sorted.map((d) => DAY_LABELS[d] ?? "?").join(" "))
+    const sorted = [...p.days_of_week].sort();
+    parts.push(sorted.map((d) => DAY_LABELS[d] ?? "?").join(" "));
   }
   if (p.start_time && p.end_time) {
-    parts.push(`${p.start_time}–${p.end_time}`)
+    parts.push(`${p.start_time}–${p.end_time}`);
   } else if (p.start_time) {
-    parts.push(`desde ${p.start_time}`)
+    parts.push(`desde ${p.start_time}`);
   } else if (p.end_time) {
-    parts.push(`hasta ${p.end_time}`)
+    parts.push(`hasta ${p.end_time}`);
   }
   if (p.starts_on || p.ends_on) {
-    parts.push(`${p.starts_on ?? "…"} → ${p.ends_on ?? "…"}`)
+    parts.push(`${p.starts_on ?? "…"} → ${p.ends_on ?? "…"}`);
   }
-  return parts.length === 0 ? "Siempre" : parts.join(" · ")
+  return parts.length === 0 ? "Siempre" : parts.join(" · ");
 }
 
 type EditorState =
   | { mode: "closed" }
   | { mode: "create" }
-  | { mode: "edit"; promotion: SerializedPromotion }
+  | { mode: "edit"; promotion: SerializedPromotion };
 
 export function PromotionsManager({
   businessId,
   initialPromotions,
   products,
 }: {
-  businessId: string
-  initialPromotions: SerializedPromotion[]
-  products: ProductOption[]
+  businessId: string;
+  initialPromotions: SerializedPromotion[];
+  products: ProductOption[];
 }) {
-  const [promotions, setPromotions] = useState<SerializedPromotion[]>(
-    initialPromotions
-  )
-  const [editor, setEditor] = useState<EditorState>({ mode: "closed" })
-  const [pendingDelete, setPendingDelete] = useState<SerializedPromotion | null>(
-    null
-  )
-  const [busyId, setBusyId] = useState<string | null>(null)
+  const [promotions, setPromotions] =
+    useState<SerializedPromotion[]>(initialPromotions);
+  const [editor, setEditor] = useState<EditorState>({ mode: "closed" });
+  const [pendingDelete, setPendingDelete] =
+    useState<SerializedPromotion | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const sorted = useMemo(
     () =>
       [...promotions].sort((a, b) => {
-        if (a.is_active !== b.is_active) return a.is_active ? -1 : 1
-        return a.name.localeCompare(b.name)
+        if (a.is_active !== b.is_active) return a.is_active ? -1 : 1;
+        return a.name.localeCompare(b.name);
       }),
-    [promotions]
-  )
+    [promotions],
+  );
 
   async function handleToggleActive(promo: SerializedPromotion, next: boolean) {
-    setBusyId(promo.id)
+    setBusyId(promo.id);
     try {
-      const result = await setPromotionActive(promo.id, next)
-      if (!result.success) throw new Error(result.error)
+      const result = await setPromotionActive(promo.id, next);
+      if (!result.success) throw new Error(result.error);
       setPromotions((prev) =>
-        prev.map((p) => (p.id === promo.id ? result.promotion : p))
-      )
-      toast.success(next ? "Promo activada" : "Promo desactivada")
+        prev.map((p) => (p.id === promo.id ? result.promotion : p)),
+      );
+      toast.success(next ? "Promo activada" : "Promo desactivada");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "No se pudo actualizar")
+      toast.error(err instanceof Error ? err.message : "No se pudo actualizar");
     } finally {
-      setBusyId(null)
+      setBusyId(null);
     }
   }
 
   async function handleDelete() {
-    if (!pendingDelete) return
-    setBusyId(pendingDelete.id)
+    if (!pendingDelete) return;
+    setBusyId(pendingDelete.id);
     try {
-      const result = await deletePromotion(pendingDelete.id)
-      if (!result.success) throw new Error(result.error)
-      setPromotions((prev) => prev.filter((p) => p.id !== pendingDelete.id))
-      toast.success("Promo eliminada")
-      setPendingDelete(null)
+      const result = await deletePromotion(pendingDelete.id);
+      if (!result.success) throw new Error(result.error);
+      setPromotions((prev) => prev.filter((p) => p.id !== pendingDelete.id));
+      toast.success("Promo eliminada");
+      setPendingDelete(null);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "No se pudo eliminar")
+      toast.error(err instanceof Error ? err.message : "No se pudo eliminar");
     } finally {
-      setBusyId(null)
+      setBusyId(null);
     }
   }
 
   function handleSaved(promo: SerializedPromotion) {
     setPromotions((prev) => {
-      const exists = prev.some((p) => p.id === promo.id)
+      const exists = prev.some((p) => p.id === promo.id);
       return exists
         ? prev.map((p) => (p.id === promo.id ? promo : p))
-        : [...prev, promo]
-    })
-    setEditor({ mode: "closed" })
+        : [...prev, promo];
+    });
+    setEditor({ mode: "closed" });
   }
 
   return (
@@ -210,7 +208,8 @@ export function PromotionsManager({
                     ) : (
                       p.components.map((c) => (
                         <div key={c.id}>
-                          {c.quantity}× {c.product_name ?? c.product_id.slice(0, 8)}
+                          {c.quantity}×{" "}
+                          {c.product_name ?? c.product_id.slice(0, 8)}
                         </div>
                       ))
                     )}
@@ -222,7 +221,9 @@ export function PromotionsManager({
                     <Switch
                       checked={p.is_active}
                       disabled={busyId === p.id}
-                      onCheckedChange={(next) => void handleToggleActive(p, next)}
+                      onCheckedChange={(next) =>
+                        void handleToggleActive(p, next)
+                      }
                     />
                   </TableCell>
                   <TableCell>
@@ -230,7 +231,9 @@ export function PromotionsManager({
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => setEditor({ mode: "edit", promotion: p })}
+                        onClick={() =>
+                          setEditor({ mode: "edit", promotion: p })
+                        }
                         aria-label="Editar"
                       >
                         <Pencil className="h-4 w-4" />
@@ -277,8 +280,8 @@ export function PromotionsManager({
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
-                e.preventDefault()
-                void handleDelete()
+                e.preventDefault();
+                void handleDelete();
               }}
             >
               Eliminar
@@ -287,5 +290,5 @@ export function PromotionsManager({
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  )
+  );
 }

@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useMemo, useState } from "react"
+import { useMemo, useState } from "react";
 import {
   Table,
   TableBody,
@@ -8,46 +8,46 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
-import { Pencil } from "lucide-react"
-import { format } from "date-fns"
-import type { CustomerRow } from "@/lib/customers-queries"
-import { EditCustomerDialog } from "./edit-customer-dialog"
+} from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Pencil } from "lucide-react";
+import { format } from "date-fns";
+import type { CustomerRow } from "@/lib/customers-queries";
+import { EditCustomerDialog } from "./edit-customer-dialog";
 
 const capitalize = (value: string | null | undefined): string => {
-  if (!value) return "—"
-  const trimmed = value.trim()
-  if (!trimmed) return "—"
-  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
-}
+  if (!value) return "—";
+  const trimmed = value.trim();
+  if (!trimmed) return "—";
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+};
 
 const formatDate = (iso: string | null) =>
-  iso ? format(new Date(iso), "MMM d, yyyy") : "—"
+  iso ? format(new Date(iso), "MMM d, yyyy") : "—";
 
 export function CustomersTable({
   businessId,
   initialCustomers,
 }: {
-  businessId: string
-  initialCustomers: CustomerRow[]
+  businessId: string;
+  initialCustomers: CustomerRow[];
 }) {
-  const [query, setQuery] = useState("")
-  const [editing, setEditing] = useState<CustomerRow | null>(null)
+  const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState<CustomerRow | null>(null);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return initialCustomers
+    const q = query.trim().toLowerCase();
+    if (!q) return initialCustomers;
     return initialCustomers.filter((c) => {
       return (
         c.name.toLowerCase().includes(q) ||
         c.whatsapp_id.toLowerCase().includes(q) ||
         (c.phone?.toLowerCase().includes(q) ?? false) ||
         (c.address?.toLowerCase().includes(q) ?? false)
-      )
-    })
-  }, [initialCustomers, query])
+      );
+    });
+  }, [initialCustomers, query]);
 
   return (
     <div className="space-y-3">
@@ -133,9 +133,9 @@ export function CustomersTable({
         customer={editing}
         open={editing !== null}
         onOpenChange={(next) => {
-          if (!next) setEditing(null)
+          if (!next) setEditing(null);
         }}
       />
     </div>
-  )
+  );
 }

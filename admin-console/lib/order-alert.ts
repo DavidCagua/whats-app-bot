@@ -9,20 +9,20 @@
  * device. After that, playChime() works for the rest of the session.
  */
 
-const STORAGE_KEY = "orders:alerts-enabled"
+const STORAGE_KEY = "orders:alerts-enabled";
 
-let audioCtx: AudioContext | null = null
+let audioCtx: AudioContext | null = null;
 
 function getAudioContext(): AudioContext | null {
-  if (typeof window === "undefined") return null
-  if (audioCtx) return audioCtx
+  if (typeof window === "undefined") return null;
+  if (audioCtx) return audioCtx;
   const Ctor =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext?: typeof AudioContext })
-      .webkitAudioContext
-  if (!Ctor) return null
-  audioCtx = new Ctor()
-  return audioCtx
+      .webkitAudioContext;
+  if (!Ctor) return null;
+  audioCtx = new Ctor();
+  return audioCtx;
 }
 
 function playTone(
@@ -30,29 +30,29 @@ function playTone(
   freq: number,
   startOffset: number,
   duration: number,
-  peak: number
+  peak: number,
 ) {
-  const now = ctx.currentTime + startOffset
-  const osc = ctx.createOscillator()
-  const gain = ctx.createGain()
-  osc.type = "sine"
-  osc.frequency.value = freq
-  gain.gain.setValueAtTime(0, now)
-  gain.gain.linearRampToValueAtTime(peak, now + 0.01)
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration)
-  osc.connect(gain).connect(ctx.destination)
-  osc.start(now)
-  osc.stop(now + duration)
+  const now = ctx.currentTime + startOffset;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = "sine";
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(peak, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + duration);
 }
 
 export function getAlertsEnabled(): boolean {
-  if (typeof window === "undefined") return false
-  return localStorage.getItem(STORAGE_KEY) === "true"
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem(STORAGE_KEY) === "true";
 }
 
 export function setAlertsEnabled(enabled: boolean): void {
-  if (typeof window === "undefined") return
-  localStorage.setItem(STORAGE_KEY, String(enabled))
+  if (typeof window === "undefined") return;
+  localStorage.setItem(STORAGE_KEY, String(enabled));
 }
 
 /**
@@ -61,13 +61,13 @@ export function setAlertsEnabled(enabled: boolean): void {
  * gesture). Never throws.
  */
 export function playChime(): void {
-  const ctx = getAudioContext()
-  if (!ctx || ctx.state !== "running") return
+  const ctx = getAudioContext();
+  if (!ctx || ctx.state !== "running") return;
   try {
-    playTone(ctx, 880, 0, 0.4, 0.3) // A5
-    playTone(ctx, 1318.5, 0.05, 0.45, 0.2) // E6
+    playTone(ctx, 880, 0, 0.4, 0.3); // A5
+    playTone(ctx, 1318.5, 0.05, 0.45, 0.2); // E6
   } catch (err) {
-    console.error("[order-alert] playChime failed", err)
+    console.error("[order-alert] playChime failed", err);
   }
 }
 
@@ -77,18 +77,18 @@ export function playChime(): void {
  * remainder of this page session.
  */
 export async function unlockAndPlayTest(): Promise<boolean> {
-  const ctx = getAudioContext()
-  if (!ctx) return false
+  const ctx = getAudioContext();
+  if (!ctx) return false;
   try {
     if (ctx.state === "suspended") {
-      await ctx.resume()
+      await ctx.resume();
     }
-    if (ctx.state !== "running") return false
-    playTone(ctx, 880, 0, 0.4, 0.3)
-    playTone(ctx, 1318.5, 0.05, 0.45, 0.2)
-    return true
+    if (ctx.state !== "running") return false;
+    playTone(ctx, 880, 0, 0.4, 0.3);
+    playTone(ctx, 1318.5, 0.05, 0.45, 0.2);
+    return true;
   } catch (err) {
-    console.error("[order-alert] unlock failed", err)
-    return false
+    console.error("[order-alert] unlock failed", err);
+    return false;
   }
 }

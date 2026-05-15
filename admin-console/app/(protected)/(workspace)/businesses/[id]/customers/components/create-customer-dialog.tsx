@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useState, useTransition } from "react"
+import { useState, useTransition } from "react";
 import {
   Dialog,
   DialogContent,
@@ -9,36 +9,36 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
-import { Plus } from "lucide-react"
-import { toast } from "sonner"
-import { useRouter } from "next/navigation"
-import { createCustomer } from "@/lib/actions/customers"
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Plus } from "lucide-react";
+import { toast } from "sonner";
+import { useRouter } from "next/navigation";
+import { createCustomer } from "@/lib/actions/customers";
 
 export function CreateCustomerDialog({ businessId }: { businessId: string }) {
-  const router = useRouter()
-  const [open, setOpen] = useState(false)
-  const [isPending, startTransition] = useTransition()
-  const [whatsappId, setWhatsappId] = useState("")
-  const [name, setName] = useState("")
-  const [phone, setPhone] = useState("")
-  const [address, setAddress] = useState("")
-  const [paymentMethod, setPaymentMethod] = useState("")
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [isPending, startTransition] = useTransition();
+  const [whatsappId, setWhatsappId] = useState("");
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [address, setAddress] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("");
 
   function reset() {
-    setWhatsappId("")
-    setName("")
-    setPhone("")
-    setAddress("")
-    setPaymentMethod("")
+    setWhatsappId("");
+    setName("");
+    setPhone("");
+    setAddress("");
+    setPaymentMethod("");
   }
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
+    e.preventDefault();
     startTransition(async () => {
       const result = await createCustomer({
         businessId,
@@ -47,24 +47,24 @@ export function CreateCustomerDialog({ businessId }: { businessId: string }) {
         phone,
         address,
         paymentMethod,
-      })
+      });
       if (!result.success) {
-        toast.error(result.error)
-        return
+        toast.error(result.error);
+        return;
       }
-      toast.success("Cliente creado")
-      reset()
-      setOpen(false)
-      router.refresh()
-    })
+      toast.success("Cliente creado");
+      reset();
+      setOpen(false);
+      router.refresh();
+    });
   }
 
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        setOpen(next)
-        if (!next) reset()
+        setOpen(next);
+        if (!next) reset();
       }}
     >
       <DialogTrigger asChild>
@@ -77,8 +77,8 @@ export function CreateCustomerDialog({ businessId }: { businessId: string }) {
         <DialogHeader>
           <DialogTitle>Nuevo cliente</DialogTitle>
           <DialogDescription>
-            Solo WhatsApp y nombre son obligatorios. El resto puedes
-            completarlo después.
+            Solo WhatsApp y nombre son obligatorios. El resto puedes completarlo
+            después.
           </DialogDescription>
         </DialogHeader>
 
@@ -157,5 +157,5 @@ export function CreateCustomerDialog({ businessId }: { businessId: string }) {
         </form>
       </DialogContent>
     </Dialog>
-  )
+  );
 }

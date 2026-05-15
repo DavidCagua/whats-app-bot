@@ -1,4 +1,4 @@
-"use client"
+"use client";
 
 import {
   Table,
@@ -7,28 +7,28 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Settings, Shield, User } from "lucide-react"
-import Link from "next/link"
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Settings, Shield, User } from "lucide-react";
+import Link from "next/link";
 
 interface UserData {
-  id: string
-  email: string
-  full_name: string | null
-  role: string | null
-  is_active: boolean | null
-  created_at: Date | null
+  id: string;
+  email: string;
+  full_name: string | null;
+  role: string | null;
+  is_active: boolean | null;
+  created_at: Date | null;
   businesses: Array<{
-    id: string
-    name: string
-    role: string | null
-  }>
+    id: string;
+    name: string;
+    role: string | null;
+  }>;
 }
 
 interface UsersTableProps {
-  data: UserData[]
+  data: UserData[];
 }
 
 export function UsersTable({ data }: UsersTableProps) {
@@ -47,7 +47,10 @@ export function UsersTable({ data }: UsersTableProps) {
         <TableBody>
           {data.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={5} className="text-center text-muted-foreground">
+              <TableCell
+                colSpan={5}
+                className="text-center text-muted-foreground"
+              >
                 No se encontraron usuarios
               </TableCell>
             </TableRow>
@@ -56,8 +59,12 @@ export function UsersTable({ data }: UsersTableProps) {
               <TableRow key={user.id}>
                 <TableCell>
                   <div className="flex flex-col">
-                    <span className="font-medium">{user.full_name || "Sin nombre"}</span>
-                    <span className="text-sm text-muted-foreground">{user.email}</span>
+                    <span className="font-medium">
+                      {user.full_name || "Sin nombre"}
+                    </span>
+                    <span className="text-sm text-muted-foreground">
+                      {user.email}
+                    </span>
                   </div>
                 </TableCell>
                 <TableCell>
@@ -75,11 +82,17 @@ export function UsersTable({ data }: UsersTableProps) {
                 </TableCell>
                 <TableCell>
                   {user.businesses.length === 0 ? (
-                    <span className="text-muted-foreground text-sm">Sin negocios</span>
+                    <span className="text-muted-foreground text-sm">
+                      Sin negocios
+                    </span>
                   ) : (
                     <div className="flex flex-wrap gap-1">
                       {user.businesses.map((business) => (
-                        <Badge key={business.id} variant="outline" className="text-xs">
+                        <Badge
+                          key={business.id}
+                          variant="outline"
+                          className="text-xs"
+                        >
                           {business.name}
                           <span className="ml-1 text-muted-foreground">
                             ({business.role || "member"})
@@ -91,7 +104,9 @@ export function UsersTable({ data }: UsersTableProps) {
                 </TableCell>
                 <TableCell>
                   {user.is_active ? (
-                    <Badge variant="default" className="bg-green-500">Activo</Badge>
+                    <Badge variant="default" className="bg-green-500">
+                      Activo
+                    </Badge>
                   ) : (
                     <Badge variant="secondary">Inactivo</Badge>
                   )}
@@ -109,5 +124,5 @@ export function UsersTable({ data }: UsersTableProps) {
         </TableBody>
       </Table>
     </div>
-  )
+  );
 }

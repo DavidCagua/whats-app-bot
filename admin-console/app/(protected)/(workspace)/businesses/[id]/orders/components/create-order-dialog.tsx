@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import { useMemo, useState, useTransition } from "react"
+import { useMemo, useState, useTransition } from "react";
 import {
   Dialog,
   DialogContent,
@@ -9,138 +9,137 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { Plus, Trash2 } from "lucide-react"
-import { toast } from "sonner"
-import { useRouter } from "next/navigation"
-import { createOrder } from "@/lib/actions/orders-create"
-import type {
-  CustomerOption,
-  ProductOption,
-} from "@/lib/orders-create-data"
+} from "@/components/ui/select";
+import { Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { useRouter } from "next/navigation";
+import { createOrder } from "@/lib/actions/orders-create";
+import type { CustomerOption, ProductOption } from "@/lib/orders-create-data";
 
-const NEW_CUSTOMER = "__new__"
-const NO_CUSTOMER = "__none__"
+const NEW_CUSTOMER = "__new__";
+const NO_CUSTOMER = "__none__";
 
 type ItemDraft = {
-  productId: string
-  quantity: number
-  unitPrice: number
-  notes: string
-}
+  productId: string;
+  quantity: number;
+  unitPrice: number;
+  notes: string;
+};
 
 const formatCOP = (n: number) =>
   new Intl.NumberFormat("es-CO", {
     style: "currency",
     currency: "COP",
     minimumFractionDigits: 0,
-  }).format(n)
+  }).format(n);
 
 const emptyItem = (): ItemDraft => ({
   productId: "",
   quantity: 1,
   unitPrice: 0,
   notes: "",
-})
+});
 
 export function CreateOrderDialog({
   businessId,
   products,
   customers,
 }: {
-  businessId: string
-  products: ProductOption[]
-  customers: CustomerOption[]
+  businessId: string;
+  products: ProductOption[];
+  customers: CustomerOption[];
 }) {
-  const router = useRouter()
-  const [open, setOpen] = useState(false)
-  const [isPending, startTransition] = useTransition()
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [isPending, startTransition] = useTransition();
 
-  const [customerChoice, setCustomerChoice] = useState<string>(NO_CUSTOMER)
-  const [newWhatsappId, setNewWhatsappId] = useState("")
-  const [newCustomerName, setNewCustomerName] = useState("")
+  const [customerChoice, setCustomerChoice] = useState<string>(NO_CUSTOMER);
+  const [newWhatsappId, setNewWhatsappId] = useState("");
+  const [newCustomerName, setNewCustomerName] = useState("");
 
-  const [items, setItems] = useState<ItemDraft[]>([emptyItem()])
+  const [items, setItems] = useState<ItemDraft[]>([emptyItem()]);
   const [fulfillmentType, setFulfillmentType] = useState<"delivery" | "pickup">(
-    "delivery"
-  )
-  const [deliveryAddress, setDeliveryAddress] = useState("")
-  const [contactPhone, setContactPhone] = useState("")
-  const [paymentMethod, setPaymentMethod] = useState("")
-  const [deliveryFee, setDeliveryFee] = useState(0)
-  const [notes, setNotes] = useState("")
-  const isPickup = fulfillmentType === "pickup"
+    "delivery",
+  );
+  const [deliveryAddress, setDeliveryAddress] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("");
+  const [deliveryFee, setDeliveryFee] = useState(0);
+  const [notes, setNotes] = useState("");
+  const isPickup = fulfillmentType === "pickup";
 
   const productById = useMemo(
     () => new Map(products.map((p) => [p.id, p])),
-    [products]
-  )
+    [products],
+  );
 
   const subtotal = useMemo(
     () => items.reduce((acc, i) => acc + i.quantity * i.unitPrice, 0),
-    [items]
-  )
-  const effectiveFee = isPickup ? 0 : Number.isFinite(deliveryFee) ? deliveryFee : 0
-  const total = subtotal + effectiveFee
+    [items],
+  );
+  const effectiveFee = isPickup
+    ? 0
+    : Number.isFinite(deliveryFee)
+      ? deliveryFee
+      : 0;
+  const total = subtotal + effectiveFee;
 
   function reset() {
-    setCustomerChoice(NO_CUSTOMER)
-    setNewWhatsappId("")
-    setNewCustomerName("")
-    setItems([emptyItem()])
-    setFulfillmentType("delivery")
-    setDeliveryAddress("")
-    setContactPhone("")
-    setPaymentMethod("")
-    setDeliveryFee(0)
-    setNotes("")
+    setCustomerChoice(NO_CUSTOMER);
+    setNewWhatsappId("");
+    setNewCustomerName("");
+    setItems([emptyItem()]);
+    setFulfillmentType("delivery");
+    setDeliveryAddress("");
+    setContactPhone("");
+    setPaymentMethod("");
+    setDeliveryFee(0);
+    setNotes("");
   }
 
   function updateItem(idx: number, patch: Partial<ItemDraft>) {
     setItems((prev) =>
-      prev.map((it, i) => (i === idx ? { ...it, ...patch } : it))
-    )
+      prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)),
+    );
   }
 
   function onSelectProduct(idx: number, productId: string) {
-    const p = productById.get(productId)
+    const p = productById.get(productId);
     updateItem(idx, {
       productId,
       // Prefill the unit price from the catalogue, but keep it editable
       // so the admin can apply a manual discount (no promo engine in v1).
       unitPrice: p ? p.price : 0,
-    })
+    });
   }
 
   const canSubmit =
     items.length > 0 &&
-    items.every(
-      (i) => i.productId && i.quantity > 0 && i.unitPrice >= 0
-    ) &&
+    items.every((i) => i.productId && i.quantity > 0 && i.unitPrice >= 0) &&
     (customerChoice !== NEW_CUSTOMER ||
-      (newWhatsappId.trim() && newCustomerName.trim()))
+      (newWhatsappId.trim() && newCustomerName.trim()));
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    if (!canSubmit) return
+    e.preventDefault();
+    if (!canSubmit) return;
 
     const customer =
       customerChoice === NO_CUSTOMER
         ? null
         : customerChoice === NEW_CUSTOMER
           ? { whatsappId: newWhatsappId.trim(), name: newCustomerName.trim() }
-          : { existingCustomerId: Number(customerChoice) }
+          : { existingCustomerId: Number(customerChoice) };
 
     startTransition(async () => {
       const result = await createOrder({
@@ -158,24 +157,24 @@ export function CreateOrderDialog({
         paymentMethod: isPickup ? null : paymentMethod,
         deliveryFee: isPickup ? 0 : deliveryFee,
         notes,
-      })
+      });
       if (!result.success) {
-        toast.error(result.error)
-        return
+        toast.error(result.error);
+        return;
       }
-      toast.success("Pedido creado")
-      reset()
-      setOpen(false)
-      router.refresh()
-    })
+      toast.success("Pedido creado");
+      reset();
+      setOpen(false);
+      router.refresh();
+    });
   }
 
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        setOpen(next)
-        if (!next) reset()
+        setOpen(next);
+        if (!next) reset();
       }}
     >
       <DialogTrigger asChild>
@@ -320,7 +319,7 @@ export function CreateOrderDialog({
                         setItems((prev) =>
                           prev.length === 1
                             ? [emptyItem()]
-                            : prev.filter((_, i) => i !== idx)
+                            : prev.filter((_, i) => i !== idx),
                         )
                       }
                       aria-label="Eliminar ítem"
@@ -455,5 +454,5 @@ export function CreateOrderDialog({
         </form>
       </DialogContent>
     </Dialog>
-  )
+  );
 }
