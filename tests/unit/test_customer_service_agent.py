@@ -108,6 +108,184 @@ class TestGetBusinessInfoTool:
         assert "INFO_MISSING" in result
 
 
+class TestGetPaymentInfoTool:
+    """get_payment_info returns a structured PAYMENT_INFO block (NOT a FINAL
+    rendered reply). The CS agent's LLM reads the block and composes the
+    Spanish response to the customer in the next iteration, filtering by
+    what the customer asked or by session fulfillment.
+
+    These tests pin the block's contract — shape, completeness, accurate
+    session-mode signal — and stay out of LLM phrasing territory.
+    """
+
+    _BIELA_SETTINGS = {
+        "payment_methods": [
+            {"name": "Efectivo", "contexts": ["delivery_on_fulfillment", "on_site_on_fulfillment"]},
+            {"name": "Tarjeta", "contexts": ["on_site_on_fulfillment"]},
+            {
+                "name": "Nequi",
+                "contexts": [
+                    "delivery_pay_now", "delivery_on_fulfillment",
+                    "on_site_pay_now", "on_site_on_fulfillment",
+                ],
+            },
+            {"name": "Transferencia", "contexts": ["delivery_pay_now", "on_site_pay_now"]},
+            {"name": "Llave BreB", "contexts": ["delivery_pay_now", "on_site_pay_now"]},
+        ],
+        "payment_destinations": {
+            "Nequi": "300 123 4567 (Biela SAS)",
+            "Transferencia": "Bancolombia 123-456789-00",
+        },
+    }
+
+    def _ctx(self, fulfillment_type=None, settings=None):
+        ctx = {
+            "business_id": "biz-1",
+            "business": {
+                "name": "Biela",
+                "settings": self._BIELA_SETTINGS if settings is None else settings,
+            },
+        }
+        session = None
+        if fulfillment_type is not None:
+            session = {"order_context": {"fulfillment_type": fulfillment_type}}
+        return _tool_ctx(business_context=ctx, session=session)
+
+    def _invoke(self, ictx):
+        token = cs_tools.set_tool_context(ictx)
+        try:
+            return cs_tools.get_payment_info.invoke({
+                "injected_business_context": ictx,
+            })
+        finally:
+            cs_tools.reset_tool_context(token)
+
+    # ── Block shape ──
+
+    def test_returns_plain_text_not_final(self):
+        # The tool must NOT short-circuit the dispatch loop — the LLM has to
+        # compose the reply, so the result is plain text without a FINAL
+        # sentinel.
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        assert not result.startswith("FINAL|")
+        assert not result.startswith("HANDOFF|")
+        assert result.startswith("PAYMENT_INFO")
+
+    def test_includes_methods_section(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        assert "Métodos aceptados" in result
+
+    def test_includes_instructions_for_llm(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        assert "INSTRUCCIONES" in result
+        # Instructions cover the main branches the LLM must follow.
+        assert "domicilio" in result.lower()
+        assert "local" in result.lower()
+
+    # ── Methods listing ──
+
+    def test_all_configured_methods_appear(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        for name in ("Efectivo", "Tarjeta", "Nequi", "Transferencia", "Llave BreB"):
+            assert name in result, name
+
+    def test_tarjeta_shows_local_only(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        # The Tarjeta line must indicate local-only — the LLM uses this to
+        # tell a delivery customer "Tarjeta solo en el local".
+        tarjeta_line = next(
+            ln for ln in result.splitlines() if ln.startswith("- Tarjeta:")
+        )
+        assert "local" in tarjeta_line
+        assert "domicilio" not in tarjeta_line
+
+    def test_nequi_shows_both_fulfillments(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        nequi_line = next(
+            ln for ln in result.splitlines() if ln.startswith("- Nequi:")
+        )
+        assert "domicilio" in nequi_line
+        assert "local" in nequi_line
+
+    def test_method_contexts_show_timings(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        nequi_line = next(
+            ln for ln in result.splitlines() if ln.startswith("- Nequi:")
+        )
+        # Nequi has all four contexts on; both timings should surface.
+        assert "al recibir" in nequi_line
+        assert "por adelantado" in nequi_line
+
+    def test_efectivo_shows_only_at_fulfillment(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        efectivo_line = next(
+            ln for ln in result.splitlines() if ln.startswith("- Efectivo:")
+        )
+        assert "al recibir" in efectivo_line
+        assert "al pagar" in efectivo_line
+        # Efectivo is never pay-now in Biela's config.
+        assert "por adelantado" not in efectivo_line
+
+    # ── Session-mode signal ──
+
+    def test_session_mode_delivery(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        assert "Modo del pedido actual: domicilio" in result
+
+    @pytest.mark.parametrize("ft", ["pickup", "dine_in", "on_site"])
+    def test_session_mode_on_site_variants(self, ft):
+        result = self._invoke(self._ctx(fulfillment_type=ft))
+        assert "Modo del pedido actual: local" in result
+
+    def test_session_mode_unknown_when_no_session(self):
+        result = self._invoke(self._ctx(fulfillment_type=None))
+        assert "Modo del pedido actual: desconocido" in result
+
+    # ── Destinations ──
+
+    def test_destinations_section_present_with_pay_now_methods(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        # Header is colon-terminated; tells it apart from the INSTRUCCIONES
+        # body which mentions the same phrase as a noun.
+        assert "Datos para pago adelantado:" in result
+        # Configured destinations are surfaced verbatim.
+        assert "300 123 4567 (Biela SAS)" in result
+        assert "Bancolombia 123-456789-00" in result
+
+    def test_destination_missing_marker_for_unconfigured(self):
+        # Llave BreB is a pay_now method but has no destination configured.
+        result = self._invoke(self._ctx(fulfillment_type="delivery"))
+        breb_destination_line = next(
+            ln for ln in result.splitlines() if ln.startswith("- Llave BreB:") and "(sin datos" in ln
+        )
+        assert "sin datos configurados" in breb_destination_line
+
+    def test_destinations_section_absent_when_no_pay_now_methods(self):
+        # If no method has pay_now contexts, the destinations section is
+        # omitted entirely.
+        settings = {
+            "payment_methods": [
+                {"name": "Efectivo", "contexts": ["delivery_on_fulfillment", "on_site_on_fulfillment"]},
+                {"name": "Tarjeta", "contexts": ["on_site_on_fulfillment"]},
+            ],
+        }
+        result = self._invoke(self._ctx(fulfillment_type="delivery", settings=settings))
+        # The section header (colon-terminated) must NOT appear. The
+        # phrase still shows up inside the INSTRUCCIONES body, so match
+        # on the header form specifically.
+        assert "Datos para pago adelantado:" not in result
+
+    # ── Fallbacks ──
+
+    def test_no_methods_configured_graceful_fallback(self):
+        result = self._invoke(self._ctx(fulfillment_type="delivery", settings={}))
+        # The block still starts with PAYMENT_INFO and tells the LLM to
+        # apologize without making things up.
+        assert result.startswith("PAYMENT_INFO")
+        assert "no tiene métodos de pago" in result.lower()
+        assert "INSTRUCCIONES" in result
+
+
 class TestGetOrderStatusTool:
     def test_no_order_returns_final(self):
         with patch.object(csf.order_lookup_service, "get_latest_order", return_value=None):

@@ -504,7 +504,19 @@ class TestPaymentMethodNormalization:
             "business": {
                 "settings": {
                     "payment_methods": [
-                        "efectivo", "transferencia", "Nequi", "Llave BreB",
+                        {"name": "Efectivo", "contexts": ["delivery_on_fulfillment"]},
+                        {
+                            "name": "Transferencia",
+                            "contexts": ["delivery_pay_now"],
+                        },
+                        {
+                            "name": "Nequi",
+                            "contexts": ["delivery_pay_now", "delivery_on_fulfillment"],
+                        },
+                        {
+                            "name": "Llave BreB",
+                            "contexts": ["delivery_pay_now"],
+                        },
                     ],
                 },
             },
@@ -546,18 +558,19 @@ class TestPaymentMethodNormalization:
             f"expected canonical 'Llave BreB', got {persisted_pm!r}"
         )
 
-    def test_submit_delivery_info_falls_back_to_raw_when_no_match(self):
-        """If user provides something unmatched against a configured
-        list, save the raw value — let the model decide via the
-        delivery_info_collected envelope whether to re-prompt."""
+    def test_submit_delivery_info_falls_back_to_raw_when_no_config(self):
+        """Permissive path: when the business has no per-method
+        config, save the raw value verbatim — the model still gets
+        the field through and can re-prompt via the envelope.
+
+        (Validation only kicks in when payment_methods is configured.)
+        """
         from app.services import order_tools
 
         biz_ctx = {
             "business_id": "biz1",
             "wa_id": "+57300",
-            "business": {
-                "settings": {"payment_methods": ["efectivo", "Nequi"]},
-            },
+            "business": {"settings": {}},
         }
         saved: dict = {}
 

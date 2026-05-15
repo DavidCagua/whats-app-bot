@@ -31,6 +31,7 @@ from ..database.session_state_service import session_state_service
 from ..database.customer_service import customer_service
 from .order_eta import NOMINAL_RANGE_TEXT, PICKUP_RANGE_TEXT, resolve_delivery_eta
 from . import catalog_cache
+from . import payment_config
 from . import promotion_service
 
 
@@ -378,13 +379,18 @@ def _allowed_payment_methods(injected_business_context: Optional[Dict]) -> List[
 
     Returns ``[]`` when the business has no list configured — caller
     treats that as "no enforcement" (accept any string verbatim).
+    Reads the per-method context structure (see ``payment_config``);
+    returns just the canonical names regardless of context.
     """
     ctx = injected_business_context or _tool_business_context.get() or {}
     settings = (ctx.get("business") or {}).get("settings") or {}
-    raw = settings.get("payment_methods") or []
-    if not isinstance(raw, list):
-        return []
-    return [str(m).strip() for m in raw if str(m).strip()]
+    return [m["name"] for m in payment_config.get_payment_methods(settings)]
+
+
+def _payment_settings(injected_business_context: Optional[Dict]) -> Dict:
+    """Return the raw settings dict used by payment_config helpers."""
+    ctx = injected_business_context or _tool_business_context.get() or {}
+    return (ctx.get("business") or {}).get("settings") or {}
 
 
 def _match_payment_method(value: str, allowed: List[str]) -> Optional[str]:
@@ -1369,18 +1375,17 @@ def submit_delivery_info(
             existing["address"] = str(address).strip()
         if phone is not None and str(phone).strip():
             existing["phone"] = str(phone).strip()
+        # Normalize the payment_method against the business's configured
+        # list (case-insensitive, substring-tolerant). Don't persist yet
+        # — we still have to validate it against the resolved
+        # fulfillment_type below.
+        candidate_pm: Optional[str] = None
+        allowed: List[str] = []
         if payment_method and str(payment_method).strip():
-            # Normalize against the business's configured payment methods
-            # using the same fuzzy matcher legacy uses (case-insensitive
-            # substring). The v2 prompt already instructs the model to
-            # canonicalize, but this is defense in depth — short
-            # fragments like "breb" still resolve to "Llave BreB" even
-            # if the model passed them verbatim. Falls back to the raw
-            # value when no business list is configured (no enforcement).
             raw_pm = str(payment_method).strip()
             allowed = _allowed_payment_methods(injected_business_context)
             canonical = _match_payment_method(raw_pm, allowed)
-            existing["payment_method"] = canonical or raw_pm
+            candidate_pm = canonical or raw_pm
 
         # Resolve effective fulfillment_type for THIS save. Empty input
         # leaves the current mode unchanged. Validation rejects unknown
@@ -1390,6 +1395,43 @@ def submit_delivery_info(
         if ftype_in and ftype_in not in ("delivery", "pickup"):
             return f"❌ fulfillment_type inválido: {fulfillment_type!r}. Usa 'delivery' o 'pickup'."
         new_ftype = ftype_in or current_ftype
+
+        # Validate the payment_method × fulfillment_type combination. Only
+        # enforced when the customer is naming a method on this turn AND
+        # the business has a per-method config (allowed is non-empty);
+        # businesses still on the old flat list get no enforcement.
+        # Returns a structured error message the LLM uses to redirect the
+        # customer to a valid alternative (e.g. Tarjeta+delivery → "use
+        # Nequi/Efectivo or pass by the store").
+        if candidate_pm and allowed:
+            settings_for_payment = _payment_settings(injected_business_context)
+            if not payment_config.is_method_valid_for_fulfillment(
+                candidate_pm, new_ftype, settings_for_payment,
+            ):
+                valid_methods = payment_config.get_payment_methods_for_any(
+                    payment_config.contexts_for_fulfillment(new_ftype),
+                    settings_for_payment,
+                )
+                accepted_elsewhere = any(
+                    payment_config.is_method_valid_for_context(candidate_pm, c, settings_for_payment)
+                    for c in payment_config.ALL_CONTEXTS
+                )
+                ftype_label = "domicilio" if new_ftype == "delivery" else "pago en el local"
+                msg = f"❌ {candidate_pm} no está disponible para {ftype_label}."
+                if valid_methods:
+                    target_label = "domicilio" if new_ftype == "delivery" else "el local"
+                    msg += f" Para {target_label} aceptamos: {', '.join(valid_methods)}."
+                if accepted_elsewhere:
+                    elsewhere_label = "el local" if new_ftype == "delivery" else "domicilio"
+                    msg += (
+                        f" {candidate_pm} solo está disponible en {elsewhere_label} —"
+                        f" pregunta al cliente si prefiere otro método."
+                    )
+                return msg
+            existing["payment_method"] = candidate_pm
+        elif candidate_pm:
+            # No per-method config → accept verbatim (legacy permissive).
+            existing["payment_method"] = candidate_pm
 
         # Order-level notes: empty string leaves the saved value
         # untouched, a single space clears it (escape hatch), any other

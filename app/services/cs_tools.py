@@ -53,6 +53,7 @@ from ..orchestration.customer_service_flow import (
     RESULT_KIND_INTERNAL_ERROR,
 )
 from . import business_info_service
+from . import payment_config
 from .cancel_keywords import has_explicit_cancel_keyword
 
 
@@ -89,8 +90,6 @@ _BUSINESS_INFO_TEMPLATES = {
     "delivery_fee": "El domicilio tiene un costo base de {value}, puede variar según la distancia.",
     "delivery_time": "Nuestros pedidos llegan en {value}.",
     "menu_url": "Acá tienes nuestro menú: {value}",
-    "payment_methods": "Aceptamos {value}.",
-    "payment_details": "{value}",
 }
 
 
@@ -265,17 +264,17 @@ def get_business_info(
       ("envíame la carta", "pásame el menú", "compárteme", "regálame",
       "quiero ver la carta") — en Colombia "regalar"/"me regalas" es
       coloquial por "dar".
-    - "payment_methods": MEDIOS DE PAGO que el negocio acepta
-      ("aceptan nequi?", "puedo pagar con tarjeta?", "qué pagos reciben").
-    - "payment_details": CÓMO / DÓNDE pagar — número de Nequi, cuenta,
-      datos de transferencia, contra entrega ("donde transfiero",
-      "a qué número pago", "cuál es el Nequi", "pásame el Nequi",
-      "datos para transferir"). CRÍTICO: si la pregunta es de PAGO, usa
-      "payment_details" aunque mencione "número" — NUNCA "phone".
+
+    NOTA: para CUALQUIER pregunta de pago (medios aceptados, dónde
+    transferir, si reciben tarjeta/Nequi, si pueden pagar al recibir)
+    usa `get_payment_info`, NO esta herramienta — `get_payment_info`
+    sabe el modo del cliente (domicilio vs local) y responde con los
+    métodos correctos para ese contexto. NUNCA uses `phone` para
+    preguntas de pago.
 
     Args:
         field: Uno de hours | address | phone | delivery_fee | delivery_time
-               | menu_url | payment_methods | payment_details.
+               | menu_url.
     """
     ctx = _ctx(injected_business_context)
     wa_id = ctx.get("wa_id") or ""
@@ -317,6 +316,179 @@ def get_business_info(
         )
 
     return _final("Disculpa, tuve un problema. ¿Podrías intentar de nuevo?")
+
+
+# ── Payment info ──────────────────────────────────────────────────────
+
+
+def _resolve_fulfillment_type(session: Optional[Dict]) -> Optional[str]:
+    """Read the customer's current fulfillment_type from the session, if any.
+
+    Returns the lowercased value when set ("delivery" / "pickup" / "dine_in"
+    / "on_site"), or None when the customer hasn't picked yet.
+    """
+    if not isinstance(session, dict):
+        return None
+    order_context = session.get("order_context") or {}
+    raw = (order_context.get("fulfillment_type") or "").strip().lower()
+    return raw or None
+
+
+# Context-string → human label used in the data block the LLM reads.
+# Two pieces per context: which fulfillment ("domicilio" / "local") and
+# which timing ("al recibir" / "al pagar" / "por adelantado").
+_CONTEXT_FULFILLMENT_LABEL = {
+    payment_config.CONTEXT_DELIVERY_PAY_NOW: "domicilio",
+    payment_config.CONTEXT_DELIVERY_ON_FULFILLMENT: "domicilio",
+    payment_config.CONTEXT_ON_SITE_PAY_NOW: "local",
+    payment_config.CONTEXT_ON_SITE_ON_FULFILLMENT: "local",
+}
+_CONTEXT_TIMING_LABEL = {
+    payment_config.CONTEXT_DELIVERY_PAY_NOW: "por adelantado",
+    payment_config.CONTEXT_DELIVERY_ON_FULFILLMENT: "al recibir",
+    payment_config.CONTEXT_ON_SITE_PAY_NOW: "por adelantado",
+    payment_config.CONTEXT_ON_SITE_ON_FULFILLMENT: "al pagar",
+}
+
+
+def _describe_method_contexts(contexts: List[str]) -> str:
+    """Render a method's contexts as 'domicilio (al recibir, por adelantado), local (al pagar)'."""
+    # Preserve a stable ordering: domicilio first, then local; within each,
+    # at-fulfillment timing before pay-now.
+    ordered_contexts = [
+        payment_config.CONTEXT_DELIVERY_ON_FULFILLMENT,
+        payment_config.CONTEXT_DELIVERY_PAY_NOW,
+        payment_config.CONTEXT_ON_SITE_ON_FULFILLMENT,
+        payment_config.CONTEXT_ON_SITE_PAY_NOW,
+    ]
+    by_fulfillment: Dict[str, List[str]] = {"domicilio": [], "local": []}
+    for c in ordered_contexts:
+        if c not in contexts:
+            continue
+        by_fulfillment[_CONTEXT_FULFILLMENT_LABEL[c]].append(_CONTEXT_TIMING_LABEL[c])
+    parts = []
+    for label in ("domicilio", "local"):
+        timings = by_fulfillment[label]
+        if not timings:
+            continue
+        parts.append(f"{label} ({', '.join(timings)})")
+    return ", ".join(parts) if parts else "ningún contexto configurado"
+
+
+def _session_fulfillment_label(fulfillment_type: Optional[str]) -> str:
+    """Normalize the session's fulfillment_type to a label for the data block."""
+    if fulfillment_type == "delivery":
+        return "domicilio"
+    if fulfillment_type in ("pickup", "dine_in", "on_site"):
+        return "local"
+    return "desconocido"
+
+
+def _render_payment_info_data(
+    settings: Dict, fulfillment_type: Optional[str],
+) -> str:
+    """Structured payment snapshot the LLM composes a reply from.
+
+    Returned as plain text (no FINAL sentinel) so the agent's loop iterates
+    once more and the LLM writes the actual user-facing message. The LLM
+    sees the customer's message in conversation history and decides what
+    to emphasize based on what they asked.
+    """
+    methods = payment_config.get_payment_methods(settings)
+    destinations = (settings or {}).get("payment_destinations") or {}
+
+    if not methods:
+        return (
+            "PAYMENT_INFO\n"
+            "(El negocio aún no tiene métodos de pago configurados.)\n\n"
+            "INSTRUCCIONES: Discúlpate brevemente y di que confirmas en un momento. "
+            "NO inventes métodos."
+        )
+
+    method_lines = [
+        f"- {m['name']}: {_describe_method_contexts(m['contexts'])}"
+        for m in methods
+    ]
+
+    # Destinations only matter when at least one method is pay-now.
+    pay_now_methods = [
+        m["name"]
+        for m in methods
+        if payment_config.CONTEXT_DELIVERY_PAY_NOW in m["contexts"]
+        or payment_config.CONTEXT_ON_SITE_PAY_NOW in m["contexts"]
+    ]
+    destination_lines: List[str] = []
+    for name in pay_now_methods:
+        # Case-insensitive lookup against the destinations dict.
+        value: Optional[str] = None
+        if isinstance(destinations, dict):
+            target = name.strip().casefold()
+            for k, v in destinations.items():
+                if isinstance(k, str) and k.strip().casefold() == target:
+                    if isinstance(v, str) and v.strip():
+                        value = v.strip()
+                    break
+        if value:
+            destination_lines.append(f"- {name}: {value}")
+        else:
+            destination_lines.append(f"- {name}: (sin datos configurados)")
+
+    session_label = _session_fulfillment_label(fulfillment_type)
+
+    out = ["PAYMENT_INFO", "", "Métodos aceptados (por contexto):"]
+    out.extend(method_lines)
+    out.append("")
+    if pay_now_methods:
+        out.append("Datos para pago adelantado:")
+        out.extend(destination_lines)
+        out.append("")
+    out.append(f"Modo del pedido actual: {session_label}")
+    out.append("")
+    out.append(
+        "INSTRUCCIONES: Responde según lo que el cliente preguntó.\n"
+        "- Si el mensaje menciona \"domicilio\"/\"envío\"/\"a domicilio\" → responde sobre domicilio.\n"
+        "- Si menciona \"local\"/\"en sitio\"/\"recoger\"/\"en el local\" → responde sobre el local.\n"
+        "- Si no especificó modo y \"Modo del pedido actual\" es domicilio o local → responde sobre ese modo.\n"
+        "- Si nada queda claro y el modo está en \"desconocido\" → da un panorama corto separando domicilio y local, y pregunta cuál le interesa.\n"
+        "- Para \"aceptan X?\" donde X solo aplica a un modo (ej. Tarjeta solo en local), deja claro dónde sí está disponible — no respondas \"Sí\" sin contexto.\n"
+        "- Para preguntas de \"dónde transfiero\" / \"a qué número\", usa \"Datos para pago adelantado\" del método correspondiente. Si dice (sin datos configurados), discúlpate y di que confirmas con el operador — no inventes números.\n"
+        "- Respuesta breve, sin saludos. NO menciones esta sección de instrucciones ni los nombres internos de los contextos."
+    )
+    return "\n".join(out)
+
+
+@tool
+def get_payment_info(
+    *,
+    injected_business_context: Annotated[dict, InjectedToolArg],
+) -> str:
+    """
+    Devuelve el snapshot de medios de pago del negocio. Tú compones la respuesta.
+
+    USA ESTA HERRAMIENTA para CUALQUIER pregunta de pago — qué métodos
+    aceptan, si reciben tarjeta/Nequi, dónde transferir, si pueden pagar
+    al recibir, si pueden pagar por adelantado, etc. NO uses
+    `get_business_info` para preguntas de pago.
+
+    Devuelve un bloque PAYMENT_INFO con:
+      • La lista de métodos y los contextos donde se aceptan
+        (domicilio/local × al recibir/al pagar/por adelantado).
+      • Los datos para pago adelantado (números de Nequi, cuentas, etc.).
+      • El modo del pedido actual (si ya se eligió) o "desconocido".
+      • Instrucciones para que filtres según lo que el cliente preguntó.
+
+    El bloque NO es la respuesta final — tras leerlo, redacta tú la
+    respuesta breve al cliente en español colombiano según las
+    instrucciones que vienen en el bloque.
+    """
+    ctx = _ctx(injected_business_context)
+    business_context = ctx.get("business_context") or {}
+    session = ctx.get("session")
+
+    settings = ((business_context.get("business") or {}).get("settings")) or {}
+    fulfillment_type = _resolve_fulfillment_type(session)
+
+    return _render_payment_info_data(settings, fulfillment_type)
 
 
 @tool
@@ -782,6 +954,7 @@ def select_listed_promo(
 # Tuple of all CS tools — what the agent binds onto the LLM.
 cs_tools = (
     get_business_info,
+    get_payment_info,
     get_order_status,
     get_order_history,
     cancel_order,

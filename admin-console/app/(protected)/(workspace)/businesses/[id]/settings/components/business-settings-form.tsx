@@ -6,6 +6,7 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -14,6 +15,12 @@ import { Switch } from "@/components/ui/switch"
 import { Plus, X, Save, MapPin, CreditCard, MessageSquare, Package } from "lucide-react"
 import { toast } from "sonner"
 import { updateBusinessSettings, BusinessSettings } from "@/lib/actions/business-settings"
+import { PAYMENT_CONTEXTS, type PaymentContext } from "@/lib/payment-config"
+
+const paymentMethodSchema = z.object({
+  name: z.string(),
+  contexts: z.array(z.enum(PAYMENT_CONTEXTS)),
+})
 
 const businessSettingsSchema = z.object({
   name: z.string().min(1, "El nombre del negocio es requerido"),
@@ -25,7 +32,8 @@ const businessSettingsSchema = z.object({
   country: z.string().min(1, "El país es requerido"),
   timezone: z.string().min(1, "La zona horaria es requerida"),
   language: z.string().min(1, "El idioma es requerido"),
-  payment_methods: z.array(z.string()),
+  payment_methods: z.array(paymentMethodSchema),
+  payment_destinations: z.record(z.string(), z.string()),
   payment_link: z
     .string()
     .refine(
@@ -83,13 +91,40 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
   // Helper functions for dynamic arrays
   const addPaymentMethod = () => {
     const currentMethods = form.getValues("payment_methods")
-    form.setValue("payment_methods", [...currentMethods, ""])
+    // New methods default to "accepted at fulfillment time" for both
+    // delivery and on-site — the most common case (cash/card-like).
+    form.setValue("payment_methods", [
+      ...currentMethods,
+      {
+        name: "",
+        contexts: ["delivery_on_fulfillment", "on_site_on_fulfillment"],
+      },
+    ])
   }
 
   const removePaymentMethod = (index: number) => {
     const currentMethods = form.getValues("payment_methods")
-    form.setValue("payment_methods", currentMethods.filter((_, i) => i !== index))
+    form.setValue(
+      "payment_methods",
+      currentMethods.filter((_, i) => i !== index),
+    )
   }
+
+  const togglePaymentContext = (methodIndex: number, context: PaymentContext) => {
+    const current = form.getValues("payment_methods")
+    const method = current[methodIndex]
+    if (!method) return
+    const has = method.contexts.includes(context)
+    const newContexts = has
+      ? method.contexts.filter((c) => c !== context)
+      : [...method.contexts, context]
+    form.setValue(`payment_methods.${methodIndex}.contexts`, newContexts, {
+      shouldDirty: true,
+    })
+  }
+
+  const hasPayNowContext = (contexts: PaymentContext[]) =>
+    contexts.includes("delivery_pay_now") || contexts.includes("on_site_pay_now")
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
@@ -307,7 +342,9 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
             Métodos de pago
           </CardTitle>
           <CardDescription>
-            Lista los métodos de pago que aceptas
+            Para cada método, marca dónde y cuándo el cliente puede usarlo.
+            El asistente solo ofrecerá la opción que coincida con el modo
+            del pedido (domicilio o en el local).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -327,22 +364,124 @@ export function BusinessSettingsForm({ business, initialSettings, readOnly = fal
                 <p className="text-sm text-red-500">{form.formState.errors.payment_link.message}</p>
               )}
             </div>
-            {form.watch("payment_methods").map((method, index) => (
-              <div key={index} className="flex gap-4 items-center">
-                <Input
-                  {...form.register(`payment_methods.${index}`)}
-                  placeholder="ej., Efectivo, Tarjeta, Nequi"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => removePaymentMethod(index)}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
+            {form.watch("payment_methods").map((method, index) => {
+              const showDestination = hasPayNowContext(method.contexts)
+              const trimmedName = method.name?.trim() ?? ""
+              return (
+                <div key={index} className="space-y-3 rounded-lg border p-3">
+                  <div className="flex gap-2 items-center">
+                    <Input
+                      {...form.register(`payment_methods.${index}.name`)}
+                      placeholder="ej., Efectivo, Tarjeta, Nequi, Transferencia, Llave BreB"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      onClick={() => removePaymentMethod(index)}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        Domicilio
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id={`pm-${index}-delivery-on-fulfillment`}
+                          checked={method.contexts.includes("delivery_on_fulfillment")}
+                          onCheckedChange={() =>
+                            togglePaymentContext(index, "delivery_on_fulfillment")
+                          }
+                          disabled={readOnly}
+                        />
+                        <Label
+                          htmlFor={`pm-${index}-delivery-on-fulfillment`}
+                          className="font-normal cursor-pointer"
+                        >
+                          Al recibir el pedido
+                        </Label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id={`pm-${index}-delivery-pay-now`}
+                          checked={method.contexts.includes("delivery_pay_now")}
+                          onCheckedChange={() =>
+                            togglePaymentContext(index, "delivery_pay_now")
+                          }
+                          disabled={readOnly}
+                        />
+                        <Label
+                          htmlFor={`pm-${index}-delivery-pay-now`}
+                          className="font-normal cursor-pointer"
+                        >
+                          Por adelantado (transferencia / Nequi)
+                        </Label>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase text-muted-foreground">
+                        En el local
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id={`pm-${index}-on-site-on-fulfillment`}
+                          checked={method.contexts.includes("on_site_on_fulfillment")}
+                          onCheckedChange={() =>
+                            togglePaymentContext(index, "on_site_on_fulfillment")
+                          }
+                          disabled={readOnly}
+                        />
+                        <Label
+                          htmlFor={`pm-${index}-on-site-on-fulfillment`}
+                          className="font-normal cursor-pointer"
+                        >
+                          Al pagar en el local
+                        </Label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id={`pm-${index}-on-site-pay-now`}
+                          checked={method.contexts.includes("on_site_pay_now")}
+                          onCheckedChange={() =>
+                            togglePaymentContext(index, "on_site_pay_now")
+                          }
+                          disabled={readOnly}
+                        />
+                        <Label
+                          htmlFor={`pm-${index}-on-site-pay-now`}
+                          className="font-normal cursor-pointer"
+                        >
+                          Por adelantado (transferencia / Nequi)
+                        </Label>
+                      </div>
+                    </div>
+                  </div>
+                  {showDestination && trimmedName && (
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">
+                        Datos para que el cliente te pague {trimmedName} por adelantado
+                      </Label>
+                      <Input
+                        value={
+                          form.watch(`payment_destinations.${trimmedName}`) ?? ""
+                        }
+                        onChange={(e) =>
+                          form.setValue(
+                            `payment_destinations.${trimmedName}`,
+                            e.target.value,
+                            { shouldDirty: true },
+                          )
+                        }
+                        placeholder="ej., 300 123 4567 (a nombre de ...)"
+                      />
+                    </div>
+                  )}
+                </div>
+              )
+            })}
             <Button type="button" variant="outline" onClick={addPaymentMethod}>
               <Plus className="mr-2 h-4 w-4" />
               Agregar método de pago

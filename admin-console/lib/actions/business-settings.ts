@@ -4,6 +4,11 @@ import { prisma } from "@/lib/prisma"
 import { auth } from "@/lib/auth"
 import { canAccessBusiness, canEditBusiness } from "@/lib/permissions"
 import { revalidatePath } from "next/cache"
+import {
+  PAYMENT_CONTEXTS,
+  type PaymentContext,
+  type PaymentMethodConfig,
+} from "@/lib/payment-config"
 
 // Type for the settings JSON stored in the database
 type BusinessSettingsData = {
@@ -14,7 +19,13 @@ type BusinessSettingsData = {
   country?: string
   timezone?: string
   language?: string
-  payment_methods?: string[]
+  /** Per-method context configuration. Each method lists the contexts
+   * (fulfillment × timing combinations) in which it can be accepted. */
+  payment_methods?: PaymentMethodConfig[]
+  /** Destination details per method (Nequi number, account, BreB key).
+   * Keyed by the method name. Only required for methods configured with
+   * a pay_now context. */
+  payment_destinations?: Record<string, string>
   /** Enlace de pago (Stripe, Mercado Pago, etc.) para el agente de ventas */
   payment_link?: string
   ai_prompt?: string
@@ -36,9 +47,10 @@ export type BusinessSettings = {
   country: string
   timezone: string
   language: string
-  
+
   // Payment Methods
-  payment_methods: string[]
+  payment_methods: PaymentMethodConfig[]
+  payment_destinations: Record<string, string>
   payment_link: string
 
   // AI Prompt
@@ -55,6 +67,35 @@ export type BusinessSettings = {
 
   /** "" = primer agente por prioridad; ej. "sales" para tiendas */
   conversation_primary_agent: string
+}
+
+function normalizePaymentMethods(raw: unknown): PaymentMethodConfig[] {
+  if (!Array.isArray(raw)) return []
+  const out: PaymentMethodConfig[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue
+    const rec = entry as Record<string, unknown>
+    const name = typeof rec.name === "string" ? rec.name.trim() : ""
+    const ctxs = Array.isArray(rec.contexts) ? rec.contexts : []
+    if (!name) continue
+    const contexts = ctxs.filter(
+      (c): c is PaymentContext =>
+        typeof c === "string" && (PAYMENT_CONTEXTS as readonly string[]).includes(c)
+    )
+    out.push({ name, contexts })
+  }
+  return out
+}
+
+function normalizePaymentDestinations(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k === "string" && typeof v === "string") {
+      out[k] = v
+    }
+  }
+  return out
 }
 
 export async function getBusinessSettings(businessId: string): Promise<BusinessSettings | null> {
@@ -89,7 +130,8 @@ export async function getBusinessSettings(businessId: string): Promise<BusinessS
       country: settings?.country || "",
       timezone: settings?.timezone || "America/Bogota",
       language: settings?.language || "es-CO",
-      payment_methods: settings?.payment_methods || [],
+      payment_methods: normalizePaymentMethods(settings?.payment_methods),
+      payment_destinations: normalizePaymentDestinations(settings?.payment_destinations),
       payment_link: settings?.payment_link ?? "",
       ai_prompt: settings?.ai_prompt || "",
       products_enabled: settings?.products_enabled ?? true,
@@ -135,11 +177,11 @@ export async function updateBusinessSettings(
       settings?: BusinessSettingsData
       updated_at?: Date
     } = {}
-    
+
     if (settings.name !== undefined) {
       updateData.name = settings.name
     }
-    
+
     if (settings.business_type !== undefined) {
       updateData.business_type = settings.business_type
     }
@@ -154,7 +196,12 @@ export async function updateBusinessSettings(
       ...(settings.country !== undefined && { country: settings.country }),
       ...(settings.timezone !== undefined && { timezone: settings.timezone }),
       ...(settings.language !== undefined && { language: settings.language }),
-      ...(settings.payment_methods !== undefined && { payment_methods: settings.payment_methods }),
+      ...(settings.payment_methods !== undefined && {
+        payment_methods: normalizePaymentMethods(settings.payment_methods),
+      }),
+      ...(settings.payment_destinations !== undefined && {
+        payment_destinations: normalizePaymentDestinations(settings.payment_destinations),
+      }),
       ...(settings.payment_link !== undefined && { payment_link: settings.payment_link }),
       ...(settings.ai_prompt !== undefined && { ai_prompt: settings.ai_prompt }),
       ...(settings.products_enabled !== undefined && { products_enabled: settings.products_enabled }),
@@ -174,7 +221,7 @@ export async function updateBusinessSettings(
     })
 
     revalidatePath(`/businesses/${businessId}/settings`)
-    
+
     return { success: true }
   } catch (error) {
     console.error("Error updating business settings:", error)

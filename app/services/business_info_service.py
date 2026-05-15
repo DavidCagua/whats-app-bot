@@ -588,8 +588,6 @@ FIELD_PHONE = "phone"
 FIELD_DELIVERY_FEE = "delivery_fee"
 FIELD_DELIVERY_TIME = "delivery_time"
 FIELD_MENU_URL = "menu_url"
-FIELD_PAYMENT_METHODS = "payment_methods"
-FIELD_PAYMENT_DETAILS = "payment_details"
 
 ALL_FIELDS = (
     FIELD_HOURS,
@@ -598,8 +596,6 @@ ALL_FIELDS = (
     FIELD_DELIVERY_FEE,
     FIELD_DELIVERY_TIME,
     FIELD_MENU_URL,
-    FIELD_PAYMENT_METHODS,
-    FIELD_PAYMENT_DETAILS,
 )
 
 
@@ -618,22 +614,6 @@ def _format_cop(value: Any) -> str:
     except (TypeError, ValueError):
         return ""
     return f"${n:,}".replace(",", ".")
-
-
-def _format_list(value: Any) -> str:
-    """Format a list of strings as a human Spanish list."""
-    if not value:
-        return ""
-    if isinstance(value, str):
-        return value
-    items = [str(v).strip() for v in value if str(v).strip()]
-    if not items:
-        return ""
-    if len(items) == 1:
-        return items[0]
-    if len(items) == 2:
-        return f"{items[0]} y {items[1]}"
-    return ", ".join(items[:-1]) + f" y {items[-1]}"
 
 
 def _plain(value: Any) -> str:
@@ -679,27 +659,9 @@ _FIELD_MAP: Dict[str, Dict[str, Any]] = {
         "keys": ("menu_url",),
         "format": _plain,
     },
-    FIELD_PAYMENT_METHODS: {
-        "keys": ("payment_methods",),
-        "format": _format_list,
-    },
-    FIELD_PAYMENT_DETAILS: {
-        # Free-text instruction for HOW/WHERE the customer pays — Nequi
-        # number, account, or "contra entrega al domiciliario". Distinct
-        # from `payment_methods` (the list of accepted methods) and from
-        # `phone` (the business's general contact number, which the LLM
-        # used to grab for payment-account questions). Production
-        # 2026-05-06 (Biela): customer asked "A qué número se realiza el
-        # pago?" and got the contact phone — operator's manual reply was
-        # "El pago es directo con el domiciliario".
-        # Default: contra-entrega is the standard for small Colombian
-        # delivery restaurants, so when the operator hasn't configured
-        # a Nequi/account the safest answer is the contra-entrega
-        # message — never the business contact phone.
-        "keys": ("payment_details",),
-        "format": _plain,
-        "default": "El pago es contra entrega, directo con el domiciliario.",
-    },
+    # Payment fields live in payment_config / get_payment_info — they
+    # depend on the customer's fulfillment context and can't be
+    # surfaced as flat per-field strings.
 }
 
 

@@ -108,54 +108,6 @@ class TestGetBusinessInfo:
         result = bis.get_business_info(_ctx({"menu_url": "https://x.test"}), "menu_url")
         assert result == "https://x.test"
 
-    def test_payment_methods_list_of_three(self):
-        result = bis.get_business_info(
-            _ctx({"payment_methods": ["efectivo", "nequi", "tarjeta"]}), "payment_methods",
-        )
-        assert result == "efectivo, nequi y tarjeta"
-
-    def test_payment_methods_list_of_two(self):
-        result = bis.get_business_info(
-            _ctx({"payment_methods": ["nequi", "efectivo"]}), "payment_methods",
-        )
-        assert result == "nequi y efectivo"
-
-    def test_payment_methods_single(self):
-        result = bis.get_business_info(
-            _ctx({"payment_methods": ["nequi"]}), "payment_methods",
-        )
-        assert result == "nequi"
-
-    def test_payment_methods_string_pass_through(self):
-        result = bis.get_business_info(
-            _ctx({"payment_methods": "Nequi o efectivo"}), "payment_methods",
-        )
-        assert result == "Nequi o efectivo"
-
-    def test_payment_details_returns_configured_value(self):
-        result = bis.get_business_info(
-            _ctx({"payment_details": "El pago es directo con el domiciliario, contra entrega."}),
-            "payment_details",
-        )
-        assert result == "El pago es directo con el domiciliario, contra entrega."
-
-    def test_payment_details_falls_back_to_contra_entrega_default(self):
-        # Operators don't always configure this. The safe default is the
-        # contra-entrega text — never the business contact phone, which
-        # is what the CS agent used to return when misclassifying these
-        # questions as `phone` (Biela 2026-05-06 incident).
-        assert bis.get_business_info(_ctx({}), "payment_details") == (
-            "El pago es contra entrega, directo con el domiciliario."
-        )
-
-    def test_payment_details_falls_back_when_explicitly_none(self):
-        assert bis.get_business_info(_ctx({"payment_details": None}), "payment_details") == (
-            "El pago es contra entrega, directo con el domiciliario."
-        )
-        assert bis.get_business_info(_ctx({"payment_details": ""}), "payment_details") == (
-            "El pago es contra entrega, directo con el domiciliario."
-        )
-
     def test_unknown_field_returns_none(self):
         result = bis.get_business_info(_ctx({"hours_text": "x"}), "floor_plan")
         assert result is None
@@ -168,11 +120,12 @@ class TestGetBusinessInfo:
         assert bis.get_business_info(None, "hours") is None
 
     def test_supported_fields_matches_constants(self):
+        # Payment fields moved to payment_config / get_payment_info — they
+        # depend on fulfillment context and aren't returned via this path.
         assert set(bis.supported_fields()) == {
             bis.FIELD_HOURS, bis.FIELD_ADDRESS, bis.FIELD_PHONE,
             bis.FIELD_DELIVERY_FEE, bis.FIELD_DELIVERY_TIME,
-            bis.FIELD_MENU_URL, bis.FIELD_PAYMENT_METHODS,
-            bis.FIELD_PAYMENT_DETAILS,
+            bis.FIELD_MENU_URL,
         }
 
 

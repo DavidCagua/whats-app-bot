@@ -518,6 +518,194 @@ class TestSubmitDeliveryInfo:
 
 
 # ---------------------------------------------------------------------------
+# submit_delivery_info — payment_method × fulfillment_type validation
+# ---------------------------------------------------------------------------
+
+
+_BIELA_PAYMENT_SETTINGS = {
+    "payment_methods": [
+        {"name": "Efectivo", "contexts": ["delivery_on_fulfillment", "on_site_on_fulfillment"]},
+        {"name": "Tarjeta", "contexts": ["on_site_on_fulfillment"]},
+        {
+            "name": "Nequi",
+            "contexts": [
+                "delivery_pay_now", "delivery_on_fulfillment",
+                "on_site_pay_now", "on_site_on_fulfillment",
+            ],
+        },
+        {"name": "Transferencia", "contexts": ["delivery_pay_now", "on_site_pay_now"]},
+        {"name": "Llave BreB", "contexts": ["delivery_pay_now", "on_site_pay_now"]},
+    ],
+}
+
+
+def _ctx_with_payments(fulfillment_type=None, settings=None):
+    """Build an injected_business_context with the new payment_methods shape."""
+    s = settings if settings is not None else _BIELA_PAYMENT_SETTINGS
+    ctx = {
+        "business_id": FAKE_BUSINESS_ID,
+        "wa_id": FAKE_WA_ID,
+        "business": {"name": "Biela", "settings": s},
+    }
+    return ctx
+
+
+class TestSubmitDeliveryInfoPaymentValidation:
+    """Reject payment_method × fulfillment_type combinations that can't fulfill.
+
+    Phase-1 enforcement: when the business has a per-method config and the
+    customer names a method that's not valid for the current
+    fulfillment_type, the tool returns an error message listing valid
+    alternatives instead of persisting bad data.
+    """
+
+    def _setup_session(self, fake_session, fulfillment_type="delivery"):
+        fake_session._store[(FAKE_WA_ID, FAKE_BUSINESS_ID)] = {
+            "active_agents": [],
+            "order_context": {
+                "items": [{"product_id": "p1", "name": "X", "price": 1, "quantity": 1}],
+                "fulfillment_type": fulfillment_type,
+            },
+            "booking_context": {},
+            "agent_contexts": {},
+            "last_order_id": None,
+            "last_booking_id": None,
+        }
+
+    def test_tarjeta_plus_delivery_rejected_with_alternatives(self, fake_session):
+        self._setup_session(fake_session, fulfillment_type="delivery")
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _ctx_with_payments(),
+                "name": "Vanessa",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Tarjeta",
+            })
+        assert result.startswith("❌")
+        assert "Tarjeta" in result
+        assert "domicilio" in result.lower()
+        # Lists valid alternatives for delivery.
+        assert "Efectivo" in result or "Nequi" in result
+        # Mentions where Tarjeta IS accepted.
+        assert "local" in result.lower()
+
+    def test_tarjeta_plus_pickup_accepted(self, fake_session):
+        self._setup_session(fake_session, fulfillment_type="pickup")
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _ctx_with_payments(),
+                "name": "Vanessa",
+                "payment_method": "Tarjeta",
+            })
+        # Pickup with Tarjeta is valid → no rejection.
+        assert not result.startswith("❌ Tarjeta")
+
+    def test_nequi_plus_delivery_accepted(self, fake_session):
+        self._setup_session(fake_session, fulfillment_type="delivery")
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _ctx_with_payments(),
+                "name": "Vanessa",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Nequi",
+            })
+        assert not result.startswith("❌ Nequi")
+
+    def test_efectivo_plus_delivery_accepted(self, fake_session):
+        self._setup_session(fake_session, fulfillment_type="delivery")
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _ctx_with_payments(),
+                "name": "Vanessa",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Efectivo",
+            })
+        assert not result.startswith("❌ Efectivo")
+
+    def test_no_payment_config_skips_validation(self, fake_session):
+        """When the business has no per-method config, accept anything verbatim."""
+        self._setup_session(fake_session, fulfillment_type="delivery")
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+        empty_ctx = _ctx_with_payments(settings={})
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+            result = submit_delivery_info.invoke({
+                "injected_business_context": empty_ctx,
+                "name": "Vanessa",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Tarjeta",  # would be rejected with config
+            })
+        # No enforcement → no rejection.
+        assert not result.startswith("❌")
+
+    def test_unknown_method_with_config_rejected(self, fake_session):
+        """Method not in the business's config is rejected with alternatives."""
+        self._setup_session(fake_session, fulfillment_type="delivery")
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _ctx_with_payments(),
+                "name": "Vanessa",
+                "address": "calle 18",
+                "phone": "3177000722",
+                "payment_method": "Bitcoin",
+            })
+        assert result.startswith("❌")
+        assert "Bitcoin" in result
+        assert "domicilio" in result.lower()
+
+    def test_explicit_pickup_switch_revalidates(self, fake_session):
+        """When the same call switches to pickup, validate against the NEW ftype."""
+        self._setup_session(fake_session, fulfillment_type="delivery")
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import submit_delivery_info
+            # Switching to pickup AND paying with Tarjeta in the same call:
+            # should be accepted because the new ftype permits Tarjeta.
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _ctx_with_payments(),
+                "name": "Vanessa",
+                "fulfillment_type": "pickup",
+                "payment_method": "Tarjeta",
+            })
+        assert not result.startswith("❌ Tarjeta")
+
+
+# ---------------------------------------------------------------------------
 # Availability helpers (_product_availability / _search_listing_marker /
 # _detail_availability_note / _format_unavailable_for_cart)
 # ---------------------------------------------------------------------------
