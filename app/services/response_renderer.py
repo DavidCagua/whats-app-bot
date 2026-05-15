@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain_openai import ChatOpenAI
@@ -121,6 +122,74 @@ def _get_renderer_llm() -> ChatOpenAI:
 CART_BREAKDOWN_KINDS = frozenset({
     "items_added", "items_removed", "cart_updated", "cart_view",
 })
+
+# Kinds where the agent's prompt may close with "¿Quieres pedirla?" — fine
+# when the cart is empty, wrong when the customer is asking a follow-up
+# about an item already in their pedido. Post-processed below.
+INFO_KINDS_WITH_UPSELL_RISK = frozenset({"product_info", "menu_info"})
+
+# Matches the trailing "would you like to order it?" sentence variants the
+# order agent tends to emit (per its system prompt). Anchored to end-of-body
+# so we only strip the closing question, not info embedded mid-paragraph.
+_UPSELL_CLOSER_RE = re.compile(
+    r"\s*¿\s*(?:te\s+)?(?:gustar[íi]a|quieres|deseas|quisieras)\s+"
+    r"(?:pedir(?:la|lo|las|los)?|"
+    r"agregar(?:la|lo|las|los)?|"
+    r"a[ñn]adir(?:la|lo|las|los)?|"
+    r"ordenar(?:la|lo|las|los)?|"
+    r"incluir(?:la|lo|las|los)?|"
+    r"sumar(?:la|lo|las|los)?|"
+    r"que\s+(?:te\s+)?la\s+agregue|"
+    r"que\s+(?:te\s+)?lo\s+agregue)"
+    r"[^?\n]*\?\s*$",
+    re.IGNORECASE,
+)
+
+_ACTIVE_CART_CLOSER = "¿Te gustaría añadir algo más o procedemos con el pedido?"
+
+
+def _cart_has_items(business_context: Optional[Dict], wa_id: str) -> bool:
+    """True when the canonical session cart for this user has at least one item."""
+    if not business_context or not wa_id:
+        return False
+    business_id = (business_context or {}).get("business_id") or ""
+    if not business_id:
+        return False
+    try:
+        from ..database.session_state_service import session_state_service
+        state_result = session_state_service.load(wa_id, business_id) or {}
+        session = state_result.get("session") or {}
+        items = (session.get("order_context") or {}).get("items") or []
+        return bool(items)
+    except Exception as exc:
+        logging.warning("[RENDERER] cart-has-items check failed: %s", exc)
+        return False
+
+
+def _swap_upsell_for_active_cart_closer(body: str) -> str:
+    """Strip a trailing '¿Quieres pedirla?'-style closer and append the
+    standard active-cart closer instead.
+
+    Why: the order agent's prompt teaches it to close product_info answers
+    with '¿Quieres pedirla?' (correct when the customer is discovering a
+    product), but if the asked-about item is already in the cart that
+    phrasing is confusing — it implies the item isn't ordered yet. When
+    the cart has items, the right closer is the same one used after
+    add_to_cart turns: '¿Te gustaría añadir algo más o procedemos con el pedido?'.
+
+    Only swaps when an upsell-style closer is actually present — otherwise
+    the body is returned unchanged so we don't double up legitimate
+    follow-up questions like '¿Cuál prefieres?'.
+    """
+    cleaned, n = _UPSELL_CLOSER_RE.subn("", body)
+    if n == 0:
+        return body
+    cleaned = cleaned.rstrip()
+    if not cleaned:
+        return _ACTIVE_CART_CLOSER
+    if _ACTIVE_CART_CLOSER in cleaned:
+        return cleaned
+    return f"{cleaned}\n\n{_ACTIVE_CART_CLOSER}"
 
 
 def render_response(
@@ -210,6 +279,8 @@ def render_response(
         business_context=business_context,
         last_user_message=last_user_message,
     )
+    if kind in INFO_KINDS_WITH_UPSELL_RISK and _cart_has_items(business_context, wa_id):
+        body = _swap_upsell_for_active_cart_closer(body)
     return {
         "type": "text",
         "body": body,
