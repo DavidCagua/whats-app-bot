@@ -9,7 +9,7 @@ the same conversation.
 
 Both agents must read from this module. Numbers tuned for a small
 restaurant with in-house delivery; override per-business via settings
-when that becomes necessary
+when that becomes necessary.
 """
 
 from __future__ import annotations
