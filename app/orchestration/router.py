@@ -187,11 +187,10 @@ def _get_llm_classifier():
     try:
         from langchain_openai import ChatOpenAI
         _llm_classifier = ChatOpenAI(
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini-2026-03-17",
             temperature=0,
             # Small message, but segments list can have several items;
             # bump max_tokens a bit over single-domain output.
-            max_tokens=200,
             api_key=api_key,
         )
     except Exception as exc:
