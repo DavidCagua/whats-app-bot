@@ -78,14 +78,14 @@ def _stub_router_catalog_lookup_set():
 # (phrase, expected_first_segment_domain, why)
 # Curated to cover the discriminator cases that have caused real
 # production bugs — not exhaustive of every router decision.
+#
+# Note: ordering openers without a product ("para un domicilio",
+# "quiero pedir") now route to the greeting domain and produce a
+# direct_reply with the welcome CTA — the CTA already invites the
+# user to order and shows the menu, so there's no value in spinning
+# up the order agent to say the same thing. Those cases live in
+# LLM_GREETING_CASES below.
 ROUTING_CASES = [
-    # ─── Ordering openers (intent: start an order, not a question) ────
-    ("para un domicilio", DOMAIN_ORDER, "opener — no question, no product"),
-    ("un domicilio por favor", DOMAIN_ORDER, "opener phrasing"),
-    ("quiero pedir", DOMAIN_ORDER, "explicit ordering verb"),
-    ("para hacer un pedido", DOMAIN_ORDER, "opener phrasing"),
-    ("buenas, un domicilio por favor", DOMAIN_ORDER, "greeting + opener"),
-
     # ─── Delivery as a POLICY question (intent: ask price/info) ───────
     ("cuánto vale el domicilio", DOMAIN_CUSTOMER_SERVICE, "price question, no product"),
     ("cuánto cobran de domicilio", DOMAIN_CUSTOMER_SERVICE, "price question variant"),
@@ -145,29 +145,36 @@ def test_router_classifies_phrase_to_expected_domain(phrase, expected_domain, wh
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Compound-greeting cases.
+# LLM-classified greeting cases.
 #
-# Pure single-token greetings ("hola") hit the regex fast-path before
-# the LLM. Compound greetings ("hola buenas noches", "buenas qué más")
-# miss the regex on purpose — the LLM router classifies them as the
-# `greeting` domain and converts to `direct_reply`, matching the
-# fast-path's output shape so conversation_manager dispatches the same
-# welcome CTA. These cases assert that round-trip end-to-end.
+# Pure / compound greetings ("hola", "hola buenas noches", "buenas qué
+# más") hit the regex fast-path before the LLM — those are covered by
+# unit tests on is_pure_greeting in tests/unit/test_business_greeting.py.
+#
+# Ordering openers WITHOUT a product ("para un domicilio", "quiero
+# pedir") miss the regex but the LLM classifies them as the `greeting`
+# domain. Same effect: the router emits a `direct_reply` with the
+# welcome CTA, which already invites the user to order and shows the
+# menu — no point dispatching the order agent to repeat that.
+#
+# These cases exercise the LLM path of the greeting classification.
 # ───────────────────────────────────────────────────────────────────────
 
 
-COMPOUND_GREETING_CASES = [
-    ("hola buenas noches", "stacked greetings — common WhatsApp opener"),
-    ("buenas qué más", "Colombian greeting + colloquialism"),
-    ("hola qué tal", "greeting + small-talk filler"),
+LLM_GREETING_CASES = [
+    ("para un domicilio", "opener — no question, no product"),
+    ("un domicilio por favor", "opener phrasing"),
+    ("quiero pedir", "explicit ordering verb, no product"),
+    ("para hacer un pedido", "opener phrasing"),
+    ("buenas, un domicilio por favor", "greeting + opener"),
 ]
 
 
 @pytest.mark.parametrize(
     "phrase, why",
-    [pytest.param(p, w, id=p) for (p, w) in COMPOUND_GREETING_CASES],
+    [pytest.param(p, w, id=p) for (p, w) in LLM_GREETING_CASES],
 )
-def test_router_compound_greeting_returns_direct_reply(phrase, why):
+def test_router_classifies_ordering_opener_as_greeting(phrase, why):
     # Sanity: these MUST miss the regex so we're actually exercising
     # the LLM path. If a phrase here starts hitting the fast-path,
     # this assertion catches the regression and you can promote the

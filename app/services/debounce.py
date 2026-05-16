@@ -495,6 +495,25 @@ def _flush(phone: str, to_number: str, flask_app) -> None:
                 if text.strip():
                     texts.append(text.strip())
 
+            # Dedupe adjacent byte-identical texts before joining. A user
+            # who taps send twice (or whose client double-fires) produces
+            # two identical buffered entries; joining them with "\n" makes
+            # the planner read "X\nX" as two separate items and add 2× to
+            # cart. Strict equality only — case/whitespace differences are
+            # user signal we don't erase at the transport layer; semantic
+            # dedup is the planner's job.
+            deduped: list[str] = []
+            for t in texts:
+                if deduped and deduped[-1] == t:
+                    continue
+                deduped.append(t)
+            if len(deduped) < len(texts):
+                logging.info(
+                    "[DEBOUNCE] %s: collapsed %d duplicate adjacent message(s)",
+                    phone, len(texts) - len(deduped),
+                )
+            texts = deduped
+
             if texts:
                 try:
                     combined_body["entry"][0]["changes"][0]["value"][

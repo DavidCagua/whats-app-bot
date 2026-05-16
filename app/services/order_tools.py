@@ -1226,6 +1226,270 @@ def remove_from_cart(
         return f"❌ Error al quitar el producto de tu pedido: {str(e)}"
 
 
+@tool
+def set_cart_items(
+    items: List[Dict],
+    *,
+    injected_business_context: Annotated[dict, InjectedToolArg],
+) -> str:
+    """
+    Replace the cart's product lines so they exactly match `items`.
+
+    Use when the customer RESTATES the full order ("Es 1 al pastor y 1
+    Mexican burger", "el pedido es 1 X y 2 Y", "lo que quiero es...") or
+    CORRECTS with a complete target ("son 1 X y 1 Y, solo dos en total").
+    Use this INSTEAD OF add_to_cart / update_cart_item / remove_from_cart
+    when the customer is describing the *desired end state* of the cart
+    rather than incrementally adding or removing items.
+
+    Semantics — full-state replacement, scoped to the products NAMED by
+    the customer:
+    - Items in `items` AND already in the cart → quantity is SET to the
+      new value; existing notes are PRESERVED unless `notes` is given.
+    - Items in `items` and NOT in the cart → ADDED (resolves via product
+      catalog, same as add_to_cart).
+    - Items in the cart that are NOT in `items` → REMOVED. This is what
+      makes restatement work: "Es 1 X y 1 Y" with a cart of {X:2, Z:1}
+      becomes {X:1, Y:1} — the unmentioned Z is dropped.
+    - Promo lines on the cart are NEVER touched by this tool. Restatement
+      addresses products; promo bindings are a separate concern.
+
+    Refusals (atomic — nothing is mutated if any of these trip):
+    - Empty `items` → refuses. To clear the cart use remove_from_cart on
+      each product or ask the customer to cancel.
+    - Any item in `items` that resolves to a cart line that's already
+      split into MULTIPLE lines with different notes → refuses with the
+      variants surfaced, same as update_cart_item's policy.
+
+    Per-item errors (NOT_FOUND, ambiguous new product) follow the same
+    behavior as add_to_cart's batched path: applied items go through,
+    the failure is reported in the summary so the planner can re-plan.
+
+    Args:
+        items: Target cart product list. Each entry is a dict with:
+            - product_id (str, optional): UUID if known from cart context.
+            - product_name (str, optional): name or description, resolved
+              against the cart first, then the catalog.
+            - quantity (int, required): target quantity. Must be >= 1;
+              to remove a product use a different tool.
+            - notes (str, optional): special instructions. Omit to
+              preserve existing notes when the product is already in
+              the cart.
+            Exactly one of product_id / product_name must be set per item.
+
+    Returns: A summary line per applied operation plus the new subtotal.
+    """
+    logger.info(f"[ORDER_TOOL] set_cart_items items={items!r}")
+    try:
+        business_id, wa_id = _get_context(injected_business_context)
+        if not _products_enabled(injected_business_context):
+            return "❌ Los pedidos de productos no están habilitados en este momento."
+        if not business_id or not wa_id:
+            return "❌ No se pudo identificar la sesión. Intenta de nuevo."
+        if not items or not isinstance(items, list):
+            return (
+                "❌ set_cart_items requiere una lista de items con al menos uno. "
+                "Para vaciar el carrito, usa remove_from_cart sobre cada producto."
+            )
+
+        # Normalize input — drop entries missing both id and name, and
+        # coerce quantity to a positive int. Defer per-item validation
+        # so we report the FIRST bad entry's index for easy debugging.
+        normalized: List[Dict] = []
+        for idx, raw in enumerate(items):
+            if not isinstance(raw, dict):
+                return f"❌ set_cart_items item #{idx} no es un dict: {raw!r}"
+            pid = (raw.get("product_id") or "").strip()
+            pname = (raw.get("product_name") or "").strip()
+            if not pid and not pname:
+                return (
+                    f"❌ set_cart_items item #{idx} sin product_id ni "
+                    "product_name. Indica uno de los dos."
+                )
+            try:
+                qty = int(raw.get("quantity", 0) or 0)
+            except (TypeError, ValueError):
+                return f"❌ set_cart_items item #{idx} quantity no es entero: {raw.get('quantity')!r}"
+            if qty < 1:
+                return (
+                    f"❌ set_cart_items item #{idx} quantity={qty}. Debe ser >= 1. "
+                    "Para quitar un item, omítelo del target list — los items en "
+                    "el carrito que no estén en `items` se remueven automáticamente."
+                )
+            notes = (raw.get("notes") or "").strip()
+            normalized.append({
+                "product_id": pid,
+                "product_name": pname,
+                "quantity": qty,
+                "notes": notes,
+                "notes_provided": "notes" in raw,
+            })
+
+        cart = _cart_from_session(wa_id, business_id)
+        original_items: List[Dict] = list(cart.get("items") or [])
+
+        # Pre-flight: detect ambiguous resolutions against the cart
+        # BEFORE mutating anything. For each input item, find candidate
+        # lines in the cart that match by product_id or by name. If a
+        # single product has multiple cart lines with different notes
+        # AND the input doesn't pin down notes, refuse atomically.
+        def _cart_matches(item: Dict) -> List[Dict]:
+            pid = item["product_id"]
+            pname = item["product_name"]
+            if pid:
+                return [it for it in original_items if it.get("product_id") == pid]
+            if pname:
+                pn = pname.lower()
+                exact = [
+                    it for it in original_items
+                    if (it.get("name") or "").strip().lower() == pn
+                ]
+                if exact:
+                    return exact
+                return [
+                    it for it in original_items
+                    if pn in (it.get("name") or "").strip().lower()
+                ]
+            return []
+
+        for item in normalized:
+            matches = _cart_matches(item)
+            if len(matches) <= 1:
+                continue
+            # Multiple cart lines for the same product. Allow if the
+            # input explicitly carries notes that disambiguate.
+            if item["notes_provided"] and item["notes"]:
+                target_notes = item["notes"].lower()
+                pinned = [
+                    m for m in matches
+                    if (m.get("notes") or "").strip().lower() == target_notes
+                ]
+                if len(pinned) == 1:
+                    continue
+            variants = []
+            for m in matches:
+                n = (m.get("notes") or "").strip()
+                q = int(m.get("quantity", 0) or 0)
+                variants.append(f"{q}x con notas '{n}'" if n else f"{q}x sin notas")
+            label = (matches[0].get("name") or item["product_name"] or item["product_id"])
+            return (
+                f"❌ '{label}' tiene {len(matches)} líneas en el carrito "
+                f"({'; '.join(variants)}). set_cart_items necesita que el "
+                "target item incluya `notes` para indicar cuál línea ajustar. "
+                "Otra opción: usa update_cart_item / remove_from_cart sobre una "
+                "línea específica si solo necesitas tocar una."
+            )
+
+        # Resolve each input item against (a) cart lines (preferred) or
+        # (b) the catalog. Build the new items list in one pass.
+        applied_lines: List[Dict] = []
+        per_item_errors: List[str] = []
+        touched_cart_ids: set = set()
+
+        for item in normalized:
+            pid = item["product_id"]
+            pname = item["product_name"]
+            qty = item["quantity"]
+            cart_matches = _cart_matches(item)
+
+            target_cart_line: Optional[Dict] = None
+            if len(cart_matches) == 1:
+                target_cart_line = cart_matches[0]
+            elif len(cart_matches) > 1 and item["notes_provided"]:
+                target_notes = item["notes"].lower()
+                for m in cart_matches:
+                    if (m.get("notes") or "").strip().lower() == target_notes:
+                        target_cart_line = m
+                        break
+
+            if target_cart_line is not None:
+                # Existing line — set qty, preserve notes when caller didn't pass new ones.
+                touched_cart_ids.add(id(target_cart_line))
+                new_line = {
+                    "product_id": target_cart_line.get("product_id", ""),
+                    "name": target_cart_line.get("name", ""),
+                    "price": target_cart_line.get("price", 0),
+                    "quantity": qty,
+                }
+                if item["notes_provided"]:
+                    if item["notes"]:
+                        new_line["notes"] = item["notes"]
+                elif target_cart_line.get("notes"):
+                    new_line["notes"] = target_cart_line["notes"]
+                applied_lines.append(new_line)
+                continue
+
+            # Not in cart — resolve against catalog.
+            try:
+                if pid:
+                    product = product_order_service.get_product(
+                        product_id=pid, business_id=business_id,
+                        include_unavailable=True,
+                    )
+                else:
+                    product = product_order_service.get_product(
+                        product_name=pname, business_id=business_id,
+                        include_unavailable=True,
+                    )
+            except AmbiguousProductError:
+                # Let the executor see this — same as add_to_cart's contract.
+                raise
+
+            if not product:
+                per_item_errors.append(f"❌ '{pname or pid}' no se encontró en el menú.")
+                continue
+
+            if _product_availability(product) != "available":
+                tz_name = promotion_service.timezone_from_business_context(injected_business_context)
+                per_item_errors.append(_format_unavailable_for_cart(product, business_id, tz_name))
+                continue
+
+            new_line = {
+                "product_id": product["id"],
+                "name": product["name"],
+                "price": float(product.get("price", 0)),
+                "quantity": qty,
+            }
+            if item["notes_provided"] and item["notes"]:
+                new_line["notes"] = item["notes"]
+            else:
+                derived = str(product.get("_derived_notes") or "").strip()
+                if derived:
+                    new_line["notes"] = derived
+            applied_lines.append(new_line)
+
+        # Anything from the original cart we didn't touch is dropped —
+        # that's restatement semantics. Promos (if represented as a
+        # different shape in the cart) are not in `original_items`, so
+        # they're untouched by virtue of not appearing here.
+        new_items: List[Dict] = list(applied_lines)
+        # Preserve original items the caller didn't reference IF they
+        # match nothing in the input AT ALL. Wait — that's the opposite
+        # of restatement. Restatement says: unmentioned items are removed.
+        # So we leave new_items as-is.
+
+        total = sum(it.get("price", 0) * it.get("quantity", 0) for it in new_items)
+        _save_cart(wa_id, business_id, {"items": new_items, "total": total})
+
+        # Build a per-line summary the planner can echo if it wants.
+        applied_summary = "; ".join(
+            f"{it['quantity']}x {it['name']}" + (f" ({it['notes']})" if it.get("notes") else "")
+            for it in new_items
+        )
+        preview = promotion_service.preview_cart(business_id, new_items)
+        head = f"✅ Carrito actualizado: {applied_summary}." if applied_summary else "✅ Carrito vaciado."
+        tail = f" Subtotal: {_format_price(preview['subtotal'])}"
+        body = head + tail
+        if per_item_errors:
+            body += "\n" + "\n".join(per_item_errors)
+        return body
+    except AmbiguousProductError:
+        raise
+    except Exception as e:
+        logger.error(f"[ORDER_TOOL] set_cart_items error: {e}")
+        return f"❌ Error al actualizar el carrito: {str(e)}"
+
+
 NO_REGISTRADO = "NO_REGISTRADO"
 NO_REGISTRADA = "NO_REGISTRADA"
 
@@ -1952,6 +2216,7 @@ order_tools = [
     view_cart,
     update_cart_item,
     remove_from_cart,
+    set_cart_items,
     get_customer_info,
     submit_delivery_info,
     place_order,
@@ -1971,6 +2236,7 @@ MUTATING_TOOL_NAMES = frozenset({
     "add_promo_to_cart",
     "update_cart_item",
     "remove_from_cart",
+    "set_cart_items",
     "submit_delivery_info",
     "place_order",
 })

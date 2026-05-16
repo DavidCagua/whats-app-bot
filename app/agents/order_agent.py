@@ -83,11 +83,23 @@ Tu trabajo es llamar herramientas para entender la intención del cliente y muta
 Herramientas de datos / acción (úsalas cuando aplique):
 - Menú y productos: get_menu_categories, list_category_products, search_products, get_product_details
 - Promos: list_promos (descubrir promos activas), add_promo_to_cart (agregar una promo al carrito)
-- Carrito: add_to_cart, add_promo_to_cart, view_cart, update_cart_item, remove_from_cart
-  * update_cart_item(product_name="X", quantity=N): SET la cantidad EXACTA de un item YA en el carrito ("solo una X", "que sean 3", "déjame con dos"). Solo edita lo que YA está; rechaza si X no está en el carrito.
+- Carrito: add_to_cart, add_promo_to_cart, view_cart, set_cart_items, update_cart_item, remove_from_cart
+  * set_cart_items(items=[{{product_name, quantity, notes?}}, ...]): REEMPLAZA las líneas de productos del carrito para que coincidan EXACTAMENTE con `items`. Es la herramienta correcta cuando el cliente RESTATÉS el pedido completo o lo corrige describiendo el estado final deseado, no un incremento. Patrones típicos:
+      - "Es 1 al pastor y 1 Mexican burger" (con carrito existente que tenía cantidad distinta)
+      - "El pedido es 1 X y 2 Y"
+      - "Son 1 X y 1 Y, solo dos en total"
+    NO uses set_cart_items cuando el cliente nombra UN SOLO producto ("solo una X", "solo son 2 mexicanas") — esos casos van en update_cart_item; set_cart_items borraría los otros items del carrito.
+    Semántica: items en el carrito que NO aparecen en `items` se REMUEVEN automáticamente. Items que SÍ aparecen se ajustan a la nueva cantidad (notas existentes se preservan si no pasas `notes`). Items nuevos se agregan. Las promos no se tocan. Úsala en lugar de descomponer en add_to_cart + update_cart_item + remove_from_cart cuando el cliente está describiendo el target del carrito.
+  * update_cart_item(product_name="X", quantity=N): SET la cantidad EXACTA de UN solo item YA en el carrito ("solo una X", "que sean 3", "déjame con dos"). Solo edita lo que YA está; rechaza si X no está en el carrito. Para corregir VARIOS items al tiempo, usa set_cart_items.
   * remove_from_cart(product_name="X", quantity=N): DECREMENTA por N unidades ("quita una X", "una menos", "menos una").
   * remove_from_cart(product_name="X") sin quantity: REMUEVE el producto por completo ("quita la X", "elimínalo", "ya no quiero la X").
-  * Para ambos: usa product_name (el sistema resuelve contra el carrito); si el cliente nombra un producto que NO está en el carrito y quieres agregarlo, usa add_to_cart, NO update_cart_item.
+  * Para los tres: usa product_name (el sistema resuelve contra el carrito); si el cliente nombra un producto que NO está en el carrito y quieres agregarlo, usa add_to_cart, NO update_cart_item.
+
+  DECISIÓN add_to_cart vs set_cart_items vs update_cart_item:
+    - Cliente AGREGA al pedido existente ("agrégame una coca", "con una papas", "y una Sprite") → add_to_cart.
+    - Cliente RESTATÉS o CORRIGE el pedido nombrando VARIOS productos con cantidades ("es 1 X y 1 Y", "el pedido es 2 X y 1 Y", "no, son 2 Y y 1 X solo dos") → set_cart_items. Esto incluye el caso clásico: carrito tiene 2 X (porque el cliente repitió "1 X" dos veces por error), cliente dice "es 1 X y 1 Y" — esa es una corrección del pedido completo, llama set_cart_items([{{X,1}},{{Y,1}}]) en UNA sola call.
+    - Cliente corrige la cantidad de UN SOLO producto sin nombrar otros ("solo una X", "que sean 3 X", "déjame con dos X") → update_cart_item. set_cart_items aquí borraría los otros items del carrito.
+    Señal clave: ¿el cliente está describiendo MÁS DE UN producto con cantidades? Sí → set_cart_items. ¿Solo uno? → update_cart_item. ¿Está agregando algo nuevo a lo existente? → add_to_cart.
 - Datos de entrega: get_customer_info, submit_delivery_info
 - Confirmar pedido: place_order
 
@@ -158,6 +170,16 @@ Reglas duras de flujo:
 9. Si el cliente pide cancelar ("cancela", "anula", "olvídalo"), kind=chat con summary breve. NO uses herramientas destructivas sin confirmación explícita.
    ⚠️ AMBIGÜEDAD COLOMBIANA: "cancelar" también significa "pagar" en Colombia ("cancelar la cuenta", "le cancelo al domiciliario"). Si el mensaje es una PREGUNTA (`?`, `puedo / podría`, alternativa `o ... o ...`) o co-ocurre con vocabulario de pago (`pago / pagar / al domiciliario / de una vez / efectivo / Nequi / tarjeta`), el cliente NO está pidiendo cancelar nada — está preguntando por el pago. Responde kind=info aclarando la opción de pago; NO toques el carrito.
 10. Lenguaje aditivo: cuando el cliente dice "con X", "y X", "agrégame Y", "también Y", "súmale Z", "ponle X", "incluye X" — se refiere a AGREGAR ÚNICAMENTE el item NUEVO al carrito existente. NUNCA re-agregues items que ya están en el carrito (te los muestro arriba en ESTADO DEL CARRITO).
+
+10a. RESTATEMENT — patrón crítico (sobrescribe la regla 10): cuando el cliente comienza con "es", "son", "el pedido es", "lo que quiero es" SEGUIDO de cantidades específicas para VARIOS productos ("es 1 X y 1 Y", "son 2 X y 1 Y"), el cliente está describiendo el ESTADO COMPLETO DESEADO del carrito, NO agregando incrementalmente. Llama set_cart_items UNA sola vez con TODOS los items nombrados. NO uses add_to_cart aquí — el carrito YA tiene items y add_to_cart los sumaría a los existentes, produciendo cantidades incorrectas.
+    Ejemplo crítico (este es un bug real que ya ocurrió):
+      Carrito actual: 2x AL PASTOR
+      Cliente: "Es 1 al pastor y 1 Mexican burger"
+      Acción CORRECTA: set_cart_items(items=[{{"product_name":"al pastor","quantity":1}},{{"product_name":"Mexican burger","quantity":1}}])
+      Acción INCORRECTA (NO HACER): add_to_cart(Mexican burger) — esto deja el carrito con 2 AL PASTOR + 1 MEXICAN, que NO es lo que el cliente pidió.
+    Cómo distinguirlo de aditivo:
+      - Aditivo ("con X", "y X", "agrégame Y") = el cliente ESTÁ AGREGANDO a lo que ya tiene.
+      - Restatement ("es N X y M Y", "son N X y M Y") = el cliente está DESCRIBIENDO TODO lo que quiere, posiblemente corrigiendo cantidades existentes.
 11. Categoría sin producto específico: si el cliente nombra una CATEGORÍA en vez de un producto concreto ("una bebida", "algo de tomar", "una gaseosa", "una papa", "una salsa", "un postre", "una entrada", "una hamburguesa", "un perro", "algo dulce", "algo picante"), NUNCA elijas tú un producto específico — el cliente debe decidir. Tu acción es:
     - Llama list_category_products(category=<categoría>) o search_products para ver las opciones disponibles.
     - Llama respond(kind='menu_info', summary='Opciones disponibles de <categoría>', facts=[...nombres y precios...]).
@@ -648,7 +670,8 @@ class OrderAgent(BaseAgent):
                             # when a turn appears to lose state.
                             if tool_name in (
                                 "add_to_cart", "remove_from_cart",
-                                "update_cart_item", "add_promo_to_cart",
+                                "update_cart_item", "set_cart_items",
+                                "add_promo_to_cart",
                                 "submit_delivery_info", "place_order",
                             ):
                                 logging.warning(
