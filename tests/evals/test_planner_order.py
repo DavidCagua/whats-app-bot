@@ -319,15 +319,6 @@ class TestAddBasics:
 # ---------------------------------------------------------------------------
 
 class TestQuantityEdits:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Planner misclassifies 'solo una X' as additive when X is already "
-            "in the cart — fires add_to_cart instead of update_cart_item. "
-            "Tracked separately from the set_cart_items refactor; remove this "
-            "xfail when the planner picks the right tool for this pattern."
-        ),
-    )
     def test_set_exact_quantity_lower(self, fake_session):
         """Cart has 2x BARRACUDA, user says 'solo una' → cart should end at 1."""
         out, oc = _run_planner_turn(
@@ -521,15 +512,6 @@ class TestRestatement:
 # ---------------------------------------------------------------------------
 
 class TestAmbiguity:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Planner calls remove_from_cart('MONTESA', quantity=0) for 'quita "
-            "una MONTESA' — quantity=0 means 'remove entirely', so both lines "
-            "get dropped. The 'una' quantifier is being lost. Tracked "
-            "separately from the set_cart_items refactor."
-        ),
-    )
     def test_ambiguous_multi_line_refuses_silent_pick(self, fake_session):
         """Two MONTESA lines with different notes. Removing 'una MONTESA'
         should not silently pick one — should either refuse or surface

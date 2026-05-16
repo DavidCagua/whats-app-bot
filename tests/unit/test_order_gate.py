@@ -90,8 +90,7 @@ class TestMutatingToolNames:
         assert MUTATING_TOOL_NAMES == frozenset({
             "add_to_cart",
             "add_promo_to_cart",
-            "update_cart_item",
-            "remove_from_cart",
+            "set_cart_items",
             "submit_delivery_info",
             "place_order",
         })

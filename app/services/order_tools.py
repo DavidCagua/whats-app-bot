@@ -820,9 +820,9 @@ def add_to_cart(product_id: str = "", product_name: str = "", quantity: int = 1,
         # whitespace-trimmed). Two adds with identical notes ("sin bbq",
         # "sin bbq") used to create two lines because the previous
         # branch only stacked when both sides had empty notes — that
-        # made later remove_from_cart / update_cart_item calls
-        # awkward (one took out everything, the other only the first
-        # line). Now identical-notes adds merge into one line at qty=2.
+        # made later set_cart_items calls awkward when the planner
+        # wanted to address "the line with notes X" but two lines shared
+        # the same notes. Identical-notes adds now merge into one line.
         notes_norm = (notes or "").strip().lower()
         found = False
         for it in items:
@@ -925,306 +925,6 @@ def _format_cart_display_lines(display_groups: List[Dict]) -> List[str]:
     return lines
 
 
-@tool
-def update_cart_item(
-    product_id: str = "",
-    product_name: str = "",
-    quantity: int = 0,
-    notes: str = "",
-    *,
-    injected_business_context: Annotated[dict, InjectedToolArg],
-) -> str:
-    """
-    Update the quantity or notes of an item ALREADY in the cart. Use when the customer
-    wants to set an EXACT target quantity ("solo una X", "que sean 3", "déjame con dos")
-    or change notes on an existing item. Setting quantity=0 (with no notes) removes it.
-
-    REFUSES when the named product is not currently in the cart — this is for editing
-    existing lines, NOT for adding new ones. To add a new product, use add_to_cart.
-    To decrement an existing line by N (without targeting an exact qty), use remove_from_cart(quantity=N).
-
-    Resolution: pass either product_id (preferred when known from cart context) OR
-    product_name (the tool resolves it against current cart contents — exact, then
-    substring match). When the cart has multiple lines for the same product (different
-    notes), the tool targets the first matching line.
-
-    Args:
-        product_id: Product UUID of an item already in the cart.
-        product_name: Product name (used when product_id isn't known). Resolved against cart.
-        quantity: New target quantity for the line (0 to remove; leave 0 if only updating notes).
-        notes: Special instructions (e.g. "sin cebolla", "extra salsa"). Pass empty string to clear.
-    """
-    logger.info(
-        f"[ORDER_TOOL] update_cart_item product_id='{product_id}' "
-        f"product_name='{product_name}' quantity={quantity} notes='{notes}'"
-    )
-    try:
-        business_id, wa_id = _get_context(injected_business_context)
-        if not business_id or not wa_id:
-            return "❌ No se pudo identificar la sesión. Intenta de nuevo."
-
-        if not product_id and not (product_name and product_name.strip()):
-            return "❌ Indica el producto a modificar (product_id o product_name)."
-
-        notes = (notes or "").strip()
-        cart = _cart_from_session(wa_id, business_id)
-        original_items = cart.get("items") or []
-
-        # Resolve target product_id by trying:
-        #   1) Exact product_id match (UUID provided by the caller)
-        #   2) product_name → exact case-insensitive match against cart items
-        #   3) product_name → substring match against cart items
-        # If none match, refuse — never create phantom lines.
-        # If MULTIPLE match (same product across several lines with
-        # different notes), refuse with a redirect to remove_from_cart —
-        # silently picking the first match was producing "tool lied"
-        # bugs (Biela / 2026-05-09: two MONTESA lines, update_cart_item
-        # set qty=1 on one of them, total stayed at 2, bot said "Listo
-        # ajustado" anyway).
-        target_item = None
-        if product_id:
-            target_item = next(
-                (it for it in original_items if it.get("product_id") == product_id),
-                None,
-            )
-        if target_item is None and product_name:
-            pn = product_name.strip().lower()
-            exact_matches = [
-                it for it in original_items
-                if (it.get("name") or "").strip().lower() == pn
-            ]
-            substring_matches = []
-            if not exact_matches:
-                substring_matches = [
-                    it for it in original_items
-                    if pn in (it.get("name") or "").strip().lower()
-                ]
-            matches = exact_matches or substring_matches
-            if len(matches) == 1:
-                target_item = matches[0]
-            elif len(matches) > 1:
-                product_label = (matches[0].get("name") or product_name).strip()
-                # List the existing variants so the model (or downstream
-                # renderer) can mention them explicitly when prompting.
-                variants = []
-                for it in matches:
-                    n = (it.get("notes") or "").strip()
-                    qty = int(it.get("quantity", 0) or 0)
-                    if n:
-                        variants.append(f"{qty}x con notas '{n}'")
-                    else:
-                        variants.append(f"{qty}x sin notas")
-                variants_str = "; ".join(variants)
-                return (
-                    f"❌ Hay {len(matches)} líneas de '{product_label}' en el carrito "
-                    f"({variants_str}). update_cart_item solo edita UNA línea a la vez "
-                    "por nombre y no sabe cuál querés ajustar. "
-                    "Para REDUCIR el total del producto (e.g. 'solo una X' cuando hay "
-                    "2), usa remove_from_cart(product_name=..., quantity=N) — "
-                    "decrementa por N unidades en cascada. "
-                    "Para REMOVER todas las líneas, usa remove_from_cart sin quantity. "
-                    "Si querés editar una línea específica, llama view_cart primero "
-                    "para tener el product_id y las notas exactas."
-                )
-        if target_item is None:
-            ref = product_name or product_id or ""
-            return (
-                f"❌ '{ref}' no está en el carrito; update_cart_item solo edita "
-                "ítems existentes. Si quieres agregarlo nuevo, usa add_to_cart. "
-                "Si quieres ver lo que hay, usa view_cart."
-            )
-
-        # Lock onto the resolved line's actual product_id for filtering.
-        resolved_id = target_item.get("product_id", "")
-        effective_quantity = quantity
-        if effective_quantity == 0 and notes:
-            # qty=0 + notes set → keep existing qty, just update notes.
-            effective_quantity = target_item.get("quantity", 1)
-
-        # Drop the target line; rebuild it (or omit it if qty=0 and no notes).
-        items: List[Dict] = [it for it in original_items if it is not target_item]
-        if effective_quantity > 0:
-            updated: Dict = {
-                "product_id": resolved_id,
-                "name": target_item.get("name", ""),
-                "price": target_item.get("price", 0),
-                "quantity": effective_quantity,
-            }
-            if notes:
-                updated["notes"] = notes
-            elif target_item.get("notes"):
-                # Preserve existing notes when caller didn't pass new ones.
-                updated["notes"] = target_item["notes"]
-            items.append(updated)
-
-        total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
-        new_cart = {"items": items, "total": total}
-        _save_cart(wa_id, business_id, new_cart)
-
-        if effective_quantity == 0:
-            return "✅ Producto quitado de tu pedido."
-        preview = promotion_service.preview_cart(business_id, items)
-        notes_str = f" ({notes})" if notes else ""
-        return f"✅ Ítem actualizado{notes_str}. Subtotal: {_format_price(preview['subtotal'])}"
-    except Exception as e:
-        logger.error(f"[ORDER_TOOL] update_cart_item error: {e}")
-        return f"❌ Error al actualizar tu pedido: {str(e)}"
-
-
-@tool
-def remove_from_cart(
-    product_id: str = "",
-    product_name: str = "",
-    quantity: int = 0,
-    *,
-    injected_business_context: Annotated[dict, InjectedToolArg],
-) -> str:
-    """
-    Remove a product (entirely, or by quantity) from the cart.
-
-    Behavior depends on `quantity`:
-    - quantity == 0 (default, legacy): remove the product ENTIRELY — every line
-      with this product_id is dropped. Use for "quita la X", "elimínalo",
-      "no quiero la X", "ya no quiero eso".
-    - quantity > 0: DECREMENT by N units. The matching line's qty is reduced;
-      if the decrement equals or exceeds the line's qty, the line is dropped.
-      With multiple lines for the same product (e.g. different notes), the
-      decrement cascades from the first matching line. Use for "quita una X",
-      "menos una", "una menos por favor" (relative decrement, NOT a target qty).
-
-    For setting an EXACT target quantity ("solo una X", "déjame con dos X",
-    "que sean 3"), prefer ``update_cart_item(quantity=N)`` — it sets the
-    line's qty to N directly.
-
-    Args:
-        product_id: Product UUID to remove (preferred when known)
-        product_name: Product name to remove (used when product_id is not available)
-        quantity: 0 = remove entirely; >0 = decrement by N units
-    """
-    logger.info(
-        f"[ORDER_TOOL] remove_from_cart product_id='{product_id}' "
-        f"product_name='{product_name}' quantity={quantity}"
-    )
-    try:
-        business_id, wa_id = _get_context(injected_business_context)
-        if not business_id or not wa_id:
-            return "❌ No se pudo identificar la sesión. Intenta de nuevo."
-
-        cart = _cart_from_session(wa_id, business_id)
-        original_items = cart.get("items") or []
-
-        # Resolve product_id by name if not provided.
-        # Handles three planner name shapes:
-        #   "Jugos en leche"          → base-name match
-        #   "Jugos en leche (mango)"  → strip parens, match name + notes
-        #   "jugo de mango"           → qualifier match against item notes
-        resolved_id = product_id.strip() if product_id else ""
-        if not resolved_id and product_name:
-            import re as _re
-            raw = product_name.strip()
-            paren_match = _re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", raw)
-            if paren_match:
-                base_name = paren_match.group(1).strip().lower()
-                paren_notes = paren_match.group(2).strip().lower()
-            else:
-                base_name = raw.lower()
-                paren_notes = ""
-
-            # Pass 1: exact base-name match, disambiguate by notes
-            base_matches = [
-                it for it in original_items
-                if (it.get("name") or "").lower().strip() == base_name
-            ]
-            if len(base_matches) == 1:
-                resolved_id = base_matches[0].get("product_id", "")
-            elif len(base_matches) > 1 and paren_notes:
-                for it in base_matches:
-                    if (it.get("notes") or "").strip().lower() == paren_notes:
-                        resolved_id = it.get("product_id", "")
-                        break
-            if not resolved_id and base_matches:
-                resolved_id = base_matches[0].get("product_id", "")
-
-            # Pass 2: qualifier phrase — "jugo de mango" matches item
-            # "Jugos en leche" with notes="mango"
-            if not resolved_id:
-                name_tokens = set(base_name.split())
-                for it in original_items:
-                    item_name = (it.get("name") or "").lower().strip()
-                    item_notes = (it.get("notes") or "").strip().lower()
-                    if not item_notes:
-                        continue
-                    item_tokens = set(item_name.split())
-                    qualifier = name_tokens - item_tokens
-                    if qualifier and item_notes in qualifier:
-                        resolved_id = it.get("product_id", "")
-                        break
-
-            # Pass 3: partial / substring fallback
-            if not resolved_id:
-                for it in original_items:
-                    if base_name in (it.get("name") or "").lower():
-                        resolved_id = it.get("product_id", "")
-                        break
-
-        if not resolved_id:
-            return "❌ No encontré ese producto en tu pedido. ¿Puedes indicar el nombre exacto?"
-
-        non_matching = [it for it in original_items if it.get("product_id") != resolved_id]
-        matching = [it for it in original_items if it.get("product_id") == resolved_id]
-
-        try:
-            qty_param = int(quantity or 0)
-        except (TypeError, ValueError):
-            qty_param = 0
-
-        if qty_param <= 0:
-            # Legacy: remove the product entirely (drop every matching line).
-            items = non_matching
-            total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
-            _save_cart(wa_id, business_id, {"items": items, "total": total})
-            return "✅ Producto quitado de tu pedido."
-
-        # Decrement by N. Cascade across matching lines if N exceeds a single line.
-        product_label = (matching[0].get("name") if matching else "el producto") or "el producto"
-        remaining_to_remove = qty_param
-        updated_matching: List[Dict] = []
-        for it in matching:
-            if remaining_to_remove <= 0:
-                updated_matching.append(it)
-                continue
-            try:
-                line_qty = int(it.get("quantity", 0))
-            except (TypeError, ValueError):
-                line_qty = 0
-            if remaining_to_remove >= line_qty:
-                # Drop this line entirely; eat its qty from the budget
-                remaining_to_remove -= line_qty
-            else:
-                new_qty = line_qty - remaining_to_remove
-                updated = {**it, "quantity": new_qty}
-                updated_matching.append(updated)
-                remaining_to_remove = 0
-
-        items = non_matching + updated_matching
-        total = sum(it.get("price", 0) * it.get("quantity", 0) for it in items)
-        _save_cart(wa_id, business_id, {"items": items, "total": total})
-
-        actual_removed = qty_param - remaining_to_remove
-        if actual_removed == 0:
-            # Nothing to remove (line was already at 0, shouldn't really
-            # happen since we resolved a product_id, but defensive).
-            return f"❌ No había {product_label} en tu pedido."
-        if remaining_to_remove > 0:
-            return (
-                f"✅ Quitamos {actual_removed}x {product_label} "
-                f"(no había más en tu pedido)."
-            )
-        return f"✅ Quitamos {actual_removed}x {product_label} de tu pedido."
-    except Exception as e:
-        logger.error(f"[ORDER_TOOL] remove_from_cart error: {e}")
-        return f"❌ Error al quitar el producto de tu pedido: {str(e)}"
-
 
 @tool
 def set_cart_items(
@@ -1235,31 +935,29 @@ def set_cart_items(
     """
     Replace the cart's product lines so they exactly match `items`.
 
-    Use when the customer RESTATES the full order ("Es 1 al pastor y 1
-    Mexican burger", "el pedido es 1 X y 2 Y", "lo que quiero es...") or
-    CORRECTS with a complete target ("son 1 X y 1 Y, solo dos en total").
-    Use this INSTEAD OF add_to_cart / update_cart_item / remove_from_cart
-    when the customer is describing the *desired end state* of the cart
-    rather than incrementally adding or removing items.
+    This is the only cart-correction tool: any change to existing cart
+    lines — set quantity, decrement, remove entirely, restate the whole
+    order — is expressed by passing the desired final list. add_to_cart
+    remains for pure additions where the customer is incrementing onto
+    an existing cart without correcting anything ("agrégame una coca").
 
-    Semantics — full-state replacement, scoped to the products NAMED by
-    the customer:
+    Semantics — full-state replacement, scoped to the products you pass:
     - Items in `items` AND already in the cart → quantity is SET to the
       new value; existing notes are PRESERVED unless `notes` is given.
     - Items in `items` and NOT in the cart → ADDED (resolves via product
       catalog, same as add_to_cart).
-    - Items in the cart that are NOT in `items` → REMOVED. This is what
-      makes restatement work: "Es 1 X y 1 Y" with a cart of {X:2, Z:1}
-      becomes {X:1, Y:1} — the unmentioned Z is dropped.
+    - Items in the cart that are NOT in `items` → REMOVED. To remove an
+      item, omit it from the target list.
     - Promo lines on the cart are NEVER touched by this tool. Restatement
       addresses products; promo bindings are a separate concern.
 
     Refusals (atomic — nothing is mutated if any of these trip):
-    - Empty `items` → refuses. To clear the cart use remove_from_cart on
-      each product or ask the customer to cancel.
+    - Empty `items` → refuses (would empty the cart unintentionally; treat
+      "cancela" / "vacía el pedido" as a chat intent instead).
     - Any item in `items` that resolves to a cart line that's already
-      split into MULTIPLE lines with different notes → refuses with the
-      variants surfaced, same as update_cart_item's policy.
+      split into MULTIPLE lines with different notes, without `notes` to
+      pin one line → refuses with the variants surfaced so the planner
+      can re-call with the right disambiguator.
 
     Per-item errors (NOT_FOUND, ambiguous new product) follow the same
     behavior as add_to_cart's batched path: applied items go through,
@@ -1289,7 +987,8 @@ def set_cart_items(
         if not items or not isinstance(items, list):
             return (
                 "❌ set_cart_items requiere una lista de items con al menos uno. "
-                "Para vaciar el carrito, usa remove_from_cart sobre cada producto."
+                "Si el cliente quiere vaciar el carrito, trátalo como kind='chat' "
+                "y confirma — no llames set_cart_items con lista vacía."
             )
 
         # Normalize input — drop entries missing both id and name, and
@@ -1375,9 +1074,7 @@ def set_cart_items(
             return (
                 f"❌ '{label}' tiene {len(matches)} líneas en el carrito "
                 f"({'; '.join(variants)}). set_cart_items necesita que el "
-                "target item incluya `notes` para indicar cuál línea ajustar. "
-                "Otra opción: usa update_cart_item / remove_from_cart sobre una "
-                "línea específica si solo necesitas tocar una."
+                "target item incluya `notes` para indicar cuál línea ajustar."
             )
 
         # Resolve each input item against (a) cart lines (preferred) or
@@ -2214,8 +1911,6 @@ order_tools = [
     list_promos,
     add_promo_to_cart,
     view_cart,
-    update_cart_item,
-    remove_from_cart,
     set_cart_items,
     get_customer_info,
     submit_delivery_info,
@@ -2234,8 +1929,6 @@ order_tools = [
 MUTATING_TOOL_NAMES = frozenset({
     "add_to_cart",
     "add_promo_to_cart",
-    "update_cart_item",
-    "remove_from_cart",
     "set_cart_items",
     "submit_delivery_info",
     "place_order",

@@ -57,6 +57,7 @@ from ..services.order_tools import (
     _read_awaiting_confirmation,
     MUTATING_TOOL_NAMES,
 )
+from ..services.cart_intent_classifier import classify_cart_mutation
 from ..services.product_search import ProductNotFoundError
 from ..orchestration.turn_context import (
     TurnContext,
@@ -83,23 +84,26 @@ Tu trabajo es llamar herramientas para entender la intención del cliente y muta
 Herramientas de datos / acción (úsalas cuando aplique):
 - Menú y productos: get_menu_categories, list_category_products, search_products, get_product_details
 - Promos: list_promos (descubrir promos activas), add_promo_to_cart (agregar una promo al carrito)
-- Carrito: add_to_cart, add_promo_to_cart, view_cart, set_cart_items, update_cart_item, remove_from_cart
-  * set_cart_items(items=[{{product_name, quantity, notes?}}, ...]): REEMPLAZA las líneas de productos del carrito para que coincidan EXACTAMENTE con `items`. Es la herramienta correcta cuando el cliente RESTATÉS el pedido completo o lo corrige describiendo el estado final deseado, no un incremento. Patrones típicos:
-      - "Es 1 al pastor y 1 Mexican burger" (con carrito existente que tenía cantidad distinta)
-      - "El pedido es 1 X y 2 Y"
-      - "Son 1 X y 1 Y, solo dos en total"
-    NO uses set_cart_items cuando el cliente nombra UN SOLO producto ("solo una X", "solo son 2 mexicanas") — esos casos van en update_cart_item; set_cart_items borraría los otros items del carrito.
-    Semántica: items en el carrito que NO aparecen en `items` se REMUEVEN automáticamente. Items que SÍ aparecen se ajustan a la nueva cantidad (notas existentes se preservan si no pasas `notes`). Items nuevos se agregan. Las promos no se tocan. Úsala en lugar de descomponer en add_to_cart + update_cart_item + remove_from_cart cuando el cliente está describiendo el target del carrito.
-  * update_cart_item(product_name="X", quantity=N): SET la cantidad EXACTA de UN solo item YA en el carrito ("solo una X", "que sean 3", "déjame con dos"). Solo edita lo que YA está; rechaza si X no está en el carrito. Para corregir VARIOS items al tiempo, usa set_cart_items.
-  * remove_from_cart(product_name="X", quantity=N): DECREMENTA por N unidades ("quita una X", "una menos", "menos una").
-  * remove_from_cart(product_name="X") sin quantity: REMUEVE el producto por completo ("quita la X", "elimínalo", "ya no quiero la X").
-  * Para los tres: usa product_name (el sistema resuelve contra el carrito); si el cliente nombra un producto que NO está en el carrito y quieres agregarlo, usa add_to_cart, NO update_cart_item.
+- Carrito: add_to_cart, add_promo_to_cart, view_cart, set_cart_items
+  * add_to_cart(product_name="X", quantity=N, notes="..."): AGREGA un producto al carrito. Úsala cuando el cliente está sumando algo a lo que ya tiene ("dame una X", "agrégame una Coca", "con una papas", "y una Sprite").
+  * set_cart_items(items=[{{product_name, quantity, notes?}}, ...]): REEMPLAZA las líneas de productos del carrito por la lista que pases. Es la única herramienta para CORREGIR el carrito — set cantidad, decrementar, quitar productos, restatement completo, todo se expresa pasando la lista final deseada.
+    Semántica:
+      - Productos en `items` AND en el carrito → la cantidad se SET a la nueva, notas preservadas si no pasas `notes`.
+      - Productos en `items` y NO en el carrito → SE AGREGAN (resuelve via catálogo).
+      - Productos en el carrito que NO aparecen en `items` → SE REMUEVEN. Para quitar X, omítelo de la lista.
+      - Promos no se tocan.
+    Mapeo de patrones del cliente → llamada:
+      - "solo una X" (carrito 2 X) → set_cart_items([{{"product_name":"X","quantity":1}}]) (sin otros items, los otros no se tocan porque NO existían; cuando hay otros items en carrito, INCLÚYELOS con su cantidad actual para no perderlos).
+      - "quita la X" (carrito X+Y) → set_cart_items([{{"product_name":"Y","quantity":<su qty actual>}}]).
+      - "quita dos X" (carrito 3 X) → set_cart_items([{{"product_name":"X","quantity":1}}]).
+      - "Es 1 X y 1 Y" (carrito 2 X) → set_cart_items([{{"product_name":"X","quantity":1}},{{"product_name":"Y","quantity":1}}]).
+    REGLA CRÍTICA: cuando el carrito tiene VARIOS productos y el cliente solo corrige UNO, debes incluir TODOS los productos del carrito en `items` (los no mencionados con su cantidad actual), porque cualquier producto omitido de la lista se ELIMINA. El cliente espera que su corrección sea quirúrgica; tu llamada debe reflejar eso copiando el estado del carrito y mutando solo lo necesario.
+  * add_promo_to_cart(promo_query="..."): agrega una promo activa al carrito.
 
-  DECISIÓN add_to_cart vs set_cart_items vs update_cart_item:
-    - Cliente AGREGA al pedido existente ("agrégame una coca", "con una papas", "y una Sprite") → add_to_cart.
-    - Cliente RESTATÉS o CORRIGE el pedido nombrando VARIOS productos con cantidades ("es 1 X y 1 Y", "el pedido es 2 X y 1 Y", "no, son 2 Y y 1 X solo dos") → set_cart_items. Esto incluye el caso clásico: carrito tiene 2 X (porque el cliente repitió "1 X" dos veces por error), cliente dice "es 1 X y 1 Y" — esa es una corrección del pedido completo, llama set_cart_items([{{X,1}},{{Y,1}}]) en UNA sola call.
-    - Cliente corrige la cantidad de UN SOLO producto sin nombrar otros ("solo una X", "que sean 3 X", "déjame con dos X") → update_cart_item. set_cart_items aquí borraría los otros items del carrito.
-    Señal clave: ¿el cliente está describiendo MÁS DE UN producto con cantidades? Sí → set_cart_items. ¿Solo uno? → update_cart_item. ¿Está agregando algo nuevo a lo existente? → add_to_cart.
+  DECISIÓN add_to_cart vs set_cart_items:
+    - Cliente está AGREGANDO algo nuevo al pedido sin tocar las cantidades existentes ("agrégame una coca", "con una papas", "y una Sprite", "dame una X" como primera mención de X) → add_to_cart.
+    - Cliente está CORRIGIENDO el pedido (cambiar cantidades, quitar productos, restatement) → set_cart_items. Esto incluye casos de un solo producto ("solo una X", "quita dos X") y casos multi-producto ("es 1 X y 1 Y").
+    Señal: ¿el cliente está añadiendo OTRA cosa, o está describiendo lo que el pedido DEBE tener? Lo primero es add_to_cart, lo segundo es set_cart_items.
 - Datos de entrega: get_customer_info, submit_delivery_info
 - Confirmar pedido: place_order
 
@@ -148,7 +152,7 @@ Reglas duras de flujo:
 5. NO inventes productos, precios, ni datos. Si no sabes algo, llama una herramienta.
 6. En `facts` incluye las cadenas literales que el renderer puede citar (nombres, IDs) — pero NO repitas el subtotal/total del carrito; el sistema los lee del estado canónico.
 7. Reconocimiento de productos: si el cliente menciona una frase nominal que pueda ser nombre de producto, distingue entre PREGUNTA y PEDIDO:
-   - PREGUNTA ("¿está...?", "¿tienen...?", "¿hay...?", "¿qué...?", "¿cuánto cuesta...?", "¿de qué viene...?", "¿cuál es...?"): llama search_products o get_product_details para verificar/describir, luego respond(kind='product_info' o 'menu_info') con la info. NUNCA llames NINGUNA herramienta de carrito en este caso — ni add_to_cart, NI add_promo_to_cart, NI update_cart_item — el cliente solo está consultando.
+   - PREGUNTA ("¿está...?", "¿tienen...?", "¿hay...?", "¿qué...?", "¿cuánto cuesta...?", "¿de qué viene...?", "¿cuál es...?"): llama search_products o get_product_details para verificar/describir, luego respond(kind='product_info' o 'menu_info') con la info. NUNCA llames NINGUNA herramienta de carrito en este caso — ni add_to_cart, NI add_promo_to_cart, NI set_cart_items — el cliente solo está consultando.
    - PEDIDO explícito ("me das", "regálame", "quiero", "tráeme", "para mí", "agrégame", "ponme", "me lo llevo", "para pedir X", "pedir un X", "voy a pedir", "necesito un X"): llama add_to_cart, luego respond(kind='items_added').
    En la duda, trata como PREGUNTA (search + product_info). Es mejor preguntar "¿quieres pedirla?" que agregar algo que el cliente solo estaba consultando.
    PREGUNTA SOBRE ITEM YA EN EL CARRITO: si el producto consultado YA aparece en "Carrito actual" (mira el bloque ESTADO Y HISTORIAL DEL TURNO), responde la pregunta directamente (composición, ingredientes, qué incluye, precio) y NO cierres con "¿Quieres pedirla?" / "¿Te gustaría pedirla?" — ya está en el pedido, esa pregunta confunde al cliente. Cierra con una variante apropiada al estado: "¿Te agrego algo más o procedemos con el pedido?", o sin pregunta si la duda quedó resuelta. Esto aplica también a kind='product_info' generado tras get_product_details / search_products cuando el producto descrito coincide con uno del carrito.
@@ -169,17 +173,10 @@ Reglas duras de flujo:
 8. Para productos ambiguos, add_to_cart listará variantes — usa kind=disambiguation con las variantes en `facts`.
 9. Si el cliente pide cancelar ("cancela", "anula", "olvídalo"), kind=chat con summary breve. NO uses herramientas destructivas sin confirmación explícita.
    ⚠️ AMBIGÜEDAD COLOMBIANA: "cancelar" también significa "pagar" en Colombia ("cancelar la cuenta", "le cancelo al domiciliario"). Si el mensaje es una PREGUNTA (`?`, `puedo / podría`, alternativa `o ... o ...`) o co-ocurre con vocabulario de pago (`pago / pagar / al domiciliario / de una vez / efectivo / Nequi / tarjeta`), el cliente NO está pidiendo cancelar nada — está preguntando por el pago. Responde kind=info aclarando la opción de pago; NO toques el carrito.
-10. Lenguaje aditivo: cuando el cliente dice "con X", "y X", "agrégame Y", "también Y", "súmale Z", "ponle X", "incluye X" — se refiere a AGREGAR ÚNICAMENTE el item NUEVO al carrito existente. NUNCA re-agregues items que ya están en el carrito (te los muestro arriba en ESTADO DEL CARRITO).
-
-10a. RESTATEMENT — patrón crítico (sobrescribe la regla 10): cuando el cliente comienza con "es", "son", "el pedido es", "lo que quiero es" SEGUIDO de cantidades específicas para VARIOS productos ("es 1 X y 1 Y", "son 2 X y 1 Y"), el cliente está describiendo el ESTADO COMPLETO DESEADO del carrito, NO agregando incrementalmente. Llama set_cart_items UNA sola vez con TODOS los items nombrados. NO uses add_to_cart aquí — el carrito YA tiene items y add_to_cart los sumaría a los existentes, produciendo cantidades incorrectas.
-    Ejemplo crítico (este es un bug real que ya ocurrió):
-      Carrito actual: 2x AL PASTOR
-      Cliente: "Es 1 al pastor y 1 Mexican burger"
-      Acción CORRECTA: set_cart_items(items=[{{"product_name":"al pastor","quantity":1}},{{"product_name":"Mexican burger","quantity":1}}])
-      Acción INCORRECTA (NO HACER): add_to_cart(Mexican burger) — esto deja el carrito con 2 AL PASTOR + 1 MEXICAN, que NO es lo que el cliente pidió.
-    Cómo distinguirlo de aditivo:
-      - Aditivo ("con X", "y X", "agrégame Y") = el cliente ESTÁ AGREGANDO a lo que ya tiene.
-      - Restatement ("es N X y M Y", "son N X y M Y") = el cliente está DESCRIBIENDO TODO lo que quiere, posiblemente corrigiendo cantidades existentes.
+10. add_to_cart vs set_cart_items — distinción esencial:
+    - AGREGAR ("con X", "y X", "agrégame Y", "también Y", "ponle X") → add_to_cart con el item NUEVO. NUNCA re-agregues items que ya están en el carrito.
+    - CORREGIR / RESTATE ("es N X y M Y", "son N X", "solo una X", "que sean 3 X", "quita la X") → set_cart_items con la lista final del carrito.
+    Ejemplo crítico (bug real 2026-05-16): carrito tiene 2x AL PASTOR, cliente dice "Es 1 al pastor y 1 Mexican burger". El cliente está corrigiendo el carrito completo, NO agregando. Acción correcta: set_cart_items(items=[{{"product_name":"al pastor","quantity":1}},{{"product_name":"Mexican burger","quantity":1}}]). Incorrecto: add_to_cart(Mexican burger) — eso dejaría 2 AL PASTOR + 1 MEXICAN, lo que NO pidió el cliente.
 11. Categoría sin producto específico: si el cliente nombra una CATEGORÍA en vez de un producto concreto ("una bebida", "algo de tomar", "una gaseosa", "una papa", "una salsa", "un postre", "una entrada", "una hamburguesa", "un perro", "algo dulce", "algo picante"), NUNCA elijas tú un producto específico — el cliente debe decidir. Tu acción es:
     - Llama list_category_products(category=<categoría>) o search_products para ver las opciones disponibles.
     - Llama respond(kind='menu_info', summary='Opciones disponibles de <categoría>', facts=[...nombres y precios...]).
@@ -486,6 +483,79 @@ class OrderAgent(BaseAgent):
                 },
             }
 
+        # Pre-classifier — deterministic cart-mutation fast path.
+        # The planner LLM is ~85% reliable on restatement patterns ("Es N
+        # X y M Y", "solo son N X"); the rest of the time it misreads them
+        # as additive or drops unmentioned cart items. Verified via
+        # temperature sweep + model swap — it's a capability ceiling, not
+        # a prompt issue. The classifier is pure regex over Spanish-shaped
+        # patterns; on a confident match it computes the target items list
+        # and we invoke set_cart_items directly, skipping the LLM on cart
+        # mutation. Anything ambiguous falls through to the normal path.
+        #
+        # We DO NOT gate this on ``turn_ctx.has_active_cart``: build_turn_
+        # context uses an early-bound session_state_service import, which
+        # in tests doesn't pick up patches on the source module — so the
+        # turn context reports has_active_cart=False even when the cart
+        # is seeded. The classifier needs the real items, so we re-read
+        # session here via a lazy import path that DOES pick up patches.
+        # Cheap: one in-memory dict lookup in prod (session is cached).
+        from ..database import session_state_service as _sss_mod
+        try:
+            _load = _sss_mod.session_state_service.load(wa_id, str(business_id))
+            _cart_items_now = (
+                ((_load or {}).get("session") or {})
+                .get("order_context", {})
+                .get("items")
+                or []
+            )
+        except Exception:
+            _cart_items_now = []
+        if _cart_items_now:
+            classified = classify_cart_mutation(message_body, _cart_items_now)
+            if classified is not None:
+                logging.warning(
+                    "[CART_INTENT] classifier hit wa_id=%s items=%s",
+                    wa_id,
+                    [(c.get("quantity"), c.get("product_name")) for c in classified],
+                )
+                ctx_for_tools: Dict[str, Any] = {**(business_context or {}), "wa_id": wa_id}
+                _token = set_tool_context(ctx_for_tools)
+                try:
+                    tool_map = {t.name: t for t in order_tools}
+                    set_cart_items_tool = tool_map.get("set_cart_items")
+                    if set_cart_items_tool is None:
+                        # Should not happen — set_cart_items is registered.
+                        # Fall through to LLM if it does.
+                        raise RuntimeError("set_cart_items tool not registered")
+                    tool_result = set_cart_items_tool.invoke({
+                        "items": classified,
+                        "injected_business_context": ctx_for_tools,
+                    })
+                finally:
+                    reset_tool_context(_token)
+                # Disarm a stale confirm-prompt: if the user was responding
+                # to "¿Confirmamos?" with a cart change instead of yes, the
+                # next turn should re-prompt cleanly when it gets to
+                # ready_to_confirm again.
+                if awaiting_confirmation:
+                    set_awaiting_confirmation(wa_id, str(business_id), False)
+                # Persist + return. The tool result is the user-facing
+                # text — Spanish, includes subtotal. Skipping the response
+                # composer here keeps the path fully deterministic; we
+                # can route through it later if natural phrasing matters.
+                final_text = (tool_result or "").strip() or "Listo."
+                self._persist(wa_id, business_id, final_text)
+                tracer.end_run(
+                    run_id, success=True,
+                    latency_ms=(time.time() - start_time) * 1000,
+                )
+                return {
+                    "agent_type": self.agent_type,
+                    "message": final_text,
+                    "state_update": {"active_agents": ["order"]},
+                }
+
         try:
             messages = self._build_initial_messages(
                 business_context=business_context,
@@ -669,8 +739,7 @@ class OrderAgent(BaseAgent):
                             # tools so we can see exactly what happened
                             # when a turn appears to lose state.
                             if tool_name in (
-                                "add_to_cart", "remove_from_cart",
-                                "update_cart_item", "set_cart_items",
+                                "add_to_cart", "set_cart_items",
                                 "add_promo_to_cart",
                                 "submit_delivery_info", "place_order",
                             ):
