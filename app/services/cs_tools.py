@@ -31,6 +31,7 @@ from langchain_core.tools import InjectedToolArg
 
 from ..database.conversation_agent_service import (
     conversation_agent_service,
+    HANDOFF_REASON_HUMAN_REQUEST,
     HANDOFF_REASON_PAYMENT_PROOF,
 )
 from ..database.session_state_service import session_state_service
@@ -93,6 +94,11 @@ _BUSINESS_INFO_TEMPLATES = {
     "phone": "Puedes contactarnos al {value}.",
     "delivery_fee": "El domicilio tiene un costo base de {value}, puede variar según la distancia.",
     "delivery_time": "Nuestros pedidos llegan en {value}.",
+    # pickup_time is emitted by the CS flow as a mode-aware swap for
+    # delivery_time when the customer's session is in pickup. Wording
+    # is mode-specific ("estará listo" / preparation) so the customer
+    # doesn't get a "llegan en" sentence for a pickup order.
+    "pickup_time": "Tu pedido estaría listo en aproximadamente {value}.",
     "menu_url": "Acá tienes nuestro menú: {value}",
 }
 
@@ -255,15 +261,25 @@ def get_business_info(
       Cubre "a qué hora abren", "qué horario tienen", "abren los domingos",
       "hay atención", "hay servicio", "están atendiendo", "siguen abiertos",
       "ya abrieron", "ya cerraron", "están operando".
+      ⚠️ NO uses "hours" para "puedo pasar / cuándo puedo pasar / cuándo
+      está listo / en cuánto puedo recoger" cuando hay un carrito activo,
+      pedido en curso, o modo recogida — esas son preguntas de TIEMPO del
+      pedido (usa "delivery_time").
     - "address": ubicación / dirección ("dónde quedan", "cuál es la dirección").
     - "phone": teléfono DE CONTACTO general del negocio para llamar/escribir
       ("cuál es su número", "tienen WhatsApp"). NO uses esto para preguntas
       de PAGO — esas van a "payment_details" aunque mencionen "número".
     - "delivery_fee": costo del domicilio ("cuánto cobran domicilio",
       "cuánto vale el envío").
-    - "delivery_time": tiempo de entrega ("cuánto se demora la entrega",
-      "en cuánto llega", "qué tan rápido entregan"). Si el cliente ya tiene
-      pedido en curso, la herramienta devuelve el ETA real de ese pedido.
+    - "delivery_time": tiempo estimado del pedido — cubre TANTO domicilio
+      como recogida en local. Si el cliente ya tiene pedido en curso, la
+      herramienta devuelve el ETA real de ese pedido (preparación para
+      pickup; entrega para domicilio).
+      Domicilio: "cuánto se demora la entrega", "en cuánto llega",
+      "qué tan rápido entregan".
+      Recogida / local: "en cuánto puedo pasar (por el local / por mi pedido)",
+      "cuándo puedo pasar", "cuándo está listo", "cuánto demora la
+      preparación", "puedo recoger ya", "a qué hora puedo recoger".
     - "menu_url": link al MENÚ o CARTA. Cubre cualquier verbo de envío
       ("envíame la carta", "pásame el menú", "compárteme", "regálame",
       "quiero ver la carta") — en Colombia "regalar"/"me regalas" es
@@ -830,6 +846,63 @@ def handoff_payment_proof(
 
 
 @tool
+def request_human_handoff(
+    *,
+    injected_business_context: Annotated[dict, InjectedToolArg],
+) -> str:
+    """
+    Hand off the conversation to a human after the customer EXPLICITLY
+    asks to talk to a person / advisor / operator.
+
+    Llama esta herramienta SOLO cuando el cliente pida EXPLÍCITAMENTE
+    hablar con un humano. Señales típicas (español colombiano):
+      - "quiero hablar con un asesor / con una persona / con alguien"
+      - "comuníqueme con un humano / con un asesor / con el personal"
+      - "necesito hablar con alguien / con un agente / con un humano"
+      - "pásame / páseme con un humano / con alguien / con el restaurante"
+      - "conécteme con un asesor"
+      - "tienen un asesor / un humano que me atienda?"
+      - "ya no quiero hablar con un bot / con un robot"
+
+    NO la llames cuando el cliente:
+      - pregunta por información del negocio o estado del pedido
+        (responde con la herramienta correspondiente).
+      - dice "gracias" o "vale" después de una respuesta — no es una
+        petición de humano.
+      - menciona "asesor" en otro contexto sin pedir hablar
+        ("¿quién me asesoró ayer?" → no es handoff).
+
+    Efecto: desactiva el bot para esta conversación (la UI marca el
+    chat como handoff) y devuelve el mensaje final ya escrito. NO
+    redactes la respuesta tú mismo — la herramienta ya devuelve el
+    texto.
+    """
+    ctx = _ctx(injected_business_context)
+    wa_id = ctx.get("wa_id") or ""
+    business_id = ctx.get("business_id") or ""
+
+    try:
+        conversation_agent_service.set_agent_enabled(
+            business_id, wa_id, False,
+            handoff_reason=HANDOFF_REASON_HUMAN_REQUEST,
+        )
+        logger.warning(
+            "[CS_TOOL] request_human_handoff: bot disabled "
+            "wa_id=%s business_id=%s", wa_id, business_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "[CS_TOOL] request_human_handoff: failed to disable agent "
+            "wa_id=%s business_id=%s: %s",
+            wa_id, business_id, exc, exc_info=True,
+        )
+
+    return _final(
+        "Claro, en un momento un asesor se comunica contigo."
+    )
+
+
+@tool
 def get_promos(
     include_upcoming_other_days: bool = False,
     *,
@@ -1027,6 +1100,7 @@ cs_tools = (
     get_order_history,
     cancel_order,
     handoff_payment_proof,
+    request_human_handoff,
     get_promos,
     select_listed_promo,
 )

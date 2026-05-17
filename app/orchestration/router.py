@@ -608,6 +608,106 @@ def _deterministic_promo_add(
     return True
 
 
+# ── Checkout-close + question splitter ──────────────────────────────
+# Production observation 2026-05-17 (Biela / +57…): user with an active
+# pickup cart sent "eso es todo en cuanto puedo pasar por el local?"
+# right after the bot asked "¿algo más o procedemos?". The LLM router
+# collapsed both clauses into a single customer_service segment about
+# hours; the cart was never closed and the question got a generic
+# business-hours answer instead of an order ETA. The router prompt
+# already says "eso es todo / no más / nada más" during checkout
+# closes the cart, AND that mixed-domain intents must split into
+# multiple segments. The LLM keeps mixing them — deterministic split
+# guarantees it.
+_CHECKOUT_CLOSE_PHRASES: tuple = tuple(
+    sorted(
+        ("eso es todo", "nada mas", "no mas", "es todo", "listo"),
+        key=lambda p: (-len(p), p),
+    )
+)
+
+_QUESTION_WORDS = frozenset({
+    "cuando", "cuanto", "cuanta", "cuantos", "cuantas",
+    "cual", "cuales",
+    "donde", "adonde",
+    "que", "como", "porque",
+})
+
+_CLOSE_BOUNDARY_CHARS = " ,.;:!?¿"
+
+
+def _deterministic_close_plus_question(
+    message_body: str,
+) -> Optional[Tuple[str, str]]:
+    """
+    Detect "<checkout-close phrase> + <question>" at the start of the
+    message. Return ``(close_part, question_part)`` when a valid split
+    applies — caller routes the two parts to ``order`` and
+    ``customer_service`` respectively. Returns ``None`` otherwise so
+    the router falls through to the LLM.
+
+    Conservative — false negatives just go through the LLM, false
+    positives would split innocuous messages:
+      - Close phrase at the start (after stripping leading punctuation
+        / whitespace), at a token boundary.
+      - Remainder must look like a question: contains ``?`` / ``¿`` or
+        a question word (``cuándo``, ``cuánto``, ``dónde``, ``qué``,
+        ``cómo``, ``cuál``, ``por qué``).
+      - Remainder ≥ 4 chars so trailing single tokens don't qualify.
+    """
+    text = (message_body or "").strip()
+    if not text:
+        return None
+
+    text_lead_stripped = re.sub(r"^[¿¡!,.\s]+", "", text)
+    if not text_lead_stripped:
+        return None
+
+    norm = _strip_accents_lower(text_lead_stripped)
+
+    matched_phrase: Optional[str] = None
+    matched_n_tokens: int = 0
+    for phrase in _CHECKOUT_CLOSE_PHRASES:
+        if not norm.startswith(phrase):
+            continue
+        boundary_idx = len(phrase)
+        if boundary_idx < len(norm) and norm[boundary_idx] not in _CLOSE_BOUNDARY_CHARS:
+            continue
+        matched_phrase = phrase
+        matched_n_tokens = phrase.count(" ") + 1
+        break
+    if matched_phrase is None:
+        return None
+
+    tokens = re.split(r"(\s+)", text_lead_stripped)
+    close_parts: List[str] = []
+    seen_words = 0
+    rest_start = len(tokens)
+    for i, tok in enumerate(tokens):
+        if not tok or tok.isspace():
+            close_parts.append(tok)
+            continue
+        close_parts.append(tok)
+        seen_words += 1
+        if seen_words >= matched_n_tokens:
+            rest_start = i + 1
+            break
+
+    close_part = "".join(close_parts).strip(" ,.;:")
+    rest_part = "".join(tokens[rest_start:]).strip(" ,.;:")
+    if not close_part or not rest_part or len(rest_part) < 4:
+        return None
+
+    has_question_mark = "?" in rest_part or "¿" in rest_part
+    rest_norm = _strip_accents_lower(rest_part)
+    rest_tokens_norm = re.findall(r"\w+", rest_norm)
+    has_question_word = any(t in _QUESTION_WORDS for t in rest_tokens_norm)
+    if not (has_question_mark or has_question_word):
+        return None
+
+    return close_part, rest_part
+
+
 def _recognize_full_product_name(
     message_body: str,
     business_context: Optional[dict],
@@ -823,7 +923,29 @@ def route(
                 recognized_product=recognized_product,
             )
 
-    # 7. LLM classification
+        # 3e. Checkout-close + question split. "eso es todo en cuanto
+        # puedo pasar por el local?" combines a cart-close ("eso es todo")
+        # with a question ("en cuánto puedo pasar?"). The LLM collapses
+        # these into a single segment; deterministic split forces the
+        # cart-close to fire AND the question to be answered.
+        # Production observation 2026-05-17 (Biela / +57…).
+        split = _deterministic_close_plus_question(message_body)
+        if split is not None:
+            close_part, question_part = split
+            logger.info(
+                "[ROUTER] close+question split → order + customer_service: "
+                "close=%r question=%r",
+                close_part, question_part,
+            )
+            return RouterResult(
+                segments=[
+                    (DOMAIN_ORDER, close_part),
+                    (DOMAIN_CUSTOMER_SERVICE, question_part),
+                ],
+                recognized_product=recognized_product,
+            )
+
+    # 4. LLM classification
     segments = _classify_with_llm(
         message_body, business_context, ctx=ctx,
         wa_id=wa_id, turn_id=turn_id,

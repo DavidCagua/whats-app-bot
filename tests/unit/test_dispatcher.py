@@ -10,7 +10,13 @@ from app.orchestration import dispatcher
 BIZ_CTX = {"business_id": "biz-1", "business": {"name": "Biela", "settings": {}}}
 
 
-def _agent_output(agent_type: str, message: str = "", state_update: dict = None, handoff: dict = None):
+def _agent_output(
+    agent_type: str,
+    message: str = "",
+    state_update: dict = None,
+    handoff: dict = None,
+    envelope_kind: str = None,
+):
     out = {
         "agent_type": agent_type,
         "message": message,
@@ -18,6 +24,8 @@ def _agent_output(agent_type: str, message: str = "", state_update: dict = None,
     }
     if handoff is not None:
         out["handoff"] = handoff
+    if envelope_kind is not None:
+        out["envelope_kind"] = envelope_kind
     return out
 
 
@@ -254,6 +262,89 @@ class TestConsumeAbortHelper:
              patch("app.services.debounce.requeue_aborted_text", side_effect=RuntimeError("boom")):
             # Must not raise.
             dispatcher._consume_abort("abort:b:p", "x")
+
+
+class TestStructuredEnvelopeBypassesComposer:
+    """
+    Regression: production observation 2026-05-17 (Biela / +57…). The
+    router split a turn into (order, "eso es todo") + (customer_service,
+    "en cuanto puedo pasar?"). The order agent emitted a
+    ``ready_to_confirm`` recap with "¿Confirmamos?". The composer LLM
+    merged it with the CS answer into a single paraphrase that dropped
+    the "¿Confirmamos?" question — the customer never saw the CTA.
+
+    When any output carries a structured envelope kind, the composer
+    must be bypassed: outputs concatenated verbatim with the CTA last.
+    """
+
+    def test_ready_to_confirm_bypasses_composer_and_is_last(self):
+        outputs = iter([
+            _agent_output(
+                "order",
+                "Tengo estos datos para tu pedido:\n*Nombre:* David\n*Modo:* 🏃 Recoger\n¿Confirmamos el pedido?",
+                envelope_kind="ready_to_confirm",
+            ),
+            _agent_output(
+                "customer_service",
+                "Tu pedido estaría listo en aproximadamente 15 a 20 minutos.",
+            ),
+        ])
+        with patch.object(dispatcher, "execute_agent", side_effect=lambda **_: next(outputs)), \
+             patch.object(dispatcher, "_persist_state_update"), \
+             patch("app.orchestration.response_composer.compose") as m_compose:
+            result = dispatcher.dispatch(
+                [("order", "eso es todo"), ("customer_service", "en cuanto puedo pasar?")],
+                wa_id="w", name="n", business_context=BIZ_CTX,
+            )
+        m_compose.assert_not_called()
+        # CS answer up top, confirm CTA last — verbatim.
+        assert result.message == (
+            "Tu pedido estaría listo en aproximadamente 15 a 20 minutos.\n\n"
+            "Tengo estos datos para tu pedido:\n*Nombre:* David\n*Modo:* 🏃 Recoger\n¿Confirmamos el pedido?"
+        )
+
+    def test_order_placed_bypasses_composer(self):
+        # Same protection for the post-place_order receipt envelope.
+        outputs = iter([
+            _agent_output(
+                "order",
+                "Pedido #1234 confirmado. Total: $28.000.",
+                envelope_kind="order_placed",
+            ),
+            _agent_output("customer_service", "Gracias por preferirnos."),
+        ])
+        with patch.object(dispatcher, "execute_agent", side_effect=lambda **_: next(outputs)), \
+             patch.object(dispatcher, "_persist_state_update"), \
+             patch("app.orchestration.response_composer.compose") as m_compose:
+            result = dispatcher.dispatch(
+                [("order", "x"), ("customer_service", "y")],
+                wa_id="w", name="n", business_context=BIZ_CTX,
+            )
+        m_compose.assert_not_called()
+        # CS up top, receipt last.
+        assert result.message == (
+            "Gracias por preferirnos.\n\n"
+            "Pedido #1234 confirmado. Total: $28.000."
+        )
+
+    def test_non_structured_envelope_still_runs_composer(self):
+        # Sanity: ordinary multi-segment turns still get the composer.
+        outputs = iter([
+            _agent_output("order", "Listo, agregué una barracuda."),
+            _agent_output("customer_service", "Abrimos a las 9 AM."),
+        ])
+        with patch.object(dispatcher, "execute_agent", side_effect=lambda **_: next(outputs)), \
+             patch.object(dispatcher, "_persist_state_update"), \
+             patch(
+                 "app.orchestration.response_composer.compose",
+                 return_value="MERGED",
+             ) as m_compose:
+            result = dispatcher.dispatch(
+                [("order", "x"), ("customer_service", "y")],
+                wa_id="w", name="n", business_context=BIZ_CTX,
+            )
+        m_compose.assert_called_once()
+        assert result.message == "MERGED"
 
 
 class TestStatePersistenceBetweenHops:

@@ -292,13 +292,28 @@ def _error_output(agent_type: str, error_message: str) -> Dict[str, Any]:
     }
 
 
+# Envelope kinds that produce a structured, customer-facing call-to-action
+# (a confirmation card recap, a placed-order receipt). When these appear in
+# a multi-segment turn, the composer LLM must NOT paraphrase them — it
+# would drop the "¿Confirmamos?" question or the receipt formatting.
+# Instead the dispatcher concatenates: non-CTA outputs first, the CTA
+# verbatim last, so the customer reads the answer to their question and
+# then sees the prompt they need to act on.
+_STRUCTURED_ENVELOPE_KINDS = frozenset({"ready_to_confirm", "order_placed"})
+
+
 def _compose_final_message(outputs: List[Dict[str, Any]]) -> str:
     """
     Build the single user-facing reply from one or more agent outputs.
 
     - 0 outputs → empty string (caller handles).
     - 1 output → that agent's message verbatim. Composer skipped.
-    - 2+ outputs → run the composer to merge prose cleanly.
+    - Any output carries a structured envelope kind (``ready_to_confirm``,
+      ``order_placed``) → concatenate verbatim with the structured
+      message LAST. The composer LLM would paraphrase the recap /
+      receipt and lose the CTA shape.
+    - 2+ outputs without a structured envelope → run the composer to
+      merge prose cleanly.
     """
     # Filter out empty messages (e.g. aborted agents) but keep order.
     non_empty = [o for o in outputs if (o.get("message") or "").strip()]
@@ -306,6 +321,21 @@ def _compose_final_message(outputs: List[Dict[str, Any]]) -> str:
         return ""
     if len(non_empty) == 1:
         return non_empty[0]["message"].strip()
+
+    structured = [
+        o for o in non_empty
+        if (o.get("envelope_kind") or "") in _STRUCTURED_ENVELOPE_KINDS
+    ]
+    if structured:
+        # Non-structured outputs first (the customer's other question
+        # answered up top), structured CTAs last so the call-to-action
+        # is the final thing on screen.
+        others = [
+            o for o in non_empty
+            if (o.get("envelope_kind") or "") not in _STRUCTURED_ENVELOPE_KINDS
+        ]
+        ordered = others + structured
+        return "\n\n".join(o["message"].strip() for o in ordered)
 
     # Lazy import so tests can stub composer independently and to avoid
     # spinning up the composer LLM for single-agent turns.

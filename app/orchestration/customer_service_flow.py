@@ -35,7 +35,7 @@ from ..database.conversation_agent_service import (
 )
 from ..services import business_info_service
 from ..services import promotion_service
-from ..services.order_eta import estimate_remaining_minutes
+from ..services.order_eta import estimate_remaining_minutes, PICKUP_RANGE_TEXT
 from ..services.order_modification_policy import (
     can_customer_cancel,
     CANCEL_REASON_CUSTOMER_WHATSAPP,
@@ -143,6 +143,15 @@ def _should_trigger_delivery_handoff(order: Dict[str, Any]) -> bool:
     return elapsed_min >= _delivery_handoff_threshold_min()
 
 
+def _session_is_pickup(session: Optional[Dict[str, Any]]) -> bool:
+    """True iff the customer's in-flight session is in pickup mode."""
+    if not isinstance(session, dict):
+        return False
+    order_context = session.get("order_context") or {}
+    raw = (order_context.get("fulfillment_type") or "").strip().lower()
+    return raw == "pickup"
+
+
 def _settings_from_context(
     business_context: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
@@ -214,7 +223,6 @@ def _handle_business_info(
     if field == "delivery_time":
         latest = order_lookup_service.get_latest_order(wa_id, business_id)
         if latest:
-            from ..services.order_eta import estimate_remaining_minutes
             settings = _settings_from_context(business_context)
             if estimate_remaining_minutes(
                 {
@@ -229,6 +237,20 @@ def _handle_business_info(
                     RESULT_KIND_ORDER_STATUS,
                     order=_clean_order_for_response(latest, business_settings=settings),
                 )
+
+        # No placed order yet but the customer is mid-checkout in pickup
+        # mode — return the pickup-specific range ("15 a 20 minutos")
+        # instead of the generic delivery_time (45 min). Production
+        # observation 2026-05-17: pickup user asked "en cuánto puedo
+        # pasar?" while the cart was in ready_to_confirm and got
+        # "45 minutos" — the delivery-mode number.
+        if _session_is_pickup(session):
+            return _base_result(
+                wa_id, business_id,
+                RESULT_KIND_BUSINESS_INFO,
+                field="pickup_time",
+                value=PICKUP_RANGE_TEXT,
+            )
 
     value = business_info_service.get_business_info(business_context, field)
     if value is None:

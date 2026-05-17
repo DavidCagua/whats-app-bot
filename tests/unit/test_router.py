@@ -1189,3 +1189,126 @@ class TestRouterMediaWithRecentOrderShortCircuit:
                 attachments=attachments,
             )
             fake_classify.assert_called_once()
+
+
+class TestRouterCloseAndQuestionSplit:
+    """
+    Regression: production observation 2026-05-17 (Biela / +57…). The
+    customer had an active pickup cart and the bot had just asked
+    "¿algo más o procedemos con el pedido?". They replied
+    "eso es todo en cuanto puedo pasar por el local?". The LLM router
+    collapsed both clauses into a single customer_service segment and
+    answered with business hours — the cart was never closed and the
+    legitimate question (when can I pick up) got the wrong answer.
+
+    Deterministic split forces (order, close) + (customer_service,
+    question) so both intents dispatch.
+    """
+
+    def _route(self, message):
+        with patch("app.orchestration.router._classify_with_llm") as classifier:
+            return router.route(message, BIELA_CONTEXT, "David"), classifier
+
+    @pytest.mark.parametrize(
+        "msg,expected_close,expected_question",
+        [
+            (
+                "eso es todo en cuanto puedo pasar por el local?",
+                "eso es todo",
+                "en cuanto puedo pasar por el local?",
+            ),
+            (
+                "eso es todo, ¿cuándo está listo?",
+                "eso es todo",
+                "¿cuándo está listo?",
+            ),
+            (
+                "no más cuánto demora?",
+                "no más",
+                "cuánto demora?",
+            ),
+            (
+                "nada más, en cuánto puedo recoger?",
+                "nada más",
+                "en cuánto puedo recoger?",
+            ),
+            (
+                "Listo, ¿en cuánto está?",
+                "Listo",
+                "¿en cuánto está?",
+            ),
+            (
+                "es todo, dónde queda el local?",
+                "es todo",
+                "dónde queda el local?",
+            ),
+        ],
+    )
+    def test_splits_close_plus_question(
+        self, msg, expected_close, expected_question,
+    ):
+        result, classifier = self._route(msg)
+        classifier.assert_not_called()
+        assert result.segments == [
+            (router.DOMAIN_ORDER, expected_close),
+            (router.DOMAIN_CUSTOMER_SERVICE, expected_question),
+        ], f"Got segments: {result.segments}"
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # No question marker → not a split.
+            "eso es todo gracias",
+            "no más por favor",
+            "listo dale",
+            "listo gracias",
+            # Question without a close phrase prefix.
+            "cuándo está listo?",
+            "en cuánto puedo pasar?",
+            # Close phrase but no boundary (not a word match).
+            "listoso?",
+            "es todoso?",
+            # Close phrase alone (no remainder) → not a split.
+            "eso es todo",
+            "listo",
+            "no más?",
+            # "ya" is intentionally NOT a close phrase (too ambiguous).
+            "ya cuándo llega?",
+            # Empty / whitespace.
+            "",
+            "   ",
+        ],
+    )
+    def test_does_not_split_when_pattern_unmatched(self, msg):
+        mock_llm = _mock_llm_returning(
+            '{"segments": [{"domain": "chat", "text": "x"}]}'
+        )
+        with patch("app.orchestration.router._get_llm_classifier", return_value=mock_llm):
+            result = router.route(msg, BIELA_CONTEXT, "David")
+        # No split applied → either greeting fast-path, LLM call, or
+        # empty result. The only thing this test asserts is that the
+        # segments DON'T have the split-shape (two segments with
+        # order + customer_service).
+        if result.segments is not None and len(result.segments) == 2:
+            domains = [d for d, _ in result.segments]
+            assert domains != [router.DOMAIN_ORDER, router.DOMAIN_CUSTOMER_SERVICE], (
+                f"Should not have split: msg={msg!r} segments={result.segments}"
+            )
+
+    def test_image_attachment_blocks_split(self):
+        # The close+question splitter is text-only, gated behind the
+        # "no classifiable attachment" check — receipts with caption
+        # "eso es todo cuándo llega?" go through the LLM with full
+        # multimodal context so handoff_payment_proof can still fire.
+        attachments = [{"type": "image", "url": "https://x/r.jpg"}]
+        fake_classify = MagicMock(
+            return_value=[(router.DOMAIN_CUSTOMER_SERVICE, "x")]
+        )
+        with patch("app.orchestration.router._classify_with_llm", fake_classify):
+            router.route(
+                "eso es todo cuándo llega?",
+                BIELA_CONTEXT,
+                "David",
+                attachments=attachments,
+            )
+            fake_classify.assert_called_once()

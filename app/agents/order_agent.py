@@ -948,6 +948,14 @@ class OrderAgent(BaseAgent):
                 "agent_type": self.agent_type,
                 "message": final_text,
                 "state_update": {"active_agents": ["order"]},
+                # Surface envelope kind to the dispatcher so multi-segment
+                # turns can preserve structured CTAs (ready_to_confirm,
+                # order_placed) instead of paraphrasing them through the
+                # composer LLM. Production observation 2026-05-17:
+                # router-split turn merged a ready_to_confirm prompt with
+                # a CS answer via the composer; the "¿Confirmamos?" CTA
+                # disappeared in the paraphrase.
+                "envelope_kind": envelope_kind,
             }
 
         except Exception as exc:

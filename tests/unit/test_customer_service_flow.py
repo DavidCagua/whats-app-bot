@@ -155,6 +155,72 @@ class TestGetBusinessInfo:
         assert "Hoy abrimos a las 5:00 PM" in value
         assert "Lun a Vie: 5:00 PM - 10:00 PM" in value
 
+    def test_delivery_time_pickup_session_returns_pickup_range(self):
+        """
+        Regression: production observation 2026-05-17 (Biela / +57…).
+        Pickup user mid-checkout asked "en cuánto puedo pasar?". No
+        order placed yet, so the per-order ETA path didn't fire. The
+        handler used to fall through to the generic delivery_time text
+        ("45 minutos") which is wrong for pickup (no last-mile leg).
+        Now: session.fulfillment_type=pickup → PICKUP_RANGE_TEXT with
+        a pickup-specific field key the renderer maps to its own
+        template.
+        """
+        from app.services.order_eta import PICKUP_RANGE_TEXT
+        session = {"order_context": {"fulfillment_type": "pickup", "items": [{}]}}
+        with patch.object(
+            csf.order_lookup_service, "get_latest_order", return_value=None,
+        ):
+            result = _run(
+                INTENT_GET_BUSINESS_INFO,
+                {"field": "delivery_time"},
+                session=session,
+            )
+        assert result["result_kind"] == csf.RESULT_KIND_BUSINESS_INFO
+        assert result["field"] == "pickup_time"
+        assert result["value"] == PICKUP_RANGE_TEXT
+
+    def test_delivery_time_delivery_session_returns_generic(self):
+        """
+        Sanity: delivery-mode session (or no session) keeps the generic
+        delivery_time text. The pickup swap must not affect delivery.
+        """
+        ctx = {
+            "business_id": BIZ,
+            "business": {"name": "X", "settings": {"delivery_time_text": "40 a 50 minutos"}},
+        }
+        session = {"order_context": {"fulfillment_type": "delivery"}}
+        with patch.object(
+            csf.order_lookup_service, "get_latest_order", return_value=None,
+        ):
+            result = _run(
+                INTENT_GET_BUSINESS_INFO,
+                {"field": "delivery_time"},
+                ctx=ctx,
+                session=session,
+            )
+        assert result["result_kind"] == csf.RESULT_KIND_BUSINESS_INFO
+        assert result["field"] == "delivery_time"
+        assert result["value"] == "40 a 50 minutos"
+
+    def test_delivery_time_no_session_returns_generic(self):
+        # No session at all (e.g. cold turn) → falls through normally.
+        ctx = {
+            "business_id": BIZ,
+            "business": {"name": "X", "settings": {"delivery_time_text": "40 a 50 minutos"}},
+        }
+        with patch.object(
+            csf.order_lookup_service, "get_latest_order", return_value=None,
+        ):
+            result = _run(
+                INTENT_GET_BUSINESS_INFO,
+                {"field": "delivery_time"},
+                ctx=ctx,
+                session=None,
+            )
+        assert result["field"] == "delivery_time"
+        assert result["value"] == "40 a 50 minutos"
+
     def test_hours_response_no_open_status_when_no_availability_data(self):
         # No availability rows → no sentence prepended; value is just
         # the hours string (legacy fallback path).
