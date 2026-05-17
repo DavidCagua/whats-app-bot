@@ -12,8 +12,9 @@ export type ConversationGroup = {
   message_count: number
   whatsapp_number: string | null
   /** Reason the bot is currently disabled, or null if it's active.
-   * "delivery_handoff" is set automatically by the customer-service
-   * flow when the 50-min order-status threshold trips. */
+   * Auto-set by the customer-service flow:
+   *   "delivery_handoff" — 50-min order-status threshold tripped.
+   *   "payment_proof"   — customer sent a receipt image/PDF. */
   handoff_reason: string | null
 }
 

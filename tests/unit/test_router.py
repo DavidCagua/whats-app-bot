@@ -1025,3 +1025,167 @@ class TestSingleTokenMapBuilder:
         products = [{"name": "Barracuda", "is_active": True}]
         out = self._build(products)
         assert out == {"barracuda": "Barracuda"}
+
+
+class TestRouterMediaWithRecentOrderShortCircuit:
+    """
+    Regression: 2026-05-17 (Biela / 3177000722). Customer placed an
+    order, then sent a Nequi receipt image with caption "Ya pague".
+    The LLM router classified the turn as DOMAIN_ORDER (treated as a
+    despedida/follow-up) and the order agent acknowledged inline
+    without handing off. handoff_payment_proof lives on the CS agent,
+    so receipts have to reach CS for the visual classifier to fire.
+
+    Rule: when there's an image/document attachment AND the customer
+    has a recent order (turn_ctx.latest_order_status set), route to
+    customer_service without invoking the LLM classifier.
+    """
+
+    def _ctx_with_recent_order(self):
+        return router.TurnContext(
+            order_state="GREETING",
+            has_active_cart=False,
+            cart_summary="",
+            latest_order_status="confirmed",
+            latest_order_id="order-1",
+        )
+
+    def _ctx_no_recent_order(self):
+        return router.TurnContext()
+
+    def test_image_with_recent_order_routes_to_customer_service(self):
+        attachments = [{"type": "image", "url": "https://x/r.jpg"}]
+        with patch("app.orchestration.router._classify_with_llm") as classifier:
+            result = router.route(
+                "Ya pague", BIELA_CONTEXT, "David",
+                ctx=self._ctx_with_recent_order(),
+                attachments=attachments,
+            )
+            # LLM classifier must not run — this is a pre-LLM fast-path.
+            classifier.assert_not_called()
+        assert result.domain == router.DOMAIN_CUSTOMER_SERVICE, (
+            f"Expected CS routing, got {result.segments}"
+        )
+        assert result.segments == [(router.DOMAIN_CUSTOMER_SERVICE, "Ya pague")]
+
+    def test_pdf_with_recent_order_routes_to_customer_service(self):
+        attachments = [{
+            "type": "document",
+            "url": "https://x/r.pdf",
+            "content_type": "application/pdf",
+        }]
+        with patch("app.orchestration.router._classify_with_llm") as classifier:
+            result = router.route(
+                "comprobante", BIELA_CONTEXT, "David",
+                ctx=self._ctx_with_recent_order(),
+                attachments=attachments,
+            )
+            classifier.assert_not_called()
+        assert result.domain == router.DOMAIN_CUSTOMER_SERVICE
+
+    def test_image_without_recent_order_falls_through_to_llm(self):
+        # Promo flyer or product photo sent BEFORE ordering — the
+        # short-circuit must not fire, so the LLM router can decide
+        # between order (product image) and CS (promo flyer).
+        attachments = [{"type": "image", "url": "https://x/p.jpg"}]
+        fake_classify = MagicMock(return_value=[(router.DOMAIN_ORDER, "una de esas")])
+        with patch("app.orchestration.router._classify_with_llm", fake_classify):
+            result = router.route(
+                "una de esas", BIELA_CONTEXT, "David",
+                ctx=self._ctx_no_recent_order(),
+                attachments=attachments,
+            )
+            fake_classify.assert_called_once()
+        assert result.domain == router.DOMAIN_ORDER
+
+    def test_no_attachments_with_recent_order_falls_through_to_llm(self):
+        # Text-only post-order turns ("ya llegó?", "y el domicilio?")
+        # must still go through the LLM router so they reach CS only
+        # via normal classification — the short-circuit is media-only.
+        fake_classify = MagicMock(return_value=[(router.DOMAIN_CUSTOMER_SERVICE, "ya?")])
+        with patch("app.orchestration.router._classify_with_llm", fake_classify):
+            result = router.route(
+                "ya?", BIELA_CONTEXT, "David",
+                ctx=self._ctx_with_recent_order(),
+                attachments=None,
+            )
+            fake_classify.assert_called_once()
+        assert result.domain == router.DOMAIN_CUSTOMER_SERVICE
+
+    def test_image_with_product_caption_no_recent_order_goes_to_llm(self):
+        # When the customer attaches a product photo with caption like
+        # "una BARRACUDA" and there is NO recent order, text-based
+        # deterministic rules (price-of-product, multi-word product)
+        # are SKIPPED so the LLM can analyze the caption and the image
+        # together. The visual content might contradict, clarify, or
+        # override the text intent (e.g. the photo is actually a promo
+        # flyer, or a receipt). The LLM classifier decides with full
+        # multimodal context.
+        attachments = [{"type": "image", "url": "https://x/burger.jpg"}]
+        fake_classify = MagicMock(return_value=[(router.DOMAIN_ORDER, "una BARRACUDA")])
+        with patch(
+            "app.orchestration.router._deterministic_price_of_product",
+            return_value=True,  # would short-circuit to order if reached
+        ), patch("app.orchestration.router._classify_with_llm", fake_classify):
+            router.route(
+                "una BARRACUDA", BIELA_CONTEXT, "David",
+                ctx=self._ctx_no_recent_order(),
+                attachments=attachments,
+            )
+            # LLM classifier must run — text rules are gated off when
+            # a classifiable attachment is present.
+            fake_classify.assert_called_once()
+
+    def test_image_with_product_caption_recent_order_still_routes_to_cs(self):
+        # Post-order receipt where the customer happens to also type a
+        # product name. The text-based fast-paths must NOT fire — the
+        # media-with-recent-order short-circuit wins so handoff_payment_proof
+        # can classify the receipt. Without this, the price-of-product
+        # rule would steal the turn for the order agent.
+        attachments = [{"type": "image", "url": "https://x/receipt.jpg"}]
+        with patch(
+            "app.orchestration.router._deterministic_price_of_product",
+            return_value=True,  # tempting bait — must not fire
+        ), patch("app.orchestration.router._classify_with_llm") as classifier:
+            result = router.route(
+                "ya pague la BARRACUDA", BIELA_CONTEXT, "David",
+                ctx=self._ctx_with_recent_order(),
+                attachments=attachments,
+            )
+            classifier.assert_not_called()
+        assert result.domain == router.DOMAIN_CUSTOMER_SERVICE, (
+            "Media + recent order must win over text fast-paths. "
+            f"Got: {result.segments}"
+        )
+
+    def test_text_only_product_still_uses_deterministic_fast_path(self):
+        # Sanity: without any attachment, the text-based fast-paths
+        # still fire. The gate is "no classifiable attachment", not
+        # "always skip text rules".
+        with patch(
+            "app.orchestration.router._deterministic_price_of_product",
+            return_value=True,
+        ), patch("app.orchestration.router._classify_with_llm") as classifier:
+            result = router.route(
+                "cuánto vale la BARRACUDA?", BIELA_CONTEXT, "David",
+                ctx=self._ctx_no_recent_order(),
+                attachments=None,
+            )
+            classifier.assert_not_called()
+        assert result.domain == router.DOMAIN_ORDER
+
+    def test_audio_with_recent_order_falls_through_to_llm(self):
+        # Audio is transcribed upstream by media_job (no visual
+        # content for handoff_payment_proof to classify). The
+        # short-circuit only targets image/document. Use a non-
+        # greeting message so the greeting fast-path doesn't fire
+        # before the classifier is reached.
+        attachments = [{"type": "audio", "url": "https://x/a.ogg"}]
+        fake_classify = MagicMock(return_value=[(router.DOMAIN_CUSTOMER_SERVICE, "ya casi")])
+        with patch("app.orchestration.router._classify_with_llm", fake_classify):
+            router.route(
+                "ya casi llega?", BIELA_CONTEXT, "David",
+                ctx=self._ctx_with_recent_order(),
+                attachments=attachments,
+            )
+            fake_classify.assert_called_once()

@@ -381,6 +381,26 @@ _STUCK_ARTICLE_PREFIXES = tuple(
 )
 
 
+def _has_classifiable_attachment(attachments: Optional[list]) -> bool:
+    """
+    True if ``attachments`` contains at least one item the CS planner
+    can visually classify — an image, or a PDF document. Used by the
+    router's attachment fast-path to bypass the LLM classifier and
+    route image-bearing turns directly to customer_service.
+    """
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        att_type = (att.get("type") or "").strip().lower()
+        if att_type == "image":
+            return True
+        if att_type == "document":
+            content_type = (att.get("content_type") or "").lower()
+            if "pdf" in content_type:
+                return True
+    return False
+
+
 def _strip_accents_lower(s: str) -> str:
     nfkd = unicodedata.normalize("NFD", (s or "").lower())
     return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
@@ -704,7 +724,11 @@ def route(
             return RouterResult(direct_reply=greeting)
 
     if not (message_body or "").strip():
-        return RouterResult()
+        # Empty body but with media — let the deterministic rules and
+        # LLM classifier below see the attachments. An image with no
+        # caption is still routable.
+        if not attachments:
+            return RouterResult()
 
     # Pre-compute the multi-word catalog product detection — it's
     # used both to short-circuit routing (when present, the user
@@ -716,70 +740,90 @@ def route(
     # the planner picked from a partial listed-options block).
     recognized_product = _recognize_full_product_name(message_body, business_context)
 
-    # 2. Deterministic pre-classifier — price-of-product short-circuit.
-    # Skips the LLM when the catalog itself confirms the user named a
-    # product. Independent of conversation state (price questions are
-    # valid in any state).
-    if _deterministic_price_of_product(message_body, business_context):
-        logger.info("[ROUTER] deterministic price-of-product hit → order")
-        return RouterResult(
-            segments=[(DOMAIN_ORDER, message_body)],
-            recognized_product=recognized_product,
-        )
-
-    # 3. Stuck-article splitter — "unabimota" / "elpegoretti" /
-    # "lapicada" with a catalog match → force order with the
-    # rewritten message. Production observation 2026-05-05 (Biela /
-    # 3177000722): "unabimota" was misrouted to customer_service →
-    # cs_chat_fallback because the LLM saw a single unknown token
-    # with no article cue.
-    business_id = str((business_context or {}).get("business_id") or "")
-    if business_id:
-        try:
-            lookup = catalog_cache.get_router_lookup_set(business_id)
-        except Exception as exc:
-            logger.warning("[ROUTER] router_lookup_set failed: %s", exc)
-            lookup = frozenset()
-        if lookup:
-            expanded = _expand_stuck_articles(message_body, lookup)
-            if expanded != message_body:
-                logger.info(
-                    "[ROUTER] stuck-article splitter rewrote message → order: %r → %r",
-                    message_body, expanded,
-                )
-                return RouterResult(
-                    segments=[(DOMAIN_ORDER, expanded)],
-                    recognized_product=recognized_product,
-                )
-
-    # 4. Imperative promo-add short-circuit. "una promo de oregon" /
-    # "un combo familiar" / "quiero la oferta del lunes" — Colombian
-    # article-noun-imperative or explicit-verb add. The LLM kept
-    # mis-classifying these as customer_service (info question) because
-    # the verb is implicit. Force order so add_promo_to_cart resolves
-    # and adds in one step.
-    if _deterministic_promo_add(message_body, business_context):
-        logger.info("[ROUTER] deterministic promo-add hit → order")
-        return RouterResult(
-            segments=[(DOMAIN_ORDER, message_body)],
-            recognized_product=recognized_product,
-        )
-
-    # 5. Multi-word product-name short-circuit. The catalog confirms
-    # the user named a specific product (≥ 2 tokens, ≥ 5 chars
-    # normalized). Force order routing — the order planner picks it
-    # up via ``recognized_product``.
-    if recognized_product is not None:
+    # 2. Image / PDF with a recent order → force customer_service.
+    # Receipt-shaped turns ("Ya pague" + Nequi screenshot) must reach
+    # CS so handoff_payment_proof can fire, even if the caption alone
+    # would have matched a text-based fast-path. Production observation
+    # 2026-05-17 (Biela / +573177000722): caption "Ya pague" classified
+    # as `order` (despedida-shaped) → handoff never fired. Pre-order
+    # media (no latest_order_status) falls through to the LLM classifier
+    # so a product photo / promo flyer can still be routed correctly.
+    if _has_classifiable_attachment(attachments) and ctx is not None and ctx.latest_order_status:
         logger.info(
-            "[ROUTER] full-name product short-circuit → order: recognized=%r",
-            recognized_product,
+            "[ROUTER] media-with-recent-order short-circuit → customer_service "
+            "(order_status=%s)", ctx.latest_order_status,
         )
         return RouterResult(
-            segments=[(DOMAIN_ORDER, message_body)],
+            segments=[(DOMAIN_CUSTOMER_SERVICE, message_body or "")],
             recognized_product=recognized_product,
         )
 
-    # 5. LLM classification
+    # 3. Text-based deterministic short-circuits — only when the turn
+    # has NO classifiable attachment. When an image or PDF is attached,
+    # the caption alone is insufficient signal: the visual content might
+    # contradict, clarify, or override the text intent (e.g. a payment
+    # receipt with caption "una BARRACUDA" is still a receipt, not a
+    # cart-add). The LLM classifier downstream sees the full multimodal
+    # context and decides correctly.
+    if not _has_classifiable_attachment(attachments):
+        # 3a. Price-of-product short-circuit. Catalog confirms the user
+        # named a product. Independent of conversation state.
+        if _deterministic_price_of_product(message_body, business_context):
+            logger.info("[ROUTER] deterministic price-of-product hit → order")
+            return RouterResult(
+                segments=[(DOMAIN_ORDER, message_body)],
+                recognized_product=recognized_product,
+            )
+
+        # 3b. Stuck-article splitter — "unabimota" / "elpegoretti" /
+        # "lapicada" with a catalog match → force order with the
+        # rewritten message. Production observation 2026-05-05 (Biela /
+        # 3177000722): "unabimota" was misrouted to customer_service →
+        # cs_chat_fallback because the LLM saw a single unknown token
+        # with no article cue.
+        business_id = str((business_context or {}).get("business_id") or "")
+        if business_id:
+            try:
+                lookup = catalog_cache.get_router_lookup_set(business_id)
+            except Exception as exc:
+                logger.warning("[ROUTER] router_lookup_set failed: %s", exc)
+                lookup = frozenset()
+            if lookup:
+                expanded = _expand_stuck_articles(message_body, lookup)
+                if expanded != message_body:
+                    logger.info(
+                        "[ROUTER] stuck-article splitter rewrote message → order: %r → %r",
+                        message_body, expanded,
+                    )
+                    return RouterResult(
+                        segments=[(DOMAIN_ORDER, expanded)],
+                        recognized_product=recognized_product,
+                    )
+
+        # 3c. Imperative promo-add short-circuit. "una promo de oregon" /
+        # "un combo familiar" / "quiero la oferta del lunes" — Colombian
+        # article-noun-imperative or explicit-verb add.
+        if _deterministic_promo_add(message_body, business_context):
+            logger.info("[ROUTER] deterministic promo-add hit → order")
+            return RouterResult(
+                segments=[(DOMAIN_ORDER, message_body)],
+                recognized_product=recognized_product,
+            )
+
+        # 3d. Multi-word product-name short-circuit. The catalog
+        # confirms the user named a specific product (≥ 2 tokens, ≥ 5
+        # chars normalized).
+        if recognized_product is not None:
+            logger.info(
+                "[ROUTER] full-name product short-circuit → order: recognized=%r",
+                recognized_product,
+            )
+            return RouterResult(
+                segments=[(DOMAIN_ORDER, message_body)],
+                recognized_product=recognized_product,
+            )
+
+    # 7. LLM classification
     segments = _classify_with_llm(
         message_body, business_context, ctx=ctx,
         wa_id=wa_id, turn_id=turn_id,

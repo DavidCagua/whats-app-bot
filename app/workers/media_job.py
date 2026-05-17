@@ -291,6 +291,28 @@ def process_media_job(conversation_id: int, abort_key: Optional[str] = None) -> 
                 )
                 _handle_image_message(conv, public_url, caption, abort_key)
 
+            # Document path: PDF (and other documents) are dispatched
+            # through the same agent pipeline as images. The multimodal
+            # builder fetches PDFs from the URL and inlines them as
+            # file_data so the vision-capable planner can classify them
+            # (payment-proof receipt, menu PDF, etc.). Non-PDF documents
+            # reach the agent without their content, and the planner can
+            # still respond to the caption.
+            elif (att.type or "").lower() == "document":
+                raw_message = (conv.message or "").strip()
+                caption = "" if raw_message in _MEDIA_PLACEHOLDERS else raw_message
+                logging.warning(
+                    "[MEDIA_JOB] document attachment ready: raw_message=%r "
+                    "has_caption=%s content_type=%s url=%s",
+                    raw_message, bool(caption),
+                    att.content_type, (public_url or "")[:60],
+                )
+                _handle_document_message(
+                    conv, public_url, caption,
+                    content_type=att.content_type,
+                    abort_key=abort_key,
+                )
+
     except Exception as e:
         logging.error(f"[MEDIA_JOB] Error: {e}", exc_info=True)
 
@@ -338,6 +360,60 @@ def _handle_image_message(conv, image_url: str, caption: str, abort_key: Optiona
             )
     except Exception as exc:
         logging.error("[MEDIA_JOB] image agent run failed: %s", exc, exc_info=True)
+    finally:
+        if proc_set:
+            _clear_processing_for_abort_key(abort_key)
+
+
+def _handle_document_message(
+    conv,
+    document_url: str,
+    caption: str,
+    *,
+    content_type: Optional[str],
+    abort_key: Optional[str],
+) -> None:
+    """
+    Document-bearing turn dispatcher (PDFs and similar).
+
+    Same orchestration as ``_handle_image_message`` — pushes the
+    attachment + optional caption into the agent pipeline. The
+    multimodal builder downloads the PDF from the Supabase URL and
+    inlines it as ``file_data`` so the vision-capable planner can
+    classify it (payment-proof receipt vs. other).
+    """
+    business_id = str(conv.business_id) if conv.business_id else ""
+    wa_id = conv.whatsapp_id
+    logging.warning(
+        "[MEDIA_JOB] document handler invoked wa_id=%s business_id=%s "
+        "caption=%r content_type=%s url=%s",
+        wa_id, business_id, caption, content_type, (document_url or "")[:60],
+    )
+    if not (business_id and wa_id):
+        logging.warning("[MEDIA_JOB] document: missing wa_id or business_id, bailing")
+        return
+
+    proc_set = _mark_processing_for_abort_key(abort_key)
+
+    try:
+        from app import create_app
+        from app.handlers.whatsapp_handler import run_agent_and_send_reply
+        attachments = [{
+            "type": "document",
+            "url": document_url,
+            "caption": caption or "",
+            "content_type": content_type or "",
+        }]
+        app = create_app()
+        with app.app_context():
+            run_agent_and_send_reply(
+                wa_id=wa_id,
+                message_text=caption,
+                business_id=business_id,
+                attachments=attachments,
+            )
+    except Exception as exc:
+        logging.error("[MEDIA_JOB] document agent run failed: %s", exc, exc_info=True)
     finally:
         if proc_set:
             _clear_processing_for_abort_key(abort_key)

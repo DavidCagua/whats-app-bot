@@ -589,3 +589,59 @@ class TestDispatchLoopTerminatesOnFinal:
         assert out["message"]  # final text was set
         assert "Lun-Vie 5PM" in out["message"]
         assert out["state_update"] == {"active_agents": ["customer_service"]}
+
+
+class TestHandoffPaymentProofTool:
+    """
+    The handoff_payment_proof tool disables the bot and returns a
+    deterministic thank-you. The LLM decides WHEN to call it (visual
+    classification of the image) — the tool body itself is unconditional.
+    """
+
+    def _invoke(self):
+        ictx = _tool_ctx()
+        token = cs_tools.set_tool_context(ictx)
+        try:
+            return cs_tools.handoff_payment_proof.invoke({
+                "injected_business_context": ictx,
+            })
+        finally:
+            cs_tools.reset_tool_context(token)
+
+    def test_returns_final_thank_you(self):
+        with patch.object(
+            cs_tools.conversation_agent_service, "set_agent_enabled",
+        ) as fake_set:
+            result = self._invoke()
+        assert result.startswith("FINAL|"), (
+            "handoff_payment_proof must return a FINAL sentinel so the "
+            f"dispatch loop terminates without LLM redraft. Got: {result!r}"
+        )
+        text = cs_tools.parse_final(result)
+        assert text is not None
+        assert "comprobante" in text.lower()
+        assert "asesor" in text.lower() or "verifica" in text.lower()
+        # Bot was disabled with the right reason tag.
+        fake_set.assert_called_once()
+        args, kwargs = fake_set.call_args
+        assert args[2] is False, "agent_enabled must be set to False"
+        assert kwargs.get("handoff_reason") == "payment_proof"
+
+    def test_disable_failure_still_returns_thank_you(self):
+        # If the DB write fails (network/etc.), the customer should still
+        # see the thank-you — silent failure beats double-replying.
+        with patch.object(
+            cs_tools.conversation_agent_service, "set_agent_enabled",
+            side_effect=RuntimeError("db down"),
+        ):
+            result = self._invoke()
+        assert result.startswith("FINAL|"), (
+            "Tool must still terminate the turn even when set_agent_enabled "
+            f"raises. Got: {result!r}"
+        )
+
+    def test_tool_is_bound_to_cs_agent(self):
+        # Surface regression: tool must be in the cs_tools tuple, otherwise
+        # the LLM never sees it.
+        names = {t.name for t in cs_tools.cs_tools}
+        assert "handoff_payment_proof" in names

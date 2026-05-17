@@ -658,8 +658,9 @@ export function ConversationMessagesPanel({
       </CardHeader>
 
       {/* Auto-handoff warning: appears when the bot disabled itself
-          (e.g. customer asked for status >50min after placing an order).
-          Sits between the header and the messages so staff can't miss it. */}
+          (e.g. customer asked for status >50min after placing an order,
+          or sent a payment-proof image/PDF). Sits between the header
+          and the messages so staff can't miss it. */}
       {handoffReason === "delivery_handoff" && !agentEnabled && (
         <div
           role="alert"
@@ -671,6 +672,21 @@ export function ConversationMessagesPanel({
             estado del pedido y el bot pasó la conversación a un humano. Verifica
             con el domiciliario y responde tú; cuando termines, vuelve a activar
             el bot.
+          </div>
+        </div>
+      )}
+
+      {handoffReason === "payment_proof" && !agentEnabled && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 border-y border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100 sm:px-4 sm:text-sm"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
+          <div className="flex-1 leading-snug">
+            <strong>Comprobante de pago recibido.</strong> El cliente envió un recibo
+            (imagen o PDF) y el bot pasó la conversación a un humano. Verifica el
+            envío contra el pedido y confirma con el cliente; cuando termines,
+            vuelve a activar el bot.
           </div>
         </div>
       )}

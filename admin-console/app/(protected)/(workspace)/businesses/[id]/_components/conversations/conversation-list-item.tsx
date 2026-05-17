@@ -42,7 +42,16 @@ function ConversationListItemComponent({
     }
   }
 
-  const isAwaitingHandoff = conversation.handoff_reason === "delivery_handoff"
+  // Auto-handoff reasons the CS flow writes when the bot disables
+  // itself and needs a human. Same amber treatment for all; only the
+  // inline label below varies so staff can scan and prioritize.
+  const handoffReason = conversation.handoff_reason
+  const isAwaitingHandoff =
+    handoffReason === "delivery_handoff" || handoffReason === "payment_proof"
+  const handoffLabel =
+    handoffReason === "payment_proof"
+      ? "Comprobante de pago — verificar"
+      : "Esperando seguimiento humano"
 
   return (
     <div
@@ -52,7 +61,11 @@ function ConversationListItemComponent({
       tabIndex={0}
       aria-current={isSelected ? "true" : undefined}
       aria-label={`Open conversation with ${displayName}${isUnread ? " (unread)" : ""}${
-        isAwaitingHandoff ? " (awaiting human follow-up)" : ""
+        isAwaitingHandoff
+          ? handoffReason === "payment_proof"
+            ? " (payment proof to verify)"
+            : " (awaiting human follow-up)"
+          : ""
       }`}
       className={cn(
         "p-3 cursor-pointer hover:bg-accent transition-colors outline-none",
@@ -86,7 +99,7 @@ function ConversationListItemComponent({
       {isAwaitingHandoff && (
         <div className="flex items-center gap-1 mb-1 text-xs font-medium text-amber-700 dark:text-amber-300">
           <AlertTriangle className="h-3 w-3" aria-hidden="true" />
-          <span>Esperando seguimiento humano</span>
+          <span>{handoffLabel}</span>
         </div>
       )}
 

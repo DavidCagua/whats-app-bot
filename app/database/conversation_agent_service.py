@@ -15,6 +15,11 @@ from .models import ConversationAgentSetting, get_db_session
 # threshold disables the bot for delivery follow-up.
 HANDOFF_REASON_DELIVERY = "delivery_handoff"
 
+# Reason tag written when the customer sends an image classified by the CS
+# planner as a payment-proof receipt. Bot thanks the customer and disables
+# itself so a human can verify the transfer against the order.
+HANDOFF_REASON_PAYMENT_PROOF = "payment_proof"
+
 
 class ConversationAgentService:
     """Service for conversation-level agent settings."""

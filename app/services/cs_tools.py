@@ -29,6 +29,10 @@ from typing import Annotated, Any, Dict, List, Optional
 from langchain.tools import tool
 from langchain_core.tools import InjectedToolArg
 
+from ..database.conversation_agent_service import (
+    conversation_agent_service,
+    HANDOFF_REASON_PAYMENT_PROOF,
+)
 from ..database.session_state_service import session_state_service
 from ..orchestration.customer_service_flow import (
     _handle_business_info,
@@ -779,6 +783,53 @@ def cancel_order(
 
 
 @tool
+def handoff_payment_proof(
+    *,
+    injected_business_context: Annotated[dict, InjectedToolArg],
+) -> str:
+    """
+    Hand off the conversation to a human after the customer sends a
+    payment-proof image (comprobante de pago / recibo de Nequi /
+    captura de transferencia / Bre-B / DaviPlata).
+
+    Llama esta herramienta SOLO cuando la imagen adjunta al turno
+    parezca un comprobante de pago: muestra un monto, una fecha, un
+    número de referencia, o el logo de Nequi / DaviPlata / Bre-B /
+    un banco. NO la llames para flyers de promoción, fotos del menú,
+    selfies, ubicaciones, ni capturas de otra app.
+
+    Efecto: desactiva el bot para esta conversación (la UI marca el
+    chat como handoff) y devuelve el agradecimiento final ya escrito.
+    NO redactes la respuesta tú mismo — la herramienta ya devuelve
+    el texto.
+    """
+    ctx = _ctx(injected_business_context)
+    wa_id = ctx.get("wa_id") or ""
+    business_id = ctx.get("business_id") or ""
+
+    try:
+        conversation_agent_service.set_agent_enabled(
+            business_id, wa_id, False,
+            handoff_reason=HANDOFF_REASON_PAYMENT_PROOF,
+        )
+        logger.warning(
+            "[CS_TOOL] handoff_payment_proof: bot disabled "
+            "wa_id=%s business_id=%s", wa_id, business_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "[CS_TOOL] handoff_payment_proof: failed to disable agent "
+            "wa_id=%s business_id=%s: %s",
+            wa_id, business_id, exc, exc_info=True,
+        )
+
+    return _final(
+        "¡Gracias por el comprobante! En un momento un asesor "
+        "verifica el pago."
+    )
+
+
+@tool
 def get_promos(
     include_upcoming_other_days: bool = False,
     *,
@@ -975,6 +1026,7 @@ cs_tools = (
     get_order_status,
     get_order_history,
     cancel_order,
+    handoff_payment_proof,
     get_promos,
     select_listed_promo,
 )
