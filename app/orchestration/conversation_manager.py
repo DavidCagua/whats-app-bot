@@ -291,6 +291,14 @@ class ConversationManager:
                         )
                     except Exception as e:
                         logging.error(f"[CONVERSATION_MANAGER] CTA persist failed: {e}")
+                    # Stamp last_welcome_sent_at so the router suppresses
+                    # the welcome CTA on follow-up messages within the
+                    # 3h window. See business_greeting.was_recently_greeted.
+                    try:
+                        from ..services import business_greeting as _bg
+                        _bg.stamp_welcome_sent(wa_id, business_id)
+                    except Exception as exc:
+                        logging.warning(f"[CONVERSATION_MANAGER] stamp_welcome_sent failed: {exc}")
                     logging.warning("[CONVERSATION_MANAGER] greeting sent via CTA Content Template")
                     return "__SUPPRESS_SEND__"
                 logging.warning(
@@ -310,6 +318,13 @@ class ConversationManager:
                 )
             except Exception as e:
                 logging.error(f"[CONVERSATION_MANAGER] Failed to persist fast-path assistant turn: {e}")
+            # Same stamp on the plain-text greeting fallback — anything
+            # router.direct_reply emits in this branch IS the welcome.
+            try:
+                from ..services import business_greeting as _bg
+                _bg.stamp_welcome_sent(wa_id, business_id)
+            except Exception as exc:
+                logging.warning(f"[CONVERSATION_MANAGER] stamp_welcome_sent (plain-text) failed: {exc}")
             return router_result.direct_reply
 
         # 2. Pick primary + build dispatch segments from router output.

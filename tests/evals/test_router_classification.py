@@ -198,6 +198,66 @@ def test_router_classifies_ordering_opener_as_greeting(phrase, why):
 
 
 # ───────────────────────────────────────────────────────────────────────
+# Follow-up greeting cases — when the customer has already been
+# welcomed within the 3h session window, the router must NOT re-send
+# the welcome CTA on a second greeting / order-opener message. The
+# regex fast-path is skipped; the LLM still tends to classify these
+# as `greeting`, but the router's post-processing drops greeting and
+# routes to `order` so the order agent composes a contextual
+# plain-text reply ("Claro, ¿qué te gustaría pedir?") instead of
+# re-sending the welcome CTA twice in one conversation.
+#
+# Production observation 2026-05-17 / Biela / +573177000722:
+# "Buena noche" → welcome CTA, then "Por favor para pedir un
+# domicilio" → second welcome CTA. The repeat felt robotic.
+# ───────────────────────────────────────────────────────────────────────
+
+
+FOLLOWUP_GREETING_CASES = LLM_GREETING_CASES + [
+    ("hola", "pure greeting on follow-up — also re-routes to order"),
+    ("hola buenas noches", "compound greeting on follow-up — regex fast-path is gated by recently_greeted"),
+]
+
+
+@pytest.mark.parametrize(
+    "phrase, why",
+    [pytest.param(p, w, id=p) for (p, w) in FOLLOWUP_GREETING_CASES],
+)
+def test_router_suppresses_welcome_when_recently_greeted(phrase, why):
+    """When ``was_recently_greeted`` returns True, the router must not
+    emit ``direct_reply`` for greeting-shaped messages. Pure greetings,
+    compound greetings, and order openers without a product all collapse
+    to a single ``order`` segment so the order agent handles the reply."""
+    from app.orchestration import router as _router_mod
+
+    with patch.object(
+        _router_mod.business_greeting, "was_recently_greeted", return_value=True,
+    ):
+        result = _router_mod.route(
+            message_body=phrase,
+            business_context=BIELA_CONTEXT,
+            customer_name="David",
+            wa_id="+573001234567",
+        )
+
+    assert result.direct_reply is None, (
+        f"phrase={phrase!r} ({why}) — expected NO direct_reply on follow-up, "
+        f"got {result.direct_reply!r}"
+    )
+    assert result.segments, (
+        f"phrase={phrase!r} ({why}) — expected segments after greeting "
+        f"suppression, got empty"
+    )
+    # The first segment must be `order` — the followup fallback routes
+    # there regardless of original LLM classification.
+    first_domain = result.segments[0][0]
+    assert first_domain == DOMAIN_ORDER, (
+        f"phrase={phrase!r} ({why}) — expected first segment domain=order, "
+        f"got {first_domain!r}. all_segments={result.segments}"
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────
 # Contextual routing cases.
 #
 # Same surface message routes to different domains depending on the

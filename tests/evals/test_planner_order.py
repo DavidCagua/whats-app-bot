@@ -145,11 +145,14 @@ def _patch_catalog_and_services(fake_session):
             if len(hits) == 1:
                 return dict(hits[0])
             if len(hits) > 1:
-                # Same shape production raises on multiple candidates.
+                # Same shape production raises on multiple matches. The
+                # real constructor takes `matches=` (not `candidates`) —
+                # earlier signature mismatch made the harness crash on
+                # legit ambiguous lookups instead of surfacing them.
                 from app.database.product_order_service import AmbiguousProductError
                 raise AmbiguousProductError(
                     query=product_name,
-                    candidates=[dict(p) for p in hits],
+                    matches=[dict(p) for p in hits],
                 )
         return None
 
@@ -627,3 +630,74 @@ class TestMultiIntentProductPlusDelivery:
             f"cart was mutated (expected qty=1, got items={items})"
         )
         assert oc.get("fulfillment_type") == "pickup"
+
+
+# ---------------------------------------------------------------------------
+# Empty-cart guards — delivery-info tools must refuse before any product
+# is in the cart. Production observation 2026-05-17 / Biela / +573177000722:
+# opener "para un domicilio" with no cart led the model to call
+# get_customer_info + respond(kind='delivery_info_collected'), asking for
+# name/address/phone before the customer picked a product. Hard guards in
+# get_customer_info and submit_delivery_info refuse in this state and tell
+# the model to ask for the product first.
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyCartDeliveryGuard:
+    def test_opener_with_empty_cart_asks_for_product(self, fake_session):
+        """Cart is empty. User says 'para un domicilio'. The agent must
+        NOT ask for delivery info — it must ask what to order.
+
+        Asserted via:
+        - Cart stays empty (no products silently added).
+        - No delivery_info written.
+        - Reply does NOT mention name/address/phone (the delivery-info
+          collection language).
+        - Reply DOES mention ordering / menu / 'qué te gustaría' (the
+          product-question redirect)."""
+        out, oc = _run_planner_turn(
+            fake_session,
+            "para un domicilio",
+        )
+        items = _cart_items(oc)
+        assert len(items) == 0, (
+            f"cart unexpectedly populated on empty-cart opener: items={items}"
+        )
+        delivery = oc.get("delivery_info") or {}
+        assert not delivery, (
+            f"delivery_info written before product chosen: {delivery!r}"
+        )
+        reply = (out.get("message") or "").lower()
+        # The buggy reply mentions name + address + phone (the four-tuple
+        # ask). The fixed reply should ask about the product instead.
+        delivery_words = ("nombre", "dirección", "direccion", "teléfono", "telefono")
+        delivery_hits = [w for w in delivery_words if w in reply]
+        assert len(delivery_hits) < 2, (
+            f"reply still asks for delivery info on empty-cart opener: "
+            f"hits={delivery_hits}. Full reply: {out.get('message')!r}"
+        )
+        product_words = ("qué te gustaría", "que te gustaria", "qué deseas", "menú", "menu", "ordenar", "pedir")
+        product_hits = [w for w in product_words if w in reply]
+        assert product_hits, (
+            f"reply doesn't redirect to product/menu on empty-cart opener: "
+            f"reply={out.get('message')!r}"
+        )
+
+    def test_recoger_with_empty_cart_asks_for_product(self, fake_session):
+        """Same case in pickup mode. 'para recoger' with empty cart →
+        ask for product, don't ask for name."""
+        out, oc = _run_planner_turn(
+            fake_session,
+            "para recoger",
+        )
+        items = _cart_items(oc)
+        assert len(items) == 0, (
+            f"cart unexpectedly populated: items={items}"
+        )
+        reply = (out.get("message") or "").lower()
+        # On pickup, the only required delivery field is name. So at
+        # most one mention of "nombre" — but it shouldn't dominate.
+        assert "dirección" not in reply and "direccion" not in reply, (
+            f"reply asks for address on pickup empty-cart opener: {out.get('message')!r}"
+        )
+

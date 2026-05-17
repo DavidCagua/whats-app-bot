@@ -431,6 +431,91 @@ class TestSubmitDeliveryInfoPaymentValidation:
 
 
 # ---------------------------------------------------------------------------
+# Empty-cart guard on delivery-info tools
+# ---------------------------------------------------------------------------
+
+class TestDeliveryToolsEmptyCartGuard:
+    """get_customer_info and submit_delivery_info must refuse when the cart
+    has no items — the customer must choose a product BEFORE we collect any
+    delivery info. The system prompt's rule 2 covers this in principle, but
+    production observation 2026-05-17 (+573177000722) showed the model
+    bypassing it. These guards make the state machine enforced at the tool
+    layer, not soft-enforced via prompt."""
+
+    def test_get_customer_info_refuses_when_cart_empty(self, fake_session):
+        # Seed: empty session, no cart, no delivery info.
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session):
+            from app.services.order_tools import get_customer_info
+
+            result = get_customer_info.invoke({
+                "injected_business_context": _make_ctx(),
+            })
+
+        assert result.startswith("❌"), f"expected refusal, got: {result!r}"
+        assert "carrito está vacío" in result.lower(), (
+            f"expected empty-cart explanation in refusal: {result!r}"
+        )
+        # The refusal must redirect the model away from delivery-info
+        # collection so it can re-plan with a product question.
+        assert "respond" in result.lower(), (
+            f"expected explicit redirect to respond(...) in refusal: {result!r}"
+        )
+
+    def test_get_customer_info_proceeds_when_cart_has_items(self, fake_session):
+        # Cart has a product → the guard passes; tool runs normally.
+        fake_session._store[(FAKE_WA_ID, FAKE_BUSINESS_ID)] = {
+            "active_agents": [],
+            "order_context": {
+                "items": [{"product_id": "p1", "name": "X", "price": 1, "quantity": 1}],
+            },
+            "booking_context": {},
+            "agent_contexts": {},
+            "last_order_id": None,
+            "last_booking_id": None,
+        }
+        mock_cust_svc = MagicMock()
+        mock_cust_svc.get_customer.return_value = None
+
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session), \
+             patch("app.services.order_tools.customer_service", mock_cust_svc):
+            from app.services.order_tools import get_customer_info
+
+            result = get_customer_info.invoke({
+                "injected_business_context": _make_ctx(),
+            })
+
+        # Normal output shape, NOT the empty-cart refusal.
+        assert result.startswith("DELIVERY_STATUS|"), (
+            f"expected normal DELIVERY_STATUS output, got: {result!r}"
+        )
+
+    def test_submit_delivery_info_refuses_when_cart_empty(self, fake_session):
+        with patch("app.services.order_tools.session_state_service", fake_session), \
+             patch("app.database.session_state_service.session_state_service", fake_session):
+            from app.services.order_tools import submit_delivery_info
+
+            result = submit_delivery_info.invoke({
+                "injected_business_context": _make_ctx(),
+                "name": "David",
+                "address": "Calle 18",
+                "phone": "3001234567",
+                "payment_method": "Efectivo",
+            })
+
+        assert result.startswith("❌"), f"expected refusal, got: {result!r}"
+        assert "carrito está vacío" in result.lower(), (
+            f"expected empty-cart explanation: {result!r}"
+        )
+        # Session must not have been mutated with delivery info.
+        sess = fake_session._store.get((FAKE_WA_ID, FAKE_BUSINESS_ID))
+        if sess is not None:
+            di = (sess.get("order_context") or {}).get("delivery_info") or {}
+            assert not di, f"delivery_info should not be saved: {di!r}"
+
+
+# ---------------------------------------------------------------------------
 # Availability helpers (_product_availability / _search_listing_marker /
 # _detail_availability_note / _format_unavailable_for_cart)
 # ---------------------------------------------------------------------------

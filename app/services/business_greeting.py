@@ -12,8 +12,76 @@ regression. A later cleanup will migrate the hardcoded Biela hours
 fallback into business.settings.hours_text.
 """
 
+import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+# Window after which the welcome CTA is allowed to fire again for the
+# same customer. Set to 3 hours: a Biela shift is ~5 hours and an order
+# resolves in at most ~2 hours, so 3h reliably covers "same visit"
+# without re-greeting customers who come back hours later.
+GREETING_REPEAT_WINDOW = timedelta(hours=3)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def stamp_welcome_sent(wa_id: str, business_id: Optional[str]) -> None:
+    """Record that the welcome was dispatched to this customer.
+
+    Writes ``last_welcome_sent_at`` (ISO-8601 UTC) into session
+    order_context. Both the welcome CTA path and the plain-text
+    fallback should call this on success so the router's
+    ``was_recently_greeted`` check is consistent across paths.
+    """
+    if not wa_id or not business_id:
+        return
+    try:
+        from ..database.session_state_service import session_state_service
+        session_state_service.save(
+            wa_id, str(business_id),
+            {"order_context": {"last_welcome_sent_at": _now_utc().isoformat()}},
+        )
+    except Exception as exc:
+        logger.warning("[GREETING] stamp_welcome_sent failed: %s", exc)
+
+
+def was_recently_greeted(
+    wa_id: str,
+    business_id: Optional[str],
+    *,
+    window: timedelta = GREETING_REPEAT_WINDOW,
+) -> bool:
+    """Return True if the bot dispatched the welcome to this customer
+    within ``window``. Used by the router to suppress repeat welcomes
+    when the conversation is still active.
+
+    Failure-open: if the session can't be loaded, returns False (treats
+    it as "no prior greeting"). The cost of an extra welcome on the
+    cold-start path is small; the cost of suppressing a legit welcome
+    on a stale-session read is larger.
+    """
+    if not wa_id or not business_id:
+        return False
+    try:
+        from ..database.session_state_service import session_state_service
+        result = session_state_service.load(wa_id, str(business_id))
+        order_ctx = (result or {}).get("session", {}).get("order_context") or {}
+        ts_str = order_ctx.get("last_welcome_sent_at")
+        if not ts_str:
+            return False
+        ts = datetime.fromisoformat(ts_str)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (_now_utc() - ts) < window
+    except Exception as exc:
+        logger.warning("[GREETING] was_recently_greeted check failed: %s", exc)
+        return False
 
 
 # Pure greeting detection: message is ONLY a sequence of one or more

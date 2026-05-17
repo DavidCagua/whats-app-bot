@@ -1207,6 +1207,24 @@ def get_customer_info(injected_business_context: Annotated[dict, InjectedToolArg
             return "❌ No se pudo identificar al cliente."
 
         cart = _cart_from_session(wa_id, business_id) if business_id else {}
+
+        # Hard gate: the customer must choose at least one product BEFORE
+        # we start collecting delivery info. The system prompt's rule 2
+        # tells the model this, but the prompt is soft enforcement —
+        # production observation 2026-05-17 / Biela / +573177000722:
+        # opener "para un domicilio" with empty cart caused the model
+        # to call get_customer_info → respond(kind='delivery_info_collected')
+        # and ask for name/address/phone before any product was selected.
+        # This refusal makes the state machine enforced at the tool layer.
+        if not (cart.get("items") or []):
+            return (
+                "❌ El carrito está vacío. Antes de pedir datos de entrega "
+                "el cliente debe elegir al menos un producto. Tu siguiente "
+                "acción es preguntarle qué le gustaría pedir, no recopilar "
+                "datos de entrega. Llama respond(kind='chat' o 'menu_info') "
+                "según corresponda."
+            )
+
         session_delivery = cart.get("delivery_info") or {}
         ftype = (cart.get("fulfillment_type") or "delivery").strip().lower()
 
@@ -1328,6 +1346,20 @@ def submit_delivery_info(
             return "❌ No se pudo identificar la sesión. Intenta de nuevo."
 
         cart = _cart_from_session(wa_id, business_id)
+
+        # Hard gate: refuse before any products have been added. Mirrors
+        # get_customer_info — see that tool's comment. Same incident
+        # (Biela / +573177000722, 2026-05-17): model called submit with
+        # empty cart on an order opener and the renderer asked for
+        # name/address/phone before the customer picked any product.
+        if not (cart.get("items") or []):
+            return (
+                "❌ El carrito está vacío. No se pueden guardar datos de "
+                "entrega antes de que el cliente elija al menos un producto. "
+                "Tu siguiente acción es preguntarle qué le gustaría pedir. "
+                "Llama respond(kind='chat' o 'menu_info') según corresponda."
+            )
+
         existing = (cart.get("delivery_info") or {}).copy()
 
         if name and str(name).strip():

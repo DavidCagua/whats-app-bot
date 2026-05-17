@@ -685,11 +685,23 @@ def route(
     pure greeting on a closed shop announces the closed state inline
     instead of waiting for the customer to send a product first.
     """
+    # Has the bot already sent the welcome to this customer within the
+    # 3h session window? If yes, BOTH the regex greeting fast-path and
+    # the LLM greeting domain are suppressed for this turn — the message
+    # is re-routed through the normal classifier so the order / CS / chat
+    # agent composes a contextual plain-text reply instead of re-sending
+    # the welcome CTA twice in the same conversation.
+    business_id = (business_context or {}).get("business_id")
+    recently_greeted = business_greeting.was_recently_greeted(
+        wa_id or "", str(business_id) if business_id else "",
+    )
+
     # 1. Greeting fast-path
-    greeting = _greeting_fast_path(message_body, business_context, customer_name, gate=gate)
-    if greeting is not None:
-        logger.info("[ROUTER] greeting fast-path hit")
-        return RouterResult(direct_reply=greeting)
+    if not recently_greeted:
+        greeting = _greeting_fast_path(message_body, business_context, customer_name, gate=gate)
+        if greeting is not None:
+            logger.info("[ROUTER] greeting fast-path hit")
+            return RouterResult(direct_reply=greeting)
 
     if not (message_body or "").strip():
         return RouterResult()
@@ -777,21 +789,46 @@ def route(
         logger.warning("[ROUTER] classification failed — caller falls back to primary agent")
         return RouterResult()
 
-    # Greeting domain → render canonical welcome and converge with the
-    # regex fast-path (downstream conversation_manager will upgrade to
-    # the Twilio CTA template when settings.welcome_content_sid is set).
-    # Only fires when greeting is the SOLE segment; if the LLM emits
-    # greeting alongside other intents (shouldn't, per prompt rules) we
-    # drop the greeting and let the substantive segments dispatch.
-    if len(segments) == 1 and segments[0][0] == DOMAIN_GREETING:
-        logger.info("[ROUTER] LLM classified as greeting → direct reply")
-        return RouterResult(
-            direct_reply=business_greeting.get_greeting(business_context, customer_name, gate=gate),
-        )
-    if any(d == DOMAIN_GREETING for d, _ in segments):
-        segments = [(d, t) for d, t in segments if d != DOMAIN_GREETING]
-        if not segments:
-            return RouterResult()
+    # Greeting domain handling
+    # ---------------------------------------------------------------
+    # When the customer has NOT been welcomed in the last 3h (cold or
+    # stale session), greeting classification renders the canonical
+    # welcome CTA — same template every path produces, so the regex
+    # fast-path and the LLM converge on identical output.
+    #
+    # When the customer WAS welcomed recently (`recently_greeted`), the
+    # router suppresses both: a pure greeting routes to `chat` for a
+    # brief plain-text ack, and a greeting mixed with another intent
+    # drops the greeting and lets the substantive segments dispatch.
+    # Re-sending the welcome twice in the same conversation feels
+    # robotic — production observation 2026-05-17 / Biela.
+    if recently_greeted:
+        # When greeting is the sole / lingering signal after a recent
+        # welcome, route to ``order``. Pure repeat greetings ("hola"
+        # / "buenas") AND order-opener phrasings ("para un domicilio")
+        # both arrive here; the order agent composes a natural reply
+        # ("¿qué te gustaría pedir?") in either case using cart/menu
+        # context the chat agent doesn't have. The booking domain has
+        # its own opener routing upstream so this fallback doesn't
+        # need to consider it.
+        if len(segments) == 1 and segments[0][0] == DOMAIN_GREETING:
+            logger.info("[ROUTER] greeting suppressed (recently_greeted) → order fallback")
+            return RouterResult(segments=[(DOMAIN_ORDER, message_body)])
+        if any(d == DOMAIN_GREETING for d, _ in segments):
+            segments = [(d, t) for d, t in segments if d != DOMAIN_GREETING]
+            if not segments:
+                logger.info("[ROUTER] greeting suppressed (recently_greeted) → order fallback")
+                return RouterResult(segments=[(DOMAIN_ORDER, message_body)])
+    else:
+        if len(segments) == 1 and segments[0][0] == DOMAIN_GREETING:
+            logger.info("[ROUTER] LLM classified as greeting → direct reply")
+            return RouterResult(
+                direct_reply=business_greeting.get_greeting(business_context, customer_name, gate=gate),
+            )
+        if any(d == DOMAIN_GREETING for d, _ in segments):
+            segments = [(d, t) for d, t in segments if d != DOMAIN_GREETING]
+            if not segments:
+                return RouterResult()
 
     logger.info(
         "[ROUTER] classified n_segments=%d domains=%s state=%s cart=%s placed=%s",
