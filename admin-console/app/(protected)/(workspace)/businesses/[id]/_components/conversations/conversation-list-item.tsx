@@ -47,11 +47,15 @@ function ConversationListItemComponent({
   // inline label below varies so staff can scan and prioritize.
   const handoffReason = conversation.handoff_reason
   const isAwaitingHandoff =
-    handoffReason === "delivery_handoff" || handoffReason === "payment_proof"
+    handoffReason === "delivery_handoff" ||
+    handoffReason === "payment_proof" ||
+    handoffReason === "human_request"
   const handoffLabel =
     handoffReason === "payment_proof"
       ? "Comprobante de pago — verificar"
-      : "Esperando seguimiento humano"
+      : handoffReason === "human_request"
+        ? "Cliente pidió hablar con asesor"
+        : "Esperando seguimiento humano"
 
   return (
     <div
@@ -64,7 +68,9 @@ function ConversationListItemComponent({
         isAwaitingHandoff
           ? handoffReason === "payment_proof"
             ? " (payment proof to verify)"
-            : " (awaiting human follow-up)"
+            : handoffReason === "human_request"
+              ? " (customer asked for human)"
+              : " (awaiting human follow-up)"
           : ""
       }`}
       className={cn(

@@ -645,3 +645,56 @@ class TestHandoffPaymentProofTool:
         # the LLM never sees it.
         names = {t.name for t in cs_tools.cs_tools}
         assert "handoff_payment_proof" in names
+
+
+class TestRequestHumanHandoffTool:
+    """
+    request_human_handoff disables the bot and returns a deterministic
+    acknowledgement. The LLM decides WHEN to call it (matching explicit
+    "talk to a human" phrases) — the tool body itself is unconditional.
+    """
+
+    def _invoke(self):
+        ictx = _tool_ctx()
+        token = cs_tools.set_tool_context(ictx)
+        try:
+            return cs_tools.request_human_handoff.invoke({
+                "injected_business_context": ictx,
+            })
+        finally:
+            cs_tools.reset_tool_context(token)
+
+    def test_returns_final_acknowledgement(self):
+        with patch.object(
+            cs_tools.conversation_agent_service, "set_agent_enabled",
+        ) as fake_set:
+            result = self._invoke()
+        assert result.startswith("FINAL|"), (
+            "request_human_handoff must return a FINAL sentinel so the "
+            f"dispatch loop terminates without LLM redraft. Got: {result!r}"
+        )
+        text = cs_tools.parse_final(result)
+        assert text is not None
+        assert "asesor" in text.lower()
+        # Bot was disabled with the right reason tag.
+        fake_set.assert_called_once()
+        args, kwargs = fake_set.call_args
+        assert args[2] is False, "agent_enabled must be set to False"
+        assert kwargs.get("handoff_reason") == "human_request"
+
+    def test_disable_failure_still_returns_acknowledgement(self):
+        # DB write failure must not block the customer-facing reply —
+        # silent failure beats double-replying when the operator picks up.
+        with patch.object(
+            cs_tools.conversation_agent_service, "set_agent_enabled",
+            side_effect=RuntimeError("db down"),
+        ):
+            result = self._invoke()
+        assert result.startswith("FINAL|"), (
+            "Tool must still terminate the turn even when set_agent_enabled "
+            f"raises. Got: {result!r}"
+        )
+
+    def test_tool_is_bound_to_cs_agent(self):
+        names = {t.name for t in cs_tools.cs_tools}
+        assert "request_human_handoff" in names

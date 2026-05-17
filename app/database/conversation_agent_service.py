@@ -20,6 +20,12 @@ HANDOFF_REASON_DELIVERY = "delivery_handoff"
 # itself so a human can verify the transfer against the order.
 HANDOFF_REASON_PAYMENT_PROOF = "payment_proof"
 
+# Reason tag written when the customer explicitly asks to speak with a
+# human / advisor ("quiero hablar con un asesor", "comunícame con un
+# humano", etc.). Bot acknowledges and disables itself so an operator
+# can pick up the conversation.
+HANDOFF_REASON_HUMAN_REQUEST = "human_request"
+
 
 class ConversationAgentService:
     """Service for conversation-level agent settings."""

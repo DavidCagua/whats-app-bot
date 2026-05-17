@@ -370,3 +370,68 @@ class TestCancelarDeUnaVezDoesNotDeleteOrder:
             "_handle_cancel_order was invoked despite payment vocab "
             f"in the user message — floor guard regressed. Tools: {tools}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Explicit human-handoff scenarios
+# ---------------------------------------------------------------------------
+
+
+class TestRequestHumanHandoffTriggers:
+    """
+    When the customer explicitly asks to talk to a human / asesor /
+    agente / persona, the planner must call ``request_human_handoff``.
+    Common Colombian phrasings should all trigger — failures here mean
+    the prompt signal list at customer_service_agent.py:161 has
+    regressed and the bot will refuse to escalate.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Quisiera hablar con un asesor",
+            "Quiero comunicarme con un asesor",
+            "Comuníqueme con un humano por favor",
+            "Necesito hablar con alguien del personal",
+            "Páseme con una persona",
+            "Ya no quiero hablar con un bot",
+        ],
+    )
+    def test_explicit_human_request_calls_tool(self, message, caplog):
+        # No prior history needed — these are direct requests on their own.
+        history = [
+            (
+                "assistant",
+                "Tu pedido va en camino, ya casi llega.",
+            ),
+        ]
+        _out, tools = _run_cs_turn(
+            message, recent_history=history, caplog=caplog,
+        )
+        assert "request_human_handoff" in tools, (
+            f"Explicit human-request phrasing {message!r} did not trigger "
+            f"request_human_handoff. Tools logged: {tools}. The prompt "
+            "rule for the human-handoff tool has regressed."
+        )
+
+    def test_bare_gracias_does_not_trigger_handoff(self, caplog):
+        # Conservative side: a plain "gracias" after the bot answered
+        # must NOT trigger a human handoff. The prompt explicitly tells
+        # the planner to skip this case.
+        history = [
+            (
+                "user",
+                "a qué hora abren mañana",
+            ),
+            (
+                "assistant",
+                "Abrimos mañana de 11am a 11pm.",
+            ),
+        ]
+        _out, tools = _run_cs_turn(
+            "gracias", recent_history=history, caplog=caplog,
+        )
+        assert "request_human_handoff" not in tools, (
+            "Bare 'gracias' must not trigger a human handoff. "
+            f"Tools logged: {tools}"
+        )

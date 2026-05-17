@@ -691,6 +691,20 @@ export function ConversationMessagesPanel({
         </div>
       )}
 
+      {handoffReason === "human_request" && !agentEnabled && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 border-y border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100 sm:px-4 sm:text-sm"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
+          <div className="flex-1 leading-snug">
+            <strong>El cliente pidió hablar con un asesor.</strong> El bot pasó
+            la conversación a un humano. Atiende personalmente y cuando
+            termines, vuelve a activar el bot.
+          </div>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="relative flex-1 min-h-0">
         <ScrollArea ref={scrollAreaRef} className="h-full">

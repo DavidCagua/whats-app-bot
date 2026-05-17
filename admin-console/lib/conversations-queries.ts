@@ -14,7 +14,8 @@ export type ConversationGroup = {
   /** Reason the bot is currently disabled, or null if it's active.
    * Auto-set by the customer-service flow:
    *   "delivery_handoff" — 50-min order-status threshold tripped.
-   *   "payment_proof"   — customer sent a receipt image/PDF. */
+   *   "payment_proof"   — customer sent a receipt image/PDF.
+   *   "human_request"   — customer explicitly asked for an asesor / human. */
   handoff_reason: string | null
 }
 
