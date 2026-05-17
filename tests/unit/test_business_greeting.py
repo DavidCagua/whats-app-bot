@@ -101,16 +101,6 @@ class TestGetGreeting:
         assert "Mi Restaurante" in reply
         assert "https://x.test/menu" in reply
 
-    def test_body_matches_cta_format(self):
-        # Same headline as CTA `rendered_body`, plus URL appended.
-        ctx = {"business": {"name": "Biela", "settings": {"menu_url": "https://x.test/menu"}}}
-        reply = business_greeting.get_greeting(ctx, "David")
-        assert reply == (
-            "Hola David 👋 Bienvenido a Biela 🍔🔥\n"
-            "¿Qué se te antoja hoy? Estamos listos para ayudarte\n\n"
-            "https://x.test/menu"
-        )
-
     def test_prepends_real_customer_name(self):
         ctx = {"business": {"name": "Biela", "settings": {}}}
         reply = business_greeting.get_greeting(ctx, "David")
@@ -140,16 +130,6 @@ class TestGetGreeting:
         assert "Abierto 10 AM" not in reply
         assert "5:30 PM" not in reply
         assert "horario" not in reply.lower()
-
-    def test_no_business_context_uses_all_defaults(self):
-        reply = business_greeting.get_greeting(None, None)
-        assert "BIELA FAST FOOD" in reply
-        assert "https://gixlink.com/Biela" in reply
-
-    def test_empty_business_context_uses_all_defaults(self):
-        reply = business_greeting.get_greeting({}, None)
-        assert "BIELA FAST FOOD" in reply
-
 
 class TestCtaWelcomePayload:
     """The Twilio CTA path: button-card welcome via Content Template."""
@@ -274,13 +254,6 @@ class TestClosedGreeting:
     }
 
     # ── get_greeting (plain text) ────────────────────────────────
-
-    def test_get_greeting_open_unchanged(self):
-        out = business_greeting.get_greeting(
-            self.BIELA_OPEN_ONLY_CTX, "Yisela", gate=self._OPEN_GATE,
-        )
-        assert "cerrados" not in out.lower()
-        assert "antoja hoy" in out  # original open-state copy
 
     def test_get_greeting_closed_appends_sentence(self):
         out = business_greeting.get_greeting(

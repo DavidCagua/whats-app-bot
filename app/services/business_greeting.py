@@ -169,6 +169,33 @@ def _is_biela_business(business_context: Optional[dict]) -> bool:
     return str(business_context.get("business_id") or "") in _BIELA_BUSINESS_IDS
 
 
+def _compute_opener(customer_name: Optional[str], is_biela: bool) -> str:
+    """Build the customer-facing opener fragment fed into both the
+    plain-text greeting and the Twilio CTA template's ``{{2}}`` slot.
+
+    For Biela tenants the bot identifies itself as "BielaBot" so the
+    customer knows they're talking to an assistant — without this, the
+    opening "Hola David 👋 Bienvenido a Biela 🍔🔥" looks like it could
+    be from a human operator. The CTA template body ("👋 Bienvenido a
+    Biela 🍔🔥...") stays unchanged; only the opener variable carries
+    the self-intro.
+
+    For non-Biela tenants we keep the neutral opener so the booking
+    flow (clinics, salons) doesn't get a restaurant-flavored self-intro.
+    Each tenant can opt into its own bot self-intro later by extending
+    this helper or a per-tenant override.
+    """
+    first = _first_name(customer_name)
+    has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
+    if is_biela:
+        return (
+            f"Hola {first}, soy BielaBot "
+            if has_real_name
+            else "Hola, soy BielaBot "
+        )
+    return f"Hola {first} " if has_real_name else "Hola "
+
+
 def _closed_sentence_from_gate(
     gate: Optional[dict],
     business: Optional[dict] = None,
@@ -328,9 +355,7 @@ def get_greeting(
         settings = biz.get("settings") or {}
         menu_url = (settings.get("menu_url") or menu_url).strip()
 
-    first = _first_name(customer_name)
-    has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
-    opener = f"Hola {first} " if has_real_name else "Hola "
+    opener = _compute_opener(customer_name, is_biela)
 
     # Brand-flavored copy only for Biela; everyone else gets a neutral
     # booking-friendly opener that works for clinics, salons, etc.
@@ -439,9 +464,7 @@ def cta_welcome_payload(
     biz = business_context.get("business") or {}
     settings = biz.get("settings") or {}
     business_name = (biz.get("name") or _LEGACY_DEFAULT_BUSINESS_NAME).strip()
-    first = _first_name(customer_name)
-    has_real_name = first and first.lower() not in ("usuario", "cliente", "user")
-    opener = f"Hola {first} " if has_real_name else "Hola "
+    opener = _compute_opener(customer_name, _is_biela_business(business_context))
 
     # Closed in ANY shape → no CTA. Plain-text greeting via get_greeting()
     # handles the closed sentence (and alt-branch on fully-closed days).
