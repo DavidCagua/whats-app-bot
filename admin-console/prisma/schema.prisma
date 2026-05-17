@@ -234,9 +234,11 @@ model orders {
   display_number              Int
   display_date                DateTime                      @db.Date
   ready_at                    DateTime?                     @db.Timestamptz(6)
-  out_for_delivery_at         DateTime?                     @db.Timestamptz(6)
   created_via                 String                        @default("bot") @db.VarChar(20)
   cancelled_by                String?                       @db.VarChar(20)
+  out_for_delivery_at         DateTime?                     @db.Timestamptz(6)
+  last_edited_at              DateTime?                     @db.Timestamptz(6)
+  last_edit_acknowledged_at   DateTime?                     @db.Timestamptz(6)
   conversation_daily_analyses conversation_daily_analyses[]
   order_items                 order_items[]
   order_promotions            order_promotions[]
@@ -252,6 +254,7 @@ model orders {
   @@index([business_id, display_date], map: "idx_orders_business_display_date")
   @@index([created_via], map: "idx_orders_created_via")
   @@index([cancelled_by], map: "idx_orders_cancelled_by")
+  @@index([business_id, last_edited_at, last_edit_acknowledged_at], map: "idx_orders_unacked_edits")
 }
 
 model order_counters {

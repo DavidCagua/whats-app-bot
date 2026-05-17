@@ -22,6 +22,10 @@ export type OrderRow = {
   /** True when this order's conversation has been auto-handed off to
    * a human (e.g. customer asked for status >50min after placement). */
   awaiting_handoff: boolean
+  /** True when an operator edited this order via the admin UI and no
+   * one has clicked "Marcar revisado" since. Cleared by acknowledge
+   * action or by the order reaching a terminal status. */
+  hasUnackedEdit: boolean
   items: {
     id: string
     quantity: number
@@ -85,6 +89,16 @@ export async function getOrdersForBusiness(
     // Orders only persist total_amount = subtotal + delivery_fee. Reverse-
     // engineer the fee for display; clamp to 0 to defend against legacy rows.
     const deliveryFee = Math.max(0, totalAmount - subtotal)
+    const status = order.status ?? "pending"
+    // hasUnackedEdit: an operator edit is outstanding when the edit
+    // marker is set, the ack is missing or older, and the order is
+    // still active. Terminal orders never show the warning.
+    const isTerminal = status === "completed" || status === "cancelled"
+    const hasUnackedEdit =
+      !isTerminal &&
+      order.last_edited_at !== null &&
+      (order.last_edit_acknowledged_at === null ||
+        order.last_edit_acknowledged_at < order.last_edited_at)
     return {
       id: order.id,
       display_number: order.display_number,
@@ -100,8 +114,9 @@ export async function getOrdersForBusiness(
       delivery_fee: deliveryFee,
       fulfillment_type: order.fulfillment_type === "pickup" ? "pickup" : "delivery",
       notes: order.notes ?? null,
-      status: order.status ?? "pending",
+      status,
       awaiting_handoff: order.whatsapp_id ? handoffWaIds.has(order.whatsapp_id) : false,
+      hasUnackedEdit,
       items,
     }
   })
@@ -114,12 +129,14 @@ export type OrderBannerCounts = {
   inFlight: number
   /** Conversations the bot auto-handed off to a human (e.g. delivery follow-up). */
   awaitingHandoff: number
+  /** Active orders an operator edited and that no one has yet acknowledged. */
+  unreviewedEdits: number
 }
 
 export async function getOrderBannerCounts(
   businessId: string
 ): Promise<OrderBannerCounts> {
-  const [pending, inFlight, awaitingHandoff] = await Promise.all([
+  const [pending, inFlight, awaitingHandoff, unreviewedEdits] = await Promise.all([
     prisma.orders.count({
       where: { business_id: businessId, status: "pending" },
     }),
@@ -132,6 +149,25 @@ export async function getOrderBannerCounts(
     prisma.conversation_agent_settings.count({
       where: { business_id: businessId, handoff_reason: { not: null } },
     }),
+    // Unreviewed-edits count. Mirrors the `hasUnackedEdit` flag the
+    // row mapper computes per order, but expressed in SQL: edited at
+    // least once, no ack since the latest edit, and still active.
+    // Indexed by idx_orders_unacked_edits (partial index in Alembic
+    // migration q2l4m7n9o1k5_orders_edit_review). Prisma's typed
+    // filter API can't express column-vs-column inequality, so we
+    // drop to raw SQL — single round-trip and the partial index makes
+    // it cheap.
+    prisma.$queryRaw<{ count: bigint }[]>`
+      SELECT COUNT(*)::bigint AS count
+      FROM orders
+      WHERE business_id = ${businessId}::uuid
+        AND status NOT IN ('completed', 'cancelled')
+        AND last_edited_at IS NOT NULL
+        AND (
+          last_edit_acknowledged_at IS NULL
+          OR last_edit_acknowledged_at < last_edited_at
+        )
+    `.then((rows) => Number(rows[0]?.count ?? 0)),
   ])
-  return { pending, inFlight, awaitingHandoff }
+  return { pending, inFlight, awaitingHandoff, unreviewedEdits }
 }

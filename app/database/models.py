@@ -622,6 +622,13 @@ class Order(Base):
     # orders. `cancelled_by` stays NULL until a cancel transition fires.
     created_via = Column(String(20), nullable=False, default='bot', server_default='bot')
     cancelled_by = Column(String(20), nullable=True)
+    # Operator-edit review tracking. Bumped by the admin "edit order" action
+    # only (customer-initiated cart changes don't touch these). An order has
+    # an unreviewed edit when last_edited_at IS NOT NULL AND
+    # (last_edit_acknowledged_at IS NULL OR last_edit_acknowledged_at <
+    # last_edited_at) AND status NOT IN ('completed', 'cancelled').
+    last_edited_at = Column(DateTime(timezone=True), nullable=True)
+    last_edit_acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, server_default=func.now(), onupdate=_utcnow, nullable=False)
 

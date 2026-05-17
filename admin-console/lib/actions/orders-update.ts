@@ -172,6 +172,12 @@ export async function updateOrder(input: UpdateOrderInput): Promise<Result> {
           contact_phone: input.contactPhone?.trim() || null,
           payment_method: isPickup ? null : input.paymentMethod?.trim() || null,
           updated_at: new Date(),
+          // Bump the edit-review marker so the orders table flags this
+          // row as "edited by operator — somebody should double-check".
+          // Clear the prior ack so a stale acknowledgement from a
+          // previous edit cycle doesn't accidentally cover the new one.
+          last_edited_at: new Date(),
+          last_edit_acknowledged_at: null,
           order_items: {
             create: input.items.map((i) => ({
               product_id: i.productId,

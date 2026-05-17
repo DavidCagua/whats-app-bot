@@ -37,7 +37,7 @@ export default async function BusinessLayout({ children, params }: BusinessLayou
     getWorkspaceSwitcherBusinesses(session),
     ordersEnabled
       ? getOrderBannerCounts(id)
-      : Promise.resolve({ pending: 0, inFlight: 0, awaitingHandoff: 0 }),
+      : Promise.resolve({ pending: 0, inFlight: 0, awaitingHandoff: 0, unreviewedEdits: 0 }),
   ])
 
   return (

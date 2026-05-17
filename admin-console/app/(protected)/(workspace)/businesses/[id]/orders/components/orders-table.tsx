@@ -23,11 +23,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { Bell, BellOff, BellRing, ChevronLeft, ChevronRight, Pencil, Printer } from "lucide-react"
+import { BadgeCheck, Bell, BellOff, BellRing, ChevronLeft, ChevronRight, Pencil, Printer } from "lucide-react"
 import { format } from "date-fns"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
 import { updateOrderStatus } from "@/lib/actions/orders"
+import { acknowledgeOrderEdit } from "@/lib/actions/orders-ack-edit"
 import { canSetStatus } from "@/lib/order-status-gating"
 import {
   type OrderStatus,
@@ -163,6 +164,7 @@ export function OrdersTable({
   const { from: initialFrom, to: initialTo } = initialRange
   const [orders, setOrders] = useState<OrderRow[]>(initialOrders)
   const [updating, setUpdating] = useState<string | null>(null)
+  const [acknowledgingId, setAcknowledgingId] = useState<string | null>(null)
   const [range, setRange] = useState<DateRange>(initialRange)
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null)
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null)
@@ -446,6 +448,32 @@ export function OrdersTable({
     }
   }
 
+  async function handleAcknowledgeEdit(orderId: string) {
+    setAcknowledgingId(orderId)
+    // Optimistic: clear the row's warning immediately so the operator
+    // doesn't see the amber row after they've clicked "revisado". If
+    // the server action fails we roll back below.
+    setOrders((prev) =>
+      prev.map((o) => (o.id === orderId ? { ...o, hasUnackedEdit: false } : o)),
+    )
+    try {
+      const result = await acknowledgeOrderEdit(orderId)
+      if (!result.success) throw new Error(result.error)
+      toast.success("Marcado como revisado")
+    } catch (err) {
+      // Roll back. The next SSE snapshot will reconcile in case the
+      // failure was partial.
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId ? { ...o, hasUnackedEdit: true } : o,
+        ),
+      )
+      toast.error(err instanceof Error ? err.message : "No se pudo marcar")
+    } finally {
+      setAcknowledgingId(null)
+    }
+  }
+
   const showActivateBanner = !alertsEnabled
   const audioWillPlay = alertsEnabled && audioUnlocked
 
@@ -605,6 +633,14 @@ export function OrdersTable({
                   className={cn(
                     order.status === "pending" && "order-row-pending",
                     recentIds.has(order.id) && "order-row-pulse",
+                    // Operator-edit warning: someone edited this order
+                    // via the admin UI and nobody has marked it reviewed.
+                    // Amber treatment matches the conversations
+                    // delivery-handoff / payment-proof pattern. Listed
+                    // BEFORE the red awaiting_handoff class so red wins
+                    // when both fire (utility order = priority).
+                    order.hasUnackedEdit &&
+                      "bg-amber-50 hover:bg-amber-100 border-l-4 border-l-amber-500 dark:bg-amber-950/40 dark:hover:bg-amber-950/60",
                     // Auto-handoff: customer asked for status >50min after
                     // placement and the bot escalated to a human. Light
                     // red signals "act now" — distinct from the amber
@@ -752,6 +788,20 @@ export function OrdersTable({
                       >
                         <Pencil className="h-4 w-4" />
                       </Button>
+                      {order.hasUnackedEdit && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleAcknowledgeEdit(order.id)}
+                          disabled={acknowledgingId === order.id}
+                          aria-label="Marcar como revisado"
+                          title="Marcar como revisado"
+                          className="text-amber-700 hover:text-amber-900 hover:bg-amber-100 dark:text-amber-300 dark:hover:text-amber-100 dark:hover:bg-amber-900/40"
+                        >
+                          <BadgeCheck className="h-4 w-4" />
+                        </Button>
+                      )}
                       <Button
                         type="button"
                         variant="ghost"

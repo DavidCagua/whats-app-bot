@@ -10,6 +10,7 @@ type Counts = {
   pending: number
   inFlight: number
   awaitingHandoff: number
+  unreviewedEdits: number
 }
 
 type OrdersAttentionBannerProps = {
@@ -33,6 +34,7 @@ const parseDismissed = (raw: string | null): Counts | null => {
       pending: Number(parsed.pending) || 0,
       inFlight: Number(parsed.inFlight) || 0,
       awaitingHandoff: Number(parsed.awaitingHandoff) || 0,
+      unreviewedEdits: Number(parsed.unreviewedEdits) || 0,
     }
   } catch {
     return null
@@ -102,12 +104,16 @@ export function OrdersAttentionBanner({
   }
 
   const nothingToShow =
-    counts.pending === 0 && counts.inFlight === 0 && counts.awaitingHandoff === 0
+    counts.pending === 0 &&
+    counts.inFlight === 0 &&
+    counts.awaitingHandoff === 0 &&
+    counts.unreviewedEdits === 0
   const dismissedCovers =
     dismissedAt !== null &&
     dismissedAt.pending >= counts.pending &&
     dismissedAt.inFlight >= counts.inFlight &&
-    dismissedAt.awaitingHandoff >= counts.awaitingHandoff
+    dismissedAt.awaitingHandoff >= counts.awaitingHandoff &&
+    dismissedAt.unreviewedEdits >= counts.unreviewedEdits
 
   if (nothingToShow || dismissedCovers) return null
 
@@ -155,6 +161,23 @@ export function OrdersAttentionBanner({
             {counts.awaitingHandoff === 1
               ? "conversación esperando seguimiento"
               : "conversaciones esperando seguimiento"}
+          </Link>
+        )}
+        {(counts.pending > 0 || counts.inFlight > 0 || counts.awaitingHandoff > 0) &&
+          counts.unreviewedEdits > 0 && (
+            <span aria-hidden className="text-amber-900/40 dark:text-amber-100/40">
+              ·
+            </span>
+          )}
+        {counts.unreviewedEdits > 0 && (
+          <Link
+            href={ordersHref}
+            className="font-semibold hover:underline text-amber-900 dark:text-amber-100"
+          >
+            <strong>{counts.unreviewedEdits}</strong>{" "}
+            {counts.unreviewedEdits === 1
+              ? "pedido editado por revisar"
+              : "pedidos editados por revisar"}
           </Link>
         )}
       </div>
